@@ -11,10 +11,20 @@ import { uiToApi, widgetNamesFromObjectInfo } from "../core/workflow/uiToApi.ts"
 import { type RefSource, StashedResult, runInpaint } from "../app/generate.ts";
 import { type ProfileState, type Services, type Settings, store } from "../app/services.ts";
 import type { DocInfo, TaskGroup, Version } from "../ps/host.ts";
+import { log, withTimeout } from "../app/log.ts";
 import { openCalibration } from "./calibrate.ts";
 import { h, icon, replace } from "./dom.ts";
 
 type Conn = { state: "checking" | "ok" | "down"; text: string };
+
+/** Accepts "127.0.0.1", "127.0.0.1:8188", "http://host:port/" … and returns "http://host:port". */
+export function normalizeUrl(input: string): string {
+  let s = input.trim().replace(/\/+$/, "");
+  if (!s) return "http://127.0.0.1:8188";
+  if (!/^https?:\/\//i.test(s)) s = "http://" + s;
+  if (!/^https?:\/\/[^/]+:\d+/i.test(s) && /^http:/i.test(s)) s = s.replace(/^(http:\/\/[^/]+)/i, "$1:8188");
+  return s;
+}
 type RefSlot = RefSource & { thumb?: string };
 
 export function mountApp(root: HTMLElement, svc: Services) {
@@ -223,7 +233,7 @@ export function mountApp(root: HTMLElement, svc: Services) {
       group = doc ? await svc.host.activeTaskGroup() : null;
       if (group) ({ versions, currentCompId: currentComp } = await svc.host.versions(group));
       else { versions = []; currentComp = null; }
-    } catch (e) { console.warn("刷新 Photoshop 状态失败", e); }
+    } catch (e) { log("warn", "refresh failed", e); }
     finally { refreshing = false; }
     renderHistory(); renderSelection(); renderAction();
     if (again) { again = false; void refresh(); }
@@ -236,33 +246,51 @@ export function mountApp(root: HTMLElement, svc: Services) {
   }
 
   // ── connection ──
-  async function checkConn() {
+  /** Returns null on success, else the raw error text (also logged). */
+  async function checkConn(): Promise<string | null> {
     conn = { state: "checking", text: "连接中…" }; renderConn();
+    let error: string | null = null;
     try {
-      const s = await comfy.systemStats();
+      const s = await withTimeout(comfy.systemStats(), 6000, "连接 ComfyUI ");
       conn = { state: "ok", text: "ComfyUI " + (s.system?.comfyui_version ?? "") };
+      log("info", "connected", comfy.base, s.system?.comfyui_version);
     } catch (e) {
+      const err = e as Error;
+      error = `${err.name && err.name !== "Error" ? err.name + "：" : ""}${err.message}`;
       conn = { state: "down", text: "未连接" };
-      setStatus((e as Error).message, "error");
+      log("error", "connect failed", comfy.base, err);
+      setStatus(error, "error");
     }
     renderConn(); renderAction();
+    return error;
   }
 
   function openSettings() {
-    const url = h("input", { class: "field", value: settings.comfyUrl }) as HTMLInputElement;
+    const url = h("input", { class: "field", value: settings.comfyUrl, placeholder: "127.0.0.1:8188" }) as HTMLInputElement;
+    const result = h("div", { class: "conn-result" });
+    const show = (kind: "ok" | "error" | "info", text: string) => replace(result, h("span", { class: "dot " + kind }), h("span", null, text));
+    const connect = async () => {
+      settings.comfyUrl = normalizeUrl(url.value);
+      url.value = settings.comfyUrl;
+      store.saveSettings(settings);
+      comfy = svc.comfy(settings.comfyUrl);
+      show("info", "正在连接 " + settings.comfyUrl + " …");
+      const error = await checkConn();
+      if (error) show("error", error);
+      else { show("ok", conn.text + " · 已连接"); setStatus("已连接 " + settings.comfyUrl, "ok"); setTimeout(() => sheet.remove(), 700); }
+    };
     const sheet = h("div", { class: "sheet" },
       h("div", { class: "sheet-head" }, h("span", { class: "sheet-title" }, "ComfyUI 连接"),
         h("button", { class: "icon-btn", onClick: () => sheet.remove() }, icon("close"))),
       h("div", { class: "sheet-body" },
         h("div", { class: "group-label" }, "地址"), url,
-        h("div", { class: "muted small" }, "插件只调用 ComfyUI 自带的接口，不需要安装节点或修改启动参数。")),
+        h("div", { class: "muted small" }, "可以只填 IP 和端口，例如 127.0.0.1:8188。插件只调用 ComfyUI 自带的接口，不需要安装节点或修改启动参数。"),
+        result),
       h("div", { class: "sheet-foot" },
-        h("button", { class: "btn", onClick: () => sheet.remove() }, "取消"),
-        h("button", { class: "btn primary", onClick: () => {
-          settings.comfyUrl = url.value.trim().replace(/\/$/, "") || "http://127.0.0.1:8188";
-          store.saveSettings(settings); comfy = svc.comfy(settings.comfyUrl); sheet.remove(); void checkConn();
-        } }, "保存并连接")));
+        h("button", { class: "btn", onClick: () => sheet.remove() }, "关闭"),
+        h("button", { class: "btn primary", onClick: () => void connect() }, "保存并连接")));
     sheetHost.append(sheet);
+    if (conn.state === "down" && status.kind === "error") show("error", status.text);
   }
 
   // ── workflows ──
@@ -405,6 +433,7 @@ export function mountApp(root: HTMLElement, svc: Services) {
       if (ps.seedMode === "random") { ps.seed = res.seed; store.saveState(p.id, ps); }
       setStatus(`${res.continued ? "已追加" : "已新建任务组并写入"}版本 ${res.version.label} · seed ${res.seed}`, "ok");
     } catch (e) {
+      log("error", "generate failed", e);
       if (e instanceof StashedResult) { stash = e.png; setStatus(e.message, "error"); }
       else setStatus(current.signal.aborted ? "已取消" : (e as Error).message, current.signal.aborted ? "info" : "error");
     } finally {
@@ -427,6 +456,9 @@ export function mountApp(root: HTMLElement, svc: Services) {
   }
 
   // ── start ──
+  window.addEventListener("error", e => { log("error", "uncaught", (e as ErrorEvent).error ?? (e as ErrorEvent).message); setStatus("插件内部错误：" + ((e as ErrorEvent).message ?? ""), "error"); });
+  window.addEventListener("unhandledrejection", e => { log("error", "unhandled", (e as PromiseRejectionEvent).reason); setStatus("插件内部错误：" + String((e as PromiseRejectionEvent).reason?.message ?? (e as PromiseRejectionEvent).reason), "error"); });
+  log("info", "start", svc.version, svc.host.kind, settings.comfyUrl);
   renderAll();
   svc.host.onChange(() => void refresh());
   void refresh();

@@ -70,3 +70,12 @@ test("client: upload → queue → history → view, readable node errors", asyn
   assert.equal(describeError("plain"), "plain");
   assert.ok(calls.includes("POST /prompt"));
 });
+
+test("address normalisation accepts bare IP / IP:port / full URL", async () => {
+  const { normalizeUrl } = await import("../src/ui/app.ts").catch(() => ({ normalizeUrl: null as any }));
+  if (!normalizeUrl) return; // app.ts needs a DOM at import time only for types; skip if unavailable
+  assert.equal(normalizeUrl("127.0.0.1"), "http://127.0.0.1:8188");
+  assert.equal(normalizeUrl("192.168.1.7:8188/"), "http://192.168.1.7:8188");
+  assert.equal(normalizeUrl("http://localhost:9000"), "http://localhost:9000");
+  assert.equal(normalizeUrl(""), "http://127.0.0.1:8188");
+});

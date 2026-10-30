@@ -3,11 +3,25 @@
 import { ComfyClient } from "./core/comfy/client.ts";
 import type { Services } from "./app/services.ts";
 import { UxpHost } from "./ps/uxpHost.ts";
+import { log, setLogSink } from "./app/log.ts";
 import { mountApp } from "./ui/app.ts";
 
 declare const require: (m: string) => any;
 
-const { localFileSystem: fs, formats } = require("uxp").storage;
+const uxp = require("uxp");
+const { localFileSystem: fs, formats } = uxp.storage;
+const VERSION = "0.1.1";
+
+// diagnostic log file in the plugin data folder (readable without the UXP developer console)
+let logFile: Promise<any> | null = null;
+setLogSink(async line => {
+  logFile ??= (async () => {
+    const dir = await fs.getDataFolder();
+    try { return await dir.getEntry("waveplug.log"); } catch { return dir.createFile("waveplug.log", { overwrite: false }); }
+  })();
+  await (await logFile).write(line, { append: true, format: formats.utf8 });
+});
+log("info", "uxp", JSON.stringify(uxp.versions ?? {}), "host", JSON.stringify(uxp.host ?? {}));
 
 const services: Services = {
   host: new UxpHost(),
@@ -31,7 +45,12 @@ const services: Services = {
     await f.write(png, { format: formats.binary });
     return true;
   },
-  version: "0.1.0",
+  version: VERSION,
 };
 
-mountApp(document.getElementById("app")!, services);
+try {
+  mountApp(document.getElementById("app")!, services);
+} catch (e) {
+  log("error", "mount failed", e);
+  document.getElementById("app")!.textContent = "WavePlug Studio 启动失败：" + (e as Error).message;
+}
