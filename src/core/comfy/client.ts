@@ -17,7 +17,9 @@ export type JobEvent =
   | { type: "progress"; promptId: string; value: number; max: number; node: string | null }
   | { type: "done"; promptId: string }
   | { type: "error"; promptId: string; message: string; node?: string }
-  | { type: "interrupted"; promptId: string };
+  | { type: "interrupted"; promptId: string }
+  /** nodes ComfyUI reused from its cache (loaders listed here were NOT reloaded) */
+  | { type: "cached"; promptId: string; nodes: string[] };
 
 /** UTF-8 encoder — UXP has no TextEncoder/TextDecoder. */
 export function utf8(s: string): Uint8Array {
@@ -145,6 +147,7 @@ export class ComfyClient {
     switch (msg.type) {
       case "executing": if (id && d.node !== null) fire({ type: "running", promptId: id, node: d.node ?? null }); break;
       case "progress": if (id) fire({ type: "progress", promptId: id, value: d.value, max: d.max, node: d.node ?? null }); break;
+      case "execution_cached": if (id) fire({ type: "cached", promptId: id, nodes: (d.nodes ?? []).map(String) }); break;
       case "execution_success": if (id) fire({ type: "done", promptId: id }); break;
       case "execution_error": if (id) fire({ type: "error", promptId: id, message: d.exception_message ?? "执行出错", node: d.node_id }); break;
       case "execution_interrupted": if (id) fire({ type: "interrupted", promptId: id }); break;
@@ -216,4 +219,11 @@ export function describeError(body: unknown): string | null {
     for (const x of e.errors ?? []) parts.push(`#${id} ${e.class_type}：${x.message}${x.details ? " " + x.details : ""}`);
   }
   return parts.length ? parts.join("；") : null;
+}
+
+/** Width/height from a PNG header without decoding it. */
+export function pngSize(bytes: Uint8Array): { width: number; height: number } | null {
+  if (bytes.length < 24 || bytes[0] !== 0x89 || bytes[1] !== 0x50) return null;
+  const dv = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+  return { width: dv.getUint32(16), height: dv.getUint32(20) };
 }

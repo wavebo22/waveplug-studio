@@ -562,6 +562,7 @@ export function mountApp(root: HTMLElement, svc: Services) {
         stage: t => { current.stage = t; current.detail = ""; renderAction(); },
         progress: (f, t) => { current.progress = f; current.detail = t ?? ""; renderAction(); renderHistory(); },
         promptQueued: id => { current.promptId = id; },
+        debug: svc.debugSave,
       });
       try { store.saveThumb(res.group.taskId, res.version.label, await svc.host.thumbnail(res.group, 96)); } catch (e) { console.warn("缩略图失败", e); }
       if (ps.seedMode === "random") { ps.seed = res.seed; store.saveState(p.id, ps); }

@@ -5,6 +5,7 @@ import type { Pixels } from "../core/image/png.ts";
 import { type Rect, rectH, rectW } from "../core/image/region.ts";
 import { readCounter, writeCounter } from "../core/xmp.ts";
 import { placeGray } from "../core/image/compose.ts";
+import { log } from "../app/log.ts";
 import type { Capture, DocInfo, LayerInfo, PsHost, TaskGroup, Version } from "./host.ts";
 
 declare const require: (m: string) => any;
@@ -213,11 +214,8 @@ export class UxpHost implements PsHost {
       const hc = ctx.hostControl;
       const suspension = await hc.suspendHistory({ documentID: docId, name: "WavePlug 新建任务组" });
       try {
-        const layer = await doc.createPixelLayer({ name: "WavePlug_" + taskId });
-        const img = await imaging.createImageDataFromBuffer(base.data, { width: base.width, height: base.height, components: base.channels, colorSpace: "RGB", colorProfile: SRGB, chunky: true });
-        try { await imaging.putPixels({ documentID: docId, layerID: layer.id, imageData: img, targetBounds: { left: groupRect.left, top: groupRect.top } }); }
-        finally { img.dispose(); }
-        await selectLayer(layer.id);
+        const baseId = await this.baseLayer(doc, docId, groupRect, base, taskId);
+        await selectLayer(baseId);
         await play([{ _obj: "newPlacedLayer", _options: DONT }]);
         const so = doc.activeLayers[0];
         so.name = "AI 结果 · " + taskId;
@@ -232,6 +230,35 @@ export class UxpHost implements PsHost {
         throw e;
       }
     });
+  }
+
+  /** Original pixels of the group area as a new layer. RGB data is converted by Photoshop when the
+   *  document is CMYK; if that fails, the layer is copied from a stamp of the visible document. */
+  private async baseLayer(doc: any, docId: number, r: Rect, base: Pixels, taskId: string): Promise<number> {
+    const { imaging } = ps();
+    const layer = await doc.createPixelLayer({ name: "WavePlug_" + taskId });
+    try {
+      const img = await imaging.createImageDataFromBuffer(base.data, { width: base.width, height: base.height, components: base.channels, colorSpace: "RGB", colorProfile: SRGB, chunky: true });
+      try { await imaging.putPixels({ documentID: docId, layerID: layer.id, imageData: img, targetBounds: { left: r.left, top: r.top } }); }
+      finally { img.dispose(); }
+      return layer.id;
+    } catch (e) {
+      log("warn", "putPixels failed, copying from visible pixels instead", String(doc.mode), e);
+      await play([{ _obj: "delete", _target: [{ _ref: "layer", _id: layer.id }], _options: DONT }]);
+    }
+    const px = (v: number) => ({ _unit: "pixelsUnit", _value: v });
+    let stampId: number | null = null;
+    if (doc.layers.length > 1) {
+      await play([{ _obj: "mergeVisible", duplicate: true, _options: DONT }]);
+      stampId = doc.activeLayers[0].id;
+    } else await selectLayer(doc.layers[0].id);
+    await play([{ _obj: "set", _target: [{ _ref: "channel", _property: "selection" }], to: { _obj: "rectangle", top: px(r.top), left: px(r.left), bottom: px(r.bottom), right: px(r.right) }, _options: DONT }]);
+    await play([{ _obj: "copyToLayer", _options: DONT }]);
+    const id = doc.activeLayers[0].id;
+    doc.activeLayers[0].name = "WavePlug_" + taskId;
+    if (stampId !== null) await play([{ _obj: "delete", _target: [{ _ref: "layer", _id: stampId }], _options: DONT }]);
+    await play([{ _obj: "set", _target: [{ _ref: "channel", _property: "selection" }], to: { _enum: "ordinal", _value: "none" }, _options: DONT }]);
+    return id;
   }
 
   async appendVersion(g: TaskGroup, png: Uint8Array, placement: Rect, comment: string): Promise<Version> {

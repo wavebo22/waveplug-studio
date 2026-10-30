@@ -11,7 +11,7 @@ declare const require: (m: string) => any;
 
 const uxp = require("uxp");
 const { localFileSystem: fs, formats } = uxp.storage;
-const VERSION = "0.1.11";
+const VERSION = "0.1.12";
 
 // Diagnostic log: plugin data folder, mirrored into the project's reports folder on F: when that
 // drive is reachable, so it can be read without the UXP developer console.
@@ -39,6 +39,13 @@ const services: Services = {
   host: new UxpHost(),
   comfy: base => new ComfyClient(base, { fetch: uxpFetch, WebSocket }),
   diagnose,
+  debugSave(name, png) {
+    void (async () => {
+      for (const url of [`file:F:/waveplug/studio/reports/debug_${name}`, `file:///F:/waveplug/studio/reports/debug_${name}`]) {
+        try { const f = await fs.createEntryWithUrl(url, { overwrite: true }); await f.write(png, { format: formats.binary }); return; } catch { /* next form */ }
+      }
+    })();
+  },
   async pickJson() {
     const f = await fs.getFileForOpening({ types: ["json"] });
     return f ? { name: f.name, text: await f.read({ format: formats.utf8 }) } : null;
