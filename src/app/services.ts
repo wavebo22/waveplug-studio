@@ -13,6 +13,8 @@ export interface Services {
   pickJson(): Promise<{ name: string; text: string } | null>;
   pickImage(): Promise<PickedImage | null>;
   saveImage(png: Uint8Array, suggested: string): Promise<boolean>;
+  /** Tries every transport against the ComfyUI address; one human-readable line per check. */
+  diagnose?(base: string): Promise<string[]>;
   version: string;
 }
 

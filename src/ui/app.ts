@@ -270,6 +270,7 @@ export function mountApp(root: HTMLElement, svc: Services) {
     const result = h("div", { class: "conn-result" });
     const show = (kind: "ok" | "error" | "info", text: string) => replace(result, h("span", { class: "dot " + kind }), h("span", null, text));
     const connect = async () => {
+      show("info", "正在保存…");
       settings.comfyUrl = normalizeUrl(url.value);
       url.value = settings.comfyUrl;
       store.saveSettings(settings);
@@ -287,6 +288,12 @@ export function mountApp(root: HTMLElement, svc: Services) {
         h("div", { class: "muted small" }, "可以只填 IP 和端口，例如 127.0.0.1:8188。插件只调用 ComfyUI 自带的接口，不需要安装节点或修改启动参数。"),
         result),
       h("div", { class: "sheet-foot" },
+        svc.diagnose ? h("button", { class: "btn", title: "逐项测试 fetch / XHR / WebSocket，结果同时写入日志", onClick: async () => {
+          settings.comfyUrl = normalizeUrl(url.value); url.value = settings.comfyUrl;
+          show("info", "诊断中…");
+          const lines = await svc.diagnose!(settings.comfyUrl).catch(e => ["诊断失败：" + (e as Error).message]);
+          replace(result, h("pre", { class: "diag" }, lines.join("\n")));
+        } }, "诊断") : null,
         h("button", { class: "btn", onClick: () => sheet.remove() }, "关闭"),
         h("button", { class: "btn primary", onClick: () => void connect() }, "保存并连接")));
     sheetHost.append(sheet);

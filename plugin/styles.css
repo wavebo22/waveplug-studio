@@ -173,3 +173,4 @@ select.field { padding-right: 2px; }
 .sheet-body .check-row + .muted { margin-top: 8px; margin-bottom: 4px; }
 .conn-result { display: flex; align-items: flex-start; margin-top: 10px; font-size: 10px; overflow-wrap: anywhere; word-break: break-all; }
 .conn-result .dot { margin: 4px 6px 0 0; }
+.diag { white-space: pre-wrap; word-break: break-all; font-family: Consolas, Menlo, monospace; font-size: 10px; margin: 10px 0 0; padding: 6px; background: var(--field); border: 1px solid var(--field-line); border-radius: var(--r); user-select: text; }
