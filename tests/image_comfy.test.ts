@@ -79,3 +79,16 @@ test("address normalisation accepts bare IP / IP:port / full URL", async () => {
   assert.equal(normalizeUrl("http://localhost:9000"), "http://localhost:9000");
   assert.equal(normalizeUrl(""), "http://127.0.0.1:8188");
 });
+
+test("multipart upload works without TextEncoder (UXP has none)", async () => {
+  const saved = (globalThis as any).TextEncoder;
+  (globalThis as any).TextEncoder = undefined;
+  try {
+    let body: Uint8Array | null = null;
+    const c = new ComfyClient("http://h", { fetch: (async (_u: string, init?: RequestInit) => { body = init!.body as Uint8Array; return new Response(JSON.stringify({ name: "x.png", subfolder: "waveplug" })); }) as typeof fetch });
+    await c.uploadImage(new Uint8Array([137, 80]), "参考 1.png");
+    const text = Buffer.from(body!).toString("utf8");
+    assert.match(text, /filename="参考 1\.png"/);
+    assert.match(text, /name="subfolder"\r\n\r\nwaveplug\r\n/);
+  } finally { (globalThis as any).TextEncoder = saved; }
+});

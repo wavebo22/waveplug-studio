@@ -19,6 +19,19 @@ export type JobEvent =
   | { type: "error"; promptId: string; message: string; node?: string }
   | { type: "interrupted"; promptId: string };
 
+/** UTF-8 encoder — UXP has no TextEncoder/TextDecoder. */
+export function utf8(s: string): Uint8Array {
+  const out: number[] = [];
+  for (const ch of s) {
+    let c = ch.codePointAt(0)!;
+    if (c < 0x80) out.push(c);
+    else if (c < 0x800) out.push(0xc0 | (c >> 6), 0x80 | (c & 63));
+    else if (c < 0x10000) out.push(0xe0 | (c >> 12), 0x80 | ((c >> 6) & 63), 0x80 | (c & 63));
+    else { out.push(0xf0 | (c >> 18), 0x80 | ((c >> 12) & 63), 0x80 | ((c >> 6) & 63), 0x80 | (c & 63)); c = 0; }
+  }
+  return new Uint8Array(out);
+}
+
 export class ComfyError extends Error {
   readonly detail: unknown;
   constructor(message: string, detail?: unknown) { super(message); this.detail = detail; }
@@ -65,7 +78,7 @@ export class ComfyClient {
   async uploadImage(bytes: Uint8Array, name: string, subfolder = "waveplug"): Promise<string> {
     // multipart body built by hand: UXP's FormData/Blob support varies between host versions
     const boundary = "----waveplug" + Math.random().toString(36).slice(2);
-    const enc = new TextEncoder();
+    const enc = { encode: utf8 };
     const field = (k: string, v: string) => `--${boundary}\r\nContent-Disposition: form-data; name="${k}"\r\n\r\n${v}\r\n`;
     const head = enc.encode(field("subfolder", subfolder) + field("type", "input") + field("overwrite", "true") +
       `--${boundary}\r\nContent-Disposition: form-data; name="image"; filename="${name}"\r\nContent-Type: image/png\r\n\r\n`);

@@ -56,11 +56,31 @@ export function mountApp(root: HTMLElement, svc: Services) {
   const statusEl = h("div", { class: "status" });
   const sheetHost = h("div", { class: "sheet-host" });
 
+  const mainEl = h("main", { class: "scroll" });
+  const footEl = h("footer", { class: "foot" });
+  // UXP draws native text fields above everything regardless of z-index, so while a sheet is open
+  // the work area is taken out of the DOM (not hidden — a visibility toggle coincided with a host
+  // crash in 0.1.4) and put back when the last sheet closes. Element state (prompt text) is kept.
+  const syncSheets = () => {
+    const open = !!sheetHost.querySelector(".sheet");
+    if (open && mainEl.parentNode) mainEl.remove();
+    else if (!open && !mainEl.parentNode) root.insertBefore(mainEl, footEl);
+  };
+  const appendToHost = sheetHost.append.bind(sheetHost);
+  sheetHost.append = (...nodes: (Node | string)[]) => {
+    for (const n of nodes) if (n instanceof HTMLElement && n.classList.contains("sheet")) {
+      const detach = n.remove.bind(n);
+      n.remove = () => { detach(); syncSheets(); };
+    }
+    appendToHost(...nodes);
+    syncSheets();
+  };
+
   root.append(
     h("header", { class: "top" },
       h("div", { class: "brand" }, h("span", { class: "mark" }, "W"), h("span", null, "WavePlug Studio")),
       connEl),
-    h("main", { class: "scroll" },
+    (mainEl.append(
       h("section", { class: "block" },
         h("div", { class: "label-row" }, h("span", { class: "label" }, "版本"), targetEl),
         historyEl),
@@ -75,8 +95,8 @@ export function mountApp(root: HTMLElement, svc: Services) {
             h("input", { type: "checkbox", checked: true, disabled: true }), h("span", null, "参考当前画面")),
           selEl)),
       h("section", { class: "block" }, genBtn, progEl),
-      h("section", { class: "block adv" }, advHead, advBody)),
-    h("footer", { class: "foot" }, statusEl, h("span", { class: "ver" }, svc.version)),
+      h("section", { class: "block adv" }, advHead, advBody)), mainEl),
+    (footEl.append(statusEl, h("span", { class: "ver" }, svc.version)), footEl),
     sheetHost);
 
   prompt.addEventListener("input", () => { if (pstate && profile) { pstate.prompt = prompt.value; store.saveState(profile.id, pstate); } });
