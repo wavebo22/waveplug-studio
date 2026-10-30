@@ -71,6 +71,8 @@ export interface PsHost {
 
   variations(g: FillGroup): Promise<Variation[]>;
   showVariation(g: FillGroup, layerId: number): Promise<void>;
+  /** Shows / hides the whole fill (compare with the original). Not recorded in history. */
+  setFillVisible(g: FillGroup, visible: boolean): Promise<void>;
   deleteVariation(g: FillGroup, layerId: number): Promise<void>;
   /** New, empty fill group for the area `rect`. */
   createFillGroup(docId: number, rect: Rect, prompt: string): Promise<FillGroup>;

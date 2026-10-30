@@ -236,6 +236,13 @@ export class UxpHost implements PsHost {
     });
   }
 
+  async setFillVisible(g: FillGroup, visible: boolean): Promise<void> {
+    await modal("WavePlug 对比原图", async () => {
+      const group = findLayer(docById(g.docId).layers, g.layerId);
+      if (group) group.visible = visible;
+    });
+  }
+
   async deleteVariation(g: FillGroup, layerId: number): Promise<void> {
     await step("WavePlug 删除变体", g.docId, async () => {
       const doc = docById(g.docId);

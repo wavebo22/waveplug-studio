@@ -18,6 +18,21 @@ import { h, icon, replace } from "./dom.ts";
 
 type Conn = { state: "checking" | "ok" | "down"; text: string };
 
+/** Prompt optimisers (an LLM rewriting the prompt) are slow and off unless the user turns them on. */
+const OPTIMIZER = /提示词优化|prompt\s*optimi[sz]/i;
+function defaultParam(b: Binding, base: unknown): number | boolean {
+  return typeof base === "boolean" && OPTIMIZER.test(b.label ?? b.title ?? "") ? false : (base as number | boolean);
+}
+function effectiveParams(p: Profile, ps: ProfileState): Record<string, number | boolean> {
+  const out: Record<string, number | boolean> = {};
+  for (const b of p.bindings.filter(x => x.role === "param")) {
+    const k = b.nodeId + "." + b.input;
+    const d = defaultParam(b, p.api[b.nodeId]?.inputs[b.input]);
+    if (d !== p.api[b.nodeId]?.inputs[b.input]) out[k] = d;
+  }
+  return { ...out, ...ps.params };
+}
+
 const OLD_HINTS = ["描述要画进选区的内容；留空 = 移除选区内的内容", "描述要画进选区的内容"];
 /** Strips hint text that older versions' placeholder may have merged into the prompt. */
 export function cleanPrompt(s: string): string {
@@ -81,7 +96,11 @@ export function mountApp(root: HTMLElement, svc: Services) {
   const fillSel = h("select", { class: "field fill-sel", title: "当前填充（切换其他图层不会改变它）" }) as HTMLSelectElement;
   fillSel.addEventListener("change", () => { if (doc) { pinned.set(doc.id, Number(fillSel.value)); choice = null; void refresh(); } });
   const regenBtn = h("button", { class: "regen", onClick: () => void regenerate() }, icon("refresh", 12), h("span", null, "再生成"));
-  const flowSel = h("select", { class: "field grow", title: "工作流" });
+  const flowName = h("span", { class: "flow-name" });
+  const flowBtn = h("button", { class: "flow-btn", title: "切换、导入或校准工作流", onClick: () => openWorkflows() }, icon("flow", 14), flowName, icon("chevron", 12));
+  const countSel = h("select", { class: "field count-sel", title: "这次生成几个变体" }, ...[1, 2, 3, 4].map(n => h("option", { value: String(n) }, `× ${n}`))) as HTMLSelectElement;
+  countSel.addEventListener("change", () => { if (pstate && profile) { pstate.count = Number(countSel.value); store.saveState(profile.id, pstate); } });
+  const compareBtn = h("button", { class: "icon-btn sm compare", title: "按住查看原图（隐藏当前填充）" }, icon("eye", 14));
   const prompt = h("textarea", { class: "prompt", rows: 4 }) as HTMLTextAreaElement;
   const refsEl = h("div", { class: "refs" });
   const promptHint = h("div", { class: "prompt-hint" });
@@ -115,32 +134,30 @@ export function mountApp(root: HTMLElement, svc: Services) {
 
   root.append(
     h("header", { class: "top" },
-      h("div", { class: "brand" }, h("span", { class: "mark" }, "W"), h("span", null, "WavePlug Studio"),
-        svc.devReload ? h("button", { class: "icon-btn dev-reload", title: "重新加载开发版代码（F:\\waveplug\\studio\\dist\\plugin）", onClick: () => svc.devReload!() }, icon("refresh")) : null),
-      connEl),
+      h("div", { class: "brand" }, h("span", { class: "mark" }, "W"), h("span", { class: "brand-name" }, "WavePlug"),
+        svc.devReload ? h("button", { class: "icon-btn dev-reload", title: "重新加载开发版代码（F:\\waveplug\\studio\\dist\\plugin）", onClick: () => svc.devReload!() }, icon("refresh", 13)) : null),
+      h("div", { class: "top-right" }, flowBtn, connEl)),
     (mainEl.append(
-      h("section", { class: "block" },
-        h("div", { class: "label-row" }, h("span", { class: "label" }, "工作流"),
-          h("div", { class: "row tools" },
-            h("button", { class: "icon-btn sm", title: "接口校准", onClick: () => calibrate() }, icon("sliders", 12)),
-            h("button", { class: "icon-btn sm", title: "导入工作流", onClick: () => importMenu() }, icon("plus", 12)))),
-        flowSel),
-      h("section", { class: "block tight" },
-        h("div", { class: "label-row" }, h("span", { class: "label" }, "提示词")),
+      h("section", { class: "card" },
         prompt, promptHint, refsEl,
-        h("div", { class: "ctx-row" }, targetEl, selEl)),
-      h("section", { class: "block" }, genBtn, progEl),
-      h("section", { class: "block" },
-        h("div", { class: "label-row" }, h("span", { class: "label" }, "变体"), h("div", { class: "row tools" }, varCountEl, regenBtn)),
+        h("div", { class: "ctx-row" }, targetEl, selEl),
+        h("div", { class: "gen-row" }, countSel, genBtn),
+        progEl),
+      h("section", { class: "card" },
+        h("div", { class: "card-head" }, h("span", { class: "label" }, "变体"), varCountEl, h("span", { class: "grow" }), compareBtn, regenBtn),
         fillSel,
         historyEl, varPromptEl),
-      h("section", { class: "block adv" }, advHead, advBody)), mainEl),
+      h("section", { class: "card adv" }, advHead, advBody)), mainEl),
     (footEl.append(statusEl, h("span", { class: "ver" }, svc.version)), footEl),
     sheetHost);
 
   prompt.addEventListener("input", () => { promptHint.hidden = !!prompt.value; });
   prompt.addEventListener("input", () => { if (pstate && profile) { pstate.prompt = prompt.value; store.saveState(profile.id, pstate); } });
-  flowSel.addEventListener("change", () => selectProfile(flowSel.value));
+  // compare: hold to see the original (the fill group hidden), release to restore
+  const showOriginal = (hide: boolean) => { if (group && !run) void svc.host.setFillVisible(group, !hide).catch(e => log("warn", "compare", e)); compareBtn.classList.toggle("on", hide); };
+  compareBtn.addEventListener("mousedown", () => showOriginal(true));
+  compareBtn.addEventListener("mouseup", () => showOriginal(false));
+  compareBtn.addEventListener("mouseleave", () => { if (compareBtn.classList.contains("on")) showOriginal(false); });
   genBtn.addEventListener("click", () => (run ? cancel() : generate()));
   advHead.addEventListener("click", () => { settings.advancedOpen = !settings.advancedOpen; store.saveSettings(settings); renderAdvanced(); });
 
@@ -154,7 +171,8 @@ export function mountApp(root: HTMLElement, svc: Services) {
 
   function renderConn() {
     connEl.className = "conn " + conn.state;
-    replace(connEl, h("span", { class: "dot" }), h("span", null, conn.text));
+    connEl.title = conn.text + " · " + settings.comfyUrl + "（点击设置）";
+    replace(connEl, h("span", { class: "dot" }), h("span", null, conn.state === "ok" ? "已连接" : conn.state === "checking" ? conn.text : "未连接"));
   }
 
   function renderHistory() {
@@ -209,11 +227,10 @@ export function mountApp(root: HTMLElement, svc: Services) {
   }
 
   function renderFlows() {
-    replace(flowSel, ...(profiles.length
-      ? profiles.map(p => h("option", { value: p.id }, p.name + (validateProfile(p).length ? "（需校准）" : "")))
-      : [h("option", { value: "" }, "尚未导入工作流")]));
-    flowSel.value = profile?.id ?? "";
-    flowSel.disabled = !profiles.length || !!run;
+    flowName.textContent = profile ? profile.name : "导入工作流";
+    flowBtn.title = profile ? `工作流：${profile.name}（点击切换、导入或校准）` : "导入 ComfyUI 工作流";
+    flowBtn.classList.toggle("warn", !!profile && validateProfile(profile).length > 0);
+    countSel.value = String(pstate?.count ?? 1);
     const allowEmpty = profile?.options.allowEmptyPrompt;
     // UXP's native textarea can merge its placeholder into the typed text, so the hint lives outside it
     promptHint.textContent = allowEmpty ? "描述要画进选区的内容；留空 = 移除选区内的内容" : "描述要画进选区的内容";
@@ -283,7 +300,7 @@ export function mountApp(root: HTMLElement, svc: Services) {
     for (const b of p.bindings.filter(x => x.role === "param")) {
       const k = b.nodeId + "." + b.input;
       const base = p.api[b.nodeId]?.inputs[b.input];
-      const val = k in ps.params ? ps.params[k] : (base as number | boolean);
+      const val = k in ps.params ? ps.params[k] : defaultParam(b, base);
       const label = h("span", { class: "param-label", title: `#${b.nodeId}.${b.input}` }, b.label ?? b.input);
       if (typeof base === "boolean") {
         rows.push(h("label", { class: "param check-row" }, h("input", { type: "checkbox", checked: !!val, onChange: (e: Event) => { ps.params[k] = (e.target as HTMLInputElement).checked; save(); } }), label));
@@ -317,10 +334,6 @@ export function mountApp(root: HTMLElement, svc: Services) {
         h("span", { class: "param-label" }, "只重绘选区内")));
     }
     {
-      const count = h("select", { class: "field" }, ...[1, 2, 3, 4].map(n => h("option", { value: String(n) }, `${n} 个`))) as HTMLSelectElement;
-      count.value = String(ps.count ?? 1);
-      count.addEventListener("change", () => { ps.count = Number(count.value); save(); });
-      rows.push(h("div", { class: "param" }, h("div", { class: "param-top" }, h("span", { class: "param-label" }, "每次生成变体数")), h("div", { class: "param-ctl" }, count)));
       rows.push(h("label", { class: "param check-row", title: "生成前调用 ComfyUI 自带的「释放」接口，清空节点缓存并卸载模型，让工作流每个节点都重新执行。结果与使用缓存时相同，但每次都要重新加载模型，明显更慢" },
         h("input", { type: "checkbox", checked: !!ps.fullRun, onChange: (e: Event) => { ps.fullRun = (e.target as HTMLInputElement).checked; save(); } }),
         h("span", { class: "param-label" }, "每次完整运行（不使用 ComfyUI 缓存，较慢）")));
@@ -478,6 +491,25 @@ export function mountApp(root: HTMLElement, svc: Services) {
     settings.activeProfile = profile?.id ?? null; store.saveSettings(settings);
     for (const k of Object.keys(refs)) delete refs[Number(k)];
     renderFlows(); renderRefs(); renderAction(); renderAdvanced();
+  }
+
+  function openWorkflows() {
+    const sheet: HTMLElement = h("div", { class: "sheet" },
+      h("div", { class: "sheet-head" }, h("span", { class: "sheet-title" }, "工作流"),
+        h("button", { class: "icon-btn", title: "关闭", onClick: () => sheet.remove() }, icon("close"))),
+      h("div", { class: "sheet-body" },
+        profiles.length ? null : h("div", { class: "muted" }, "还没有导入工作流。"),
+        ...profiles.map(p => {
+          const bad = validateProfile(p).length > 0;
+          return h("button", { class: "menu-item flow-item" + (p.id === profile?.id ? " on" : ""), onClick: () => { selectProfile(p.id); sheet.remove(); } },
+            icon(p.id === profile?.id ? "check" : "flow"),
+            h("span", { class: "grow" }, h("b", null, p.name), h("span", { class: "muted small block" },
+              (p.source?.kind === "comfy" ? "ComfyUI 已保存的工作流" : "API JSON") + (bad ? " · 需要校准" : ""))));
+        })),
+      h("div", { class: "sheet-foot" },
+        profile ? h("button", { class: "btn", onClick: () => { sheet.remove(); void calibrate(); } }, "校准当前") : null,
+        h("button", { class: "btn primary", onClick: () => { sheet.remove(); importMenu(); } }, "导入工作流")));
+    sheetHost.append(sheet);
   }
 
   function importMenu() {
@@ -726,7 +758,7 @@ export function mountApp(root: HTMLElement, svc: Services) {
     renderAll();
     try {
       const res = await runInpaint(svc.host, comfy, {
-        profile: p, prompt: again ? again.prompt : cleanPrompt(prompt.value), seed: ps.seedMode === "fixed" ? ps.seed : null, params: ps.params,
+        profile: p, prompt: again ? again.prompt : cleanPrompt(prompt.value), seed: ps.seedMode === "fixed" ? ps.seed : null, params: effectiveParams(p, ps),
         addTo: again ? again.addTo : willAdd() ? group ?? undefined : undefined,
         references: Object.fromEntries(Object.entries(refs).map(([k, v]) => [k, v])),
         count: ps.count ?? 1,
