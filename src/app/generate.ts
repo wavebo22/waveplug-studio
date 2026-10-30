@@ -5,7 +5,7 @@
 import { encodePng, type Pixels } from "../core/image/png.ts";
 import { imageFile, isEmptySelection, maskFile } from "../core/image/compose.ts";
 import { type Rect, clampRect, expand, rectH, rectW } from "../core/image/region.ts";
-import { type Comfy, type JobEvent, outputImage, pngSize } from "../core/comfy/client.ts";
+import { type Comfy, type JobEvent, outputImage, pngSize, utf8 } from "../core/comfy/client.ts";
 import { log } from "./log.ts";
 import { prepareRun } from "../core/workflow/inject.ts";
 import type { Profile } from "../core/workflow/profile.ts";
@@ -34,8 +34,8 @@ export interface RunHooks {
   /** called after each variation has been written */
   variationAdded?(group: FillGroup, v: Variation, seed: number): void;
   promptQueued?(promptId: string): void;
-  /** Saves a copy of an exchanged image for diagnosis (optional). */
-  debug?(name: string, png: Uint8Array): void;
+  /** Saves a copy of an exchanged file (images, the submitted workflow) for diagnosis (optional). */
+  debug?(name: string, bytes: Uint8Array): void;
   signal: { aborted: boolean };
 }
 
@@ -132,6 +132,8 @@ export async function runInpaint(host: PsHost, comfy: Comfy, input: RunInput, ho
     const run = prepareRun(profile, { ...values, prompt: input.prompt, negative: input.negative, seed: input.seed === null ? null : input.seed + k, params: input.params });
     log("info", "run", JSON.stringify({ prompt: input.prompt, seed: run.seed, profile: profile.name, localMask: !!profile.options.localMask?.enabled, continued: !!target }));
     if (input.fullRun) { hooks.stage("清空 ComfyUI 缓存" + tag); await comfy.freeCache(); }
+    // the exact execution copy — can be dragged into ComfyUI to inspect or re-run it there
+    hooks.debug?.(`${stamp}_workflow${k ? "_" + k : ""}.json`, utf8(JSON.stringify(run.api, null, 1)));
     const job = await comfy.queue(run.api);
     hooks.promptQueued?.(job.promptId);
     hooks.stage("排队中" + tag);
