@@ -365,7 +365,7 @@ export function mountApp(root: HTMLElement, svc: Services) {
               setStatus("转换为 API 格式…");
               const [ui, info] = await Promise.all([comfy.readWorkflow(pickSel.value), comfy.objectInfo()]);
               const { api, warnings } = uiToApi(ui, info);
-              await adopt(pickSel.value.split("/").pop()!.replace(/\.json$/, ""), api, warnings);
+              await adopt(pickSel.value.split("/").pop()!.replace(/\.json$/, ""), api, warnings, { kind: "comfy", path: pickSel.value });
               if (warnings.length) { log("warn", "conversion", warnings); setStatus("转换提示：" + warnings[0] + (warnings.length > 1 ? ` 等 ${warnings.length} 条` : ""), "error"); }
             } catch (e) { setStatus("导入失败：" + (e as Error).message, "error"); }
           } }, "导入")));
@@ -422,21 +422,21 @@ export function mountApp(root: HTMLElement, svc: Services) {
   }
 
   /** New import, or re-import of a workflow with the same name: carry valid bindings over. */
-  async function adopt(name: string, api: ReturnType<typeof asApiGraph>, warnings: string[]) {
+  async function adopt(name: string, api: ReturnType<typeof asApiGraph>, warnings: string[], source: Profile["source"] = { kind: "file" }) {
     const rec = recognize(api);
     if (warnings.length) rec.notes.push(...warnings);
     const old = profiles.find(p => p.name === name);
     if (old) {
       const c = carryOver(old, api);
       if (!c.broken.length && !validateProfile(c.profile).length) {
-        Object.assign(old, { ...c.profile, updatedAt: Date.now() });
+        Object.assign(old, { ...c.profile, source, updatedAt: Date.now() });
         saveProfiles(old.id);
         setStatus(`已更新「${old.name}」，原有绑定全部有效`, "ok");
         return;
       }
       const result = await openCalibration(sheetHost, api, rec, { name, bindings: c.profile.bindings, options: c.profile.options }, false);
       if (!result) return;
-      Object.assign(old, { ...c.profile, name: result.name, bindings: result.bindings, options: result.options, updatedAt: Date.now() });
+      Object.assign(old, { ...c.profile, source, name: result.name, bindings: result.bindings, options: result.options, updatedAt: Date.now() });
       saveProfiles(old.id);
       setStatus(`已更新「${old.name}」：保留 ${c.kept.length} 项，自动迁移 ${c.remapped.length} 项` + (c.broken.length ? `，${c.broken.length} 项已重新绑定` : ""), "ok");
       return;
@@ -450,6 +450,7 @@ export function mountApp(root: HTMLElement, svc: Services) {
       if (choice === "ok") {
         const p = newProfile(name, api, auto);
         p.options = options;
+        p.source = source;
         profiles.push(p);
         saveProfiles(p.id);
         setStatus(`已导入「${p.name}」，可以开始生成`, "ok");
@@ -460,6 +461,7 @@ export function mountApp(root: HTMLElement, svc: Services) {
     if (!result) return;
     const p = newProfile(result.name, api, result.bindings);
     p.options = result.options;
+    p.source = source;
     profiles.push(p);
     saveProfiles(p.id);
     setStatus(`已导入「${p.name}」`, "ok");
@@ -504,12 +506,47 @@ export function mountApp(root: HTMLElement, svc: Services) {
   }
 
   // ── generate ──
+  let objectInfo: Awaited<ReturnType<Comfy["objectInfo"]>> | null = null;
+
+  /**
+   * Re-reads a ComfyUI-saved workflow and converts it with the current converter, so edits made in
+   * ComfyUI (and converter fixes) take effect without re-importing. Older profiles without a
+   * recorded source are matched to a saved workflow of the same name. Returns an error or null.
+   */
+  async function syncProfile(p: Profile): Promise<string | null> {
+    if (p.source?.kind === "file") return null;
+    let path = p.source?.kind === "comfy" ? p.source.path : null;
+    if (!path) {
+      const list = await comfy.listWorkflows().catch(() => [] as string[]);
+      path = list.find(x => x.split("/").pop()!.replace(/\.json$/, "") === p.name) ?? null;
+      if (!path) return null;
+    }
+    try {
+      setStatus("同步 ComfyUI 工作流…");
+      objectInfo ??= await comfy.objectInfo();
+      const { api, warnings } = uiToApi(await comfy.readWorkflow(path), objectInfo);
+      const bad = warnings.filter(w => /错位/.test(w));
+      if (bad.length) { log("warn", "conversion", warnings); return "工作流转换有疑问：" + bad.join("；"); }
+      const c = carryOver(p, api);
+      if (c.broken.length) return `ComfyUI 中的工作流已修改，${c.broken.length} 项绑定失效（${c.broken[0].reason}），请点「接口校准」重新确认`;
+      Object.assign(p, { api: c.profile.api, bindings: c.profile.bindings, source: { kind: "comfy", path }, updatedAt: Date.now() });
+      store.saveProfiles(profiles);
+      log("info", "workflow synced", path, c.remapped.length ? `remapped ${c.remapped.length}` : "");
+      return null;
+    } catch (e) {
+      log("warn", "workflow sync failed", path, e);
+      return "读取 ComfyUI 工作流失败：" + (e as Error).message;
+    }
+  }
+
   async function generate() {
     if (!profile || !pstate || run) return;
     await checkConn();
     await refresh();
     const why = blockedReason();
     if (why) { setStatus(why, "error"); return; }
+    const syncError = await syncProfile(profile);
+    if (syncError) { setStatus(syncError, "error"); return; }
     const p = profile, ps = pstate;
     run = { stage: "准备中…", progress: null, detail: "", signal: { aborted: false } };
     const current = run;

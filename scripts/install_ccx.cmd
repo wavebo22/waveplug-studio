@@ -1,5 +1,5 @@
 @echo off
-rem Installs the newest WavePlug Studio .ccx with Adobe UPIA.
+rem Installs the most recently built WavePlug Studio .ccx with Adobe UPIA (by file date: 0.1.10 sorts before 0.1.9 by name).
 rem Close Photoshop, then right-click this file -> Run as administrator (a non-elevated run returned -432 on mainpc).
 chcp 65001 >nul
 setlocal
@@ -7,7 +7,7 @@ set "UPIA=J:\AI things\OpenLayer\Adobe-UPIA-Extract\UPI64-unpacked\UnifiedPlugin
 set "ROOT=%~dp0.."
 set "LOG=%ROOT%\reports\install_%DATE:~0,4%%DATE:~5,2%%DATE:~8,2%_%RANDOM%.log"
 set "CCX="
-for /f "delims=" %%f in ('dir /b /o:n "%ROOT%\releases\WavePlug_Studio_*_local.ccx"') do set "CCX=%ROOT%\releases\%%f"
+for /f "delims=" %%f in ('dir /b /o:d "%ROOT%\releases\WavePlug_Studio_*_local.ccx"') do set "CCX=%ROOT%\releases\%%f"
 
 rem UPIA resolves a root-relative Adobe user path against its current drive.
 rem Keep the working drive on the user's profile drive, even when run from F:.
