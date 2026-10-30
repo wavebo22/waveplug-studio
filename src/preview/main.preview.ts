@@ -114,6 +114,8 @@ async function boot() {
     async pickJson() { return null; },
     async pickImage() { return { name: "参考.png", bytes: new Uint8Array(), url: swatch(3, 80, 80) }; },
     async saveImage() { return true; },
+    async pickLauncher() { return "J:\\AI things\\ComfyUI\\ComfyUI_windows_portable\\run_nvidia_gpu.bat"; },
+    async launch() { setTimeout(() => { comfy.online = true; }, 5000); return null; },
     version: "0.1.0 preview",
   };
   mountApp(document.getElementById("app")!, svc);

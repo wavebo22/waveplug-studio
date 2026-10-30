@@ -251,3 +251,4 @@ select.field { padding-right: 2px; }
 .fill-sel { margin-bottom: 8px; }
 .target.switchable { cursor: pointer; }
 .target.switchable:hover { border-color: var(--accent-hi); color: var(--text); }
+.launch-row > * + * { margin-left: 4px; }

@@ -12,7 +12,7 @@ declare const require: (m: string) => any;
 const uxp = require("uxp");
 const { localFileSystem: fs, formats } = uxp.storage;
 declare const __BUILT_AT__: string;
-const VERSION = "1.2.0";
+const VERSION = "1.3.0";
 const DEV = typeof (globalThis as any).__waveplugDevReload === "function";
 
 // Diagnostic log: plugin data folder, mirrored into the project's reports folder on F: when that
@@ -52,6 +52,15 @@ const services: Services = {
       }
     })();
   } : undefined,
+  async pickLauncher() {
+    const f = await fs.getFileForOpening({ types: ["bat", "cmd", "exe"] });
+    return f ? f.nativePath : null;
+  },
+  async launch(path) {
+    // shows Photoshop's own confirmation the first time; returns "" on success
+    try { const r = await uxp.shell.openPath(path); return r ? String(r) : null; }
+    catch (e) { return (e as Error).message; }
+  },
   async pickJson() {
     const f = await fs.getFileForOpening({ types: ["json"] });
     return f ? { name: f.name, text: await f.read({ format: formats.utf8 }) } : null;

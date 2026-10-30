@@ -267,7 +267,8 @@ export function mountApp(root: HTMLElement, svc: Services) {
     genBtn.title = why ?? "";
     replace(genBtn, icon("spark"), h("span", null, willAdd() ? "生成更多变体" : "生成"));
     progEl.hidden = !why;
-    replace(progEl, why ? h("div", { class: "stage muted" }, why) : null);
+    replace(progEl, why ? h("div", { class: "stage muted" }, why,
+      conn.state === "down" && svc.launch ? h("button", { class: "link", onClick: () => void launchComfy() }, settings.comfyLaunch ? "  一键启动" : "  设置启动文件") : null) : null);
   }
 
   function renderAdvanced() {
@@ -386,9 +387,39 @@ export function mountApp(root: HTMLElement, svc: Services) {
     return error;
   }
 
+  let launching = false;
+  /** Starts ComfyUI with the configured script and waits (up to 3 min) until it answers. */
+  async function launchComfy(report: (kind: "ok" | "error" | "info", text: string) => void = (k, t) => setStatus(t, k)) {
+    if (!svc.launch || launching) return;
+    if (!settings.comfyLaunch) { report("error", "请先在「ComfyUI 连接」中选择 ComfyUI 的启动文件"); openSettings(); return; }
+    launching = true;
+    try {
+      log("info", "launch comfy", settings.comfyLaunch);
+      const err = await svc.launch(settings.comfyLaunch);
+      if (err) { report("error", "启动失败：" + err); return; }
+      const t0 = Date.now();
+      conn = { state: "checking", text: "启动中…" }; renderConn();
+      while (Date.now() - t0 < 180_000) {
+        report("info", `正在启动 ComfyUI… ${Math.round((Date.now() - t0) / 1000)} 秒`);
+        await new Promise(r => setTimeout(r, 3000));
+        try {
+          const s = await withTimeout(comfy.systemStats(), 2500, "连接");
+          conn = { state: "ok", text: "ComfyUI " + (s.system?.comfyui_version ?? "") }; renderConn(); renderAction();
+          report("ok", "ComfyUI 已启动并连接");
+          setStatus("ComfyUI 已启动并连接", "ok");
+          return;
+        } catch { /* still starting */ }
+      }
+      conn = { state: "down", text: "未连接" }; renderConn(); renderAction();
+      report("error", "3 分钟内没有连上 ComfyUI，请看 ComfyUI 窗口里的报错");
+    } finally { launching = false; }
+  }
+
   function openSettings() {
     const url = h("input", { class: "field", value: settings.comfyUrl, placeholder: "127.0.0.1:8188" }) as HTMLInputElement;
     const result = h("div", { class: "conn-result" });
+    const launchPath = h("input", { class: "field grow", value: settings.comfyLaunch, placeholder: "ComfyUI 启动文件路径" }) as HTMLInputElement;
+    launchPath.addEventListener("change", () => { settings.comfyLaunch = launchPath.value.trim().replace(/^"|"$/g, ""); store.saveSettings(settings); });
     const show = (kind: "ok" | "error" | "info", text: string) => replace(result, h("span", { class: "dot " + kind }), h("span", null, text));
     const connect = async () => {
       show("info", "正在保存…");
@@ -408,6 +439,13 @@ export function mountApp(root: HTMLElement, svc: Services) {
         h("div", { class: "group-label" }, "地址"), url,
         h("div", { class: "muted small" }, "可以只填 IP 和端口，例如 127.0.0.1:8188。插件只调用 ComfyUI 自带的接口，不需要安装节点或修改启动参数。"),
         result,
+        svc.launch ? h("div", { class: "group-label" }, "一键启动") : null,
+        svc.launch ? h("div", { class: "row launch-row" }, launchPath,
+          h("button", { class: "icon-btn", title: "选择启动文件（.bat / .cmd / .exe）", onClick: async () => {
+            const p = await svc.pickLauncher?.();
+            if (p) { launchPath.value = p; settings.comfyLaunch = p; store.saveSettings(settings); }
+          } }, icon("folder"))) : null,
+        svc.launch ? h("div", { class: "muted small" }, "ComfyUI 未运行时可在这里或面板上一键启动，例如 run_nvidia_gpu.bat。第一次启动时 Photoshop 会询问是否允许。") : null,
         svc.debugSave ? h("div", { class: "group-label" }, "排查问题") : null,
         svc.debugSave && h("label", { class: "check-row", title: "每次生成时把发送的图片、返回的图片和提交的工作流保存到 F:\\waveplug\\studio\\reports\\debug_*。大图一张可达几十 MB，排查完请关闭" },
           h("input", { type: "checkbox", checked: settings.debugFiles, onChange: (e: Event) => { settings.debugFiles = (e.target as HTMLInputElement).checked; store.saveSettings(settings); } }),
@@ -420,6 +458,12 @@ export function mountApp(root: HTMLElement, svc: Services) {
           replace(result, h("pre", { class: "diag" }, lines.join("\n")));
         } }, "诊断") : null,
         h("button", { class: "btn", onClick: () => sheet.remove() }, "关闭"),
+        svc.launch ? h("button", { class: "btn", title: "运行上面的启动文件，并等待 ComfyUI 就绪", onClick: async () => {
+          settings.comfyLaunch = launchPath.value.trim().replace(/^"|"$/g, ""); store.saveSettings(settings);
+          settings.comfyUrl = normalizeUrl(url.value); url.value = settings.comfyUrl; comfy = svc.comfy(settings.comfyUrl);
+          await launchComfy(show);
+          if (conn.state === "ok") setTimeout(() => sheet.remove(), 700);
+        } }, "启动") : null,
         h("button", { class: "btn primary", onClick: () => void connect() }, "保存并连接")));
     sheetHost.append(sheet);
     if (conn.state === "down" && status.kind === "error") show("error", status.text);

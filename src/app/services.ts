@@ -17,6 +17,10 @@ export interface Services {
   diagnose?(base: string): Promise<string[]>;
   /** Saves an exchanged image next to the diagnostic log (F:\\waveplug\\studio\\reports\\debug_*). */
   debugSave?(name: string, png: Uint8Array): void;
+  /** Lets the user pick the ComfyUI start script/exe; returns its native path. */
+  pickLauncher?(): Promise<string | null>;
+  /** Starts the ComfyUI script/exe; returns an error message or null. */
+  launch?(path: string): Promise<string | null>;
   /** present only in the development build: reloads the code from disk */
   devReload?(): void;
   version: string;
@@ -28,6 +32,8 @@ export interface Settings {
   comfyUrl: string; activeProfile: string | null; advancedOpen: boolean;
   /** save sent/received images and the submitted workflow to reports\debug_* (large files) */
   debugFiles: boolean;
+  /** ComfyUI start script / executable for one-click start (e.g. run_nvidia_gpu.bat) */
+  comfyLaunch: string;
 }
 export interface ProfileState { prompt: string; params: Record<string, number | boolean>; seedMode: "random" | "fixed"; seed: number; count?: number; fullRun?: boolean }
 
@@ -41,7 +47,7 @@ function write(k: string, v: unknown) {
 }
 
 export const store = {
-  settings: (): Settings => ({ comfyUrl: "http://127.0.0.1:8188", activeProfile: null, advancedOpen: false, debugFiles: false, ...read<Partial<Settings>>(KEY.settings, {}) }),
+  settings: (): Settings => ({ comfyUrl: "http://127.0.0.1:8188", activeProfile: null, advancedOpen: false, debugFiles: false, comfyLaunch: "", ...read<Partial<Settings>>(KEY.settings, {}) }),
   saveSettings: (s: Settings) => write(KEY.settings, s),
   profiles: (): Profile[] => read<Profile[]>(KEY.profiles, []),
   saveProfiles: (p: Profile[]) => write(KEY.profiles, p),
