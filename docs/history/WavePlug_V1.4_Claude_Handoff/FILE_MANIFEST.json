@@ -1,0 +1,48 @@
+{
+  "project": "PS AI Studio / WavePlug",
+  "spec_version": "V1.4",
+  "date": "2026-10-30",
+  "status": "Interactive HTML mockup + implementation requirements; not a working Photoshop plugin",
+  "files": [
+    {
+      "name": "CLAUDE_START_HERE.md",
+      "bytes": 9496,
+      "sha256": "261cb437c5c02f8ba39def03a6bed6f03e38e80f76c30ed12a39699a06beea32"
+    },
+    {
+      "name": "PS_AI_Studio_V1.4_UI_Preview.html",
+      "bytes": 48527,
+      "sha256": "372bb86d478920b1363f72f2f6cd3eeaa38d43bb5a32280f64d842487fc34bfd"
+    },
+    {
+      "name": "PS_AI_Studio_V1.4_设计与技术交接.docx",
+      "bytes": 386957,
+      "sha256": "f1663b11507af7aab2f869c39d70e4bc16c0fb9ef42b0c31dda4d2531ab75ad0"
+    },
+    {
+      "name": "UI_Advanced_V1.4.png",
+      "bytes": 57205,
+      "sha256": "e3ea77426fdca9d503018c78a0056554ada2368f87fc8154015e3a93f70e0203"
+    },
+    {
+      "name": "UI_Calibration_V1.4.png",
+      "bytes": 56017,
+      "sha256": "02361b86e30096a556d6ecb0b35966e5cc781d202b437b063b68b3d0efe1a490"
+    },
+    {
+      "name": "UI_Desktop_V1.4.png",
+      "bytes": 187678,
+      "sha256": "5389b54f36aa593708e2214cbd80427034ce32ee651c5a8d4b874072181a8c54"
+    },
+    {
+      "name": "UI_Panel_V1.4.png",
+      "bytes": 41463,
+      "sha256": "64dca1d49b8cff9d4c3c78c98222bd0fb7afc9341d6fe9338bc7f8ae4117abd0"
+    },
+    {
+      "name": "workflow_mapping_example.json",
+      "bytes": 1345,
+      "sha256": "1e6a35399f9c2dbce1b9ca3bb23dd6eef8b910ad8a66448b4e297117565ba6e9"
+    }
+  ]
+}

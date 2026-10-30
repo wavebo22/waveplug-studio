@@ -1,0 +1,253 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>PS AI Studio · V1.4 交互原型</title>
+<style>
+  :root{color-scheme:dark;--bg:#1b1d20;--bar:#242629;--panel:#282a2e;--input:#34363b;--line:#404349;--text:#eeeff0;--muted:#9c9fa6;--dim:#727780;--a:#78c9bb;--a2:#33554f;--base:12px;--canvas:#e9e6de;--accent:#88ada7;--accent2:#c9d6d1;}
+  *{box-sizing:border-box}
+  html,body{height:100%;margin:0}
+  body{font-family:Inter,"PingFang SC","Microsoft YaHei","Noto Sans CJK SC",-apple-system,BlinkMacSystemFont,sans-serif;color:var(--text);background:var(--bg);font-size:var(--base);overflow:hidden}
+  button,input,textarea,select{font:inherit}button{cursor:pointer}button:disabled{opacity:.44;cursor:not-allowed}input,textarea,select{outline:none}button:focus-visible,input:focus-visible,textarea:focus-visible,select:focus-visible{outline:2px solid var(--a);outline-offset:2px}
+  .icon{width:15px;height:15px;vertical-align:middle;stroke:currentColor;stroke-width:1.6;stroke-linecap:round;stroke-linejoin:round;fill:none;flex-shrink:0}
+  .desktop{height:100%;display:flex;flex-direction:column;min-width:630px}
+  .menubar{height:36px;min-height:36px;display:flex;align-items:center;gap:18px;padding:0 17px;background:#25262a;border-bottom:1px solid #414348;font-size:11px;color:#bdc0c7}
+  .brand-mini{font-size:14px;font-weight:750;color:#edf0f2;letter-spacing:-.4px;border-right:1px solid #50545a;padding-right:18px}
+  .menubar .spacer{flex:1}.chip{border:1px solid #4c5057;color:#b5b9bf;border-radius:5px;padding:4px 9px;font-size:10px;letter-spacing:.4px}
+  .toolbar{height:42px;min-height:42px;display:flex;align-items:center;gap:12px;background:#303237;border-bottom:1px solid #45484d;padding:0 20px;color:#c4c6ca}
+  .toolbar .tool{height:27px;min-width:27px;display:grid;place-items:center;border-radius:4px;color:#c4c7cb;border:0;background:transparent}
+  .toolbar .tool.active{background:#45494f;color:#f5f6f7}.toolbar .tool:hover{background:#45494f}
+  .toolbar .barsep{height:21px;border-left:1px solid #4d5056}.toolbar .docinfo{font-size:11px;color:#aeb1b7}
+  .toolbar .tools-right{margin-left:auto;display:flex;align-items:center;gap:8px}.toolbar .small-select{font-size:11px;background:#404247;color:#e9e9e9;border:1px solid #5b5e63;border-radius:4px;padding:5px 20px 5px 8px}
+  .main{display:flex;min-height:0;flex:1}
+  .rail{width:43px;background:#25272a;border-right:1px solid #45474b;display:flex;align-items:center;flex-direction:column;gap:7px;padding-top:16px;color:#a3a6ac}.rail .railbtn{width:28px;height:31px;display:grid;place-items:center;background:transparent;color:inherit;border:0;border-radius:5px}.rail .railbtn.active{color:#f3f4f5;background:#3d4146}
+  .workarea{flex:1;min-width:0;display:flex;flex-direction:column;background:#333439;overflow:hidden}
+  .document-tab{height:36px;display:flex;align-items:center;background:#25272a;color:#bec1c8;border-bottom:1px solid #46484c;font-size:11px;padding:0 16px;gap:12px}
+  .document-tab strong{color:#eceef0;font-weight:550}.document-tab .mini{font-size:10px;color:#999ea6}
+  .artboard-wrap{flex:1;min-height:0;display:flex;align-items:center;justify-content:center;padding:24px 28px 18px;position:relative;background-image:linear-gradient(to right,transparent 49.8%,#3a3c40 49.8%,#3a3c40 50.2%,transparent 50.2%);overflow:hidden}
+  .artboard-shadow{width:min(95%,1040px);box-shadow:0 17px 38px #0007;position:relative;aspect-ratio:16/10;min-height:0;max-height:100%}
+  .artboard{width:100%;height:100%;background:var(--canvas);position:relative;overflow:hidden;color:#293033;display:flex;transition:background .25s}
+  .artboard::before{content:"";position:absolute;left:-5%;top:-12%;width:58%;height:87%;background:var(--accent2);border-radius:100%;filter:blur(1px);opacity:.48;transform:rotate(-21deg)}
+  .artboard::after{content:"";position:absolute;right:-17%;bottom:-34%;width:65%;height:88%;border:34px solid var(--accent);opacity:.55;border-radius:100%;transform:rotate(-13deg)}
+  .poster-left{z-index:2;position:relative;flex:1;padding:clamp(22px,4.3vw,78px) 0 18px clamp(24px,5.2vw,84px);min-width:0}
+  .poster-overline{font-size:clamp(8px,.7vw,11px);font-weight:700;letter-spacing:2.8px;color:#647278}
+  .poster-title{font-size:clamp(36px,4.6vw,66px);font-weight:850;line-height:.91;letter-spacing:-.085em;margin-top:clamp(20px,3.2vw,52px)}
+  .poster-title span{display:block}.poster-sub{font-size:clamp(10px,1vw,15px);letter-spacing:2px;font-weight:600;margin-top:13px}
+  .poster-copy{font-size:clamp(8px,.74vw,12px);line-height:1.7;color:#69767a;margin-top:13px;max-width:245px}
+  .poster-footer{position:absolute;bottom:clamp(16px,2.5vw,42px);left:clamp(24px,5.2vw,84px);font-size:clamp(7px,.69vw,11px);letter-spacing:1.5px;color:#526466}
+  .poster-right{position:relative;flex:1.15;min-width:0;z-index:2}
+  .circle-frame{position:absolute;inset:17% 8% 13% 3%;border:1px solid rgba(37,54,55,.3);border-radius:50%;transform:rotate(-20deg)}
+  .orbit{position:absolute;right:6%;top:14%;font-size:clamp(11px,1.2vw,16px);letter-spacing:4px;color:#62736f;font-weight:650}
+  .product{position:absolute;left:28%;top:21%;width:42%;height:58%;transform:rotate(-12deg);filter:drop-shadow(16px 30px 15px rgba(49,61,60,.2));transition:transform .4s,left .4s,top .4s}
+  .product .cap{position:absolute;height:9%;width:51%;top:-3%;left:24.5%;background:#5e6d68;border-radius:5px 5px 2px 2px;z-index:2}
+  .product .bottle{position:absolute;inset:3% 7% 0 7%;border-radius:16px 16px 9px 9px;background:linear-gradient(95deg,#a6b8b1 0%,#e0e7dd 30%,#e5e7dd 56%,#97afa5 100%);border:1px solid #7e968e}
+  .product .label{position:absolute;top:23%;left:7%;width:86%;height:56%;background:#f3eee4;border:1px solid rgba(67,87,81,.15);display:flex;flex-direction:column;padding:17% 11%;color:#273f3f;}
+  .product .label .small{font-size:clamp(7px,.6vw,9px);letter-spacing:2px}
+  .product .label .large{font-size:clamp(18px,2.2vw,36px);font-weight:900;line-height:1;margin-top:20%;letter-spacing:-2px}
+  .product .label .rule{height:2px;background:#334c49;margin-top:auto;width:70%}
+  .guide{position:absolute;border:2px dashed rgba(10,130,132,.92);background:rgba(101,200,190,.06);z-index:8;left:35%;top:17%;width:52%;height:68%;pointer-events:none;display:none}
+  .guide.on{display:block}.guide .tag{position:absolute;left:-2px;top:-27px;background:#148a92;color:white;font-size:10px;padding:5px 8px;letter-spacing:.5px}
+  .canvas-caption{height:30px;display:flex;align-items:center;justify-content:space-between;padding:0 17px;background:#25272a;color:#a3a7ac;font-size:11px;gap:8px}
+  .pslayers{width:185px;background:#26282c;border-left:1px solid #45474b;display:flex;flex-direction:column;min-height:0}
+  .pslayers-title{padding:13px 13px 11px;display:flex;align-items:center;justify-content:space-between;border-bottom:1px solid #414349;color:#f0f1f3;font-size:12px;font-weight:600}
+  .layer-row{display:flex;align-items:center;gap:9px;padding:12px 10px;border-bottom:1px solid #3a3d43;color:#c0c4cb;font-size:11px;min-width:0}.layer-row.active{background:#35393f;color:#ebeff0}
+  .layer-row .icon{width:14px;height:14px}.layer-thumb{width:30px;height:29px;background:#5f7371;border:1px solid #707e7b;flex-shrink:0}.layer-thumb.check{background:repeating-conic-gradient(#85898e 0% 25%,#adb0b4 0% 50%) 50% / 13px 13px}
+  .layer-row .name{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.layer-meta{display:block;font-size:9px;color:#858c95;margin-top:4px}
+  .edit-psb{margin:18px 12px;border:1px solid #565a61;background:#35383d;color:#e2e4e8;border-radius:5px;padding:8px 4px;font-size:11px}.edit-psb:hover{background:#44484e}
+  .psb-note{margin:0 12px;color:#858d95;font-size:10px;line-height:1.5}
+  .panel{width:366px;flex:0 0 366px;min-height:0;display:flex;flex-direction:column;background:var(--panel);border-left:1px solid #44464a}
+  .plugin-head{height:55px;min-height:55px;padding:10px 15px;border-bottom:1px solid #3a3e43;display:flex;align-items:center;gap:10px}
+  .plugin-logo{width:28px;height:28px;background:#394a49;border-radius:5px;color:#a4e1d7;display:grid;place-items:center}
+  .plugin-name{font-size:13px;font-weight:700;letter-spacing:.05px}.plugin-sub{font-size:10px;color:#888e95;margin-top:3px;letter-spacing:.25px}
+  .plugin-head .status-dot{width:6px;height:6px;background:#718b8a;border-radius:100%;margin-left:auto}.plugin-head .status{font-size:10px;color:#879197}
+  .panel-scroll{flex:1;overflow-y:auto;padding:14px 15px 11px;scrollbar-color:#575c60 transparent;scrollbar-width:thin}
+  .panel-block{margin-bottom:14px}.label-row{display:flex;align-items:center;justify-content:space-between;gap:9px;margin-bottom:9px}.label{font-size:11.6px;font-weight:620;color:#e0e3e5}.hint{font-size:10px;color:#8b9096}
+  .hist-strip{display:flex;gap:8px;overflow-x:auto;scrollbar-width:thin;padding-bottom:4px;scrollbar-color:#55585e transparent;min-height:75px}
+  .history-item{width:66px;min-width:66px;background:#32353a;border:1px solid #474b51;border-radius:5px;padding:5px 5px 4px;color:#afb4b9;text-align:left;transition:background .15s,border-color .15s}.history-item:hover{background:#404449}.history-item.selected{border-color:var(--a);background:#30413f;color:#e6f7f2}
+  .history-thumb{height:39px;background:var(--thumb,#8da99f);position:relative;overflow:hidden}.history-thumb:before{content:"";position:absolute;width:45px;height:45px;border:7px solid #ffffff7a;border-radius:50%;left:20px;top:-12px}.history-thumb:after{content:"";position:absolute;left:24px;top:8px;width:19px;height:33px;transform:rotate(-12deg);background:#e6e0d2;border:1px solid #a4aaa3}
+  .history-number{font-size:10px;font-variant-numeric:tabular-nums;font-weight:650;padding-top:3px;display:flex;align-items:center;justify-content:space-between}.history-number .icon{width:11px;height:11px}
+  .subtle-divider{height:1px;background:#42464b;margin:0 0 13px}
+  .compact-workflow{display:grid;grid-template-columns:15px 1fr 33px;gap:8px;align-items:center}
+  .compact-workflow>.icon{color:#9ca4aa}
+  .input,.prompt,.param-num,.search{background:var(--input);color:#ecedef;border:1px solid #505359;border-radius:5px;min-width:0}
+  .input{height:34px;width:100%;padding:0 10px;font-size:11.5px;white-space:nowrap;text-overflow:ellipsis}
+  select.input{cursor:pointer}select.input option{color:#f0f0f2;background:#33363c}
+  .icon-btn{border:1px solid #4b5057;border-radius:5px;color:#c7cccf;background:#373b41;height:34px;width:34px;display:grid;place-items:center}.icon-btn:hover{background:#454a50}
+  .prompt{width:100%;height:94px;min-height:78px;max-height:200px;padding:11px 12px;resize:vertical;line-height:1.65;font-size:12px;margin:0;display:block}
+  .ref-strip{display:flex;align-items:stretch;gap:8px;margin-top:8px;flex-wrap:wrap}.ref-tile{position:relative;width:61px;height:61px;border-radius:5px;border:1px solid #53575d;background:#34373c;color:#d7dce0;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:5px;padding:2px;cursor:pointer;overflow:hidden}.ref-tile .icon{width:18px;height:18px;color:#9ba5ab}.ref-tile .caption{font-size:9px;color:#aeb5ba;white-space:nowrap}.ref-tile:hover{border-color:#7d8f90}.ref-tile img{width:100%;height:100%;object-fit:cover;position:absolute;inset:0}.ref-tile .ref-label-overlay{position:absolute;bottom:0;left:0;right:0;padding:4px 2px;background:#21282dd9;font-size:9px}.ref-tile .ref-remove{position:absolute;right:2px;top:2px;width:17px;height:17px;background:#24272bdd;color:white;border-radius:2px;font-size:13px;border:0;display:none;place-items:center;z-index:3}.ref-tile:hover .ref-remove{display:grid}
+  .ref-add{border:1px dashed #5b5f65;background:transparent}.ref-add:hover{border-color:var(--a);background:#38413f}.ref-add .icon{color:#adb4b6}
+  .toggle-row{display:flex;align-items:center;justify-content:space-between;gap:9px;margin-top:11px}.toggle-label{display:flex;align-items:center;gap:8px;font-size:11px;color:#c7cbcf;cursor:pointer}.toggle-label input{accent-color:#74bfb4;cursor:pointer}
+  .range-label{font-size:9.5px;color:#8e969b;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  .generate{height:42px;width:100%;border:0;border-radius:5px;background:#6db9ad;color:#162d2b;font-size:12.5px;font-weight:760;display:flex;align-items:center;justify-content:center;gap:9px;letter-spacing:.2px}.generate:hover{background:#88d0c2}.generate:disabled{background:#536963;color:#a9c2bc}.generate .icon{width:17px;height:17px}
+  .progress-line{height:3px;width:100%;border-radius:1px;background:#3e4246;margin-top:7px;overflow:hidden;display:none}.progress-line.visible{display:block}.progress-line span{display:block;width:0%;height:100%;background:#84c9ba;transition:width .2s}
+  .advanced-head{display:flex;align-items:center;gap:9px;background:transparent;border:0;color:#d4d8da;width:100%;height:34px;padding:0;text-align:left;font-size:11.5px}.advanced-head .chev{margin-left:auto;transition:transform .2s}.advanced-head[aria-expanded="true"] .chev{transform:rotate(180deg)}.advanced-body{padding:9px 11px 12px;border:1px solid #484c52;border-radius:5px;background:#303237;margin-bottom:12px}.advanced-body[hidden]{display:none}
+  .param-row{display:flex;align-items:center;justify-content:space-between;gap:10px;margin-bottom:9px}.param-title{font-size:11px;color:#d9dde0;font-weight:620}.param-help{font-size:9.5px;color:#8b9299;line-height:1.6}.lora-row{padding:9px 0 11px;border-top:1px solid #41464b}.lora-row:first-of-type{border-top:0}.lora-top{display:flex;align-items:center;justify-content:space-between;gap:12px;margin-bottom:8px}.lora-name{font-size:10.5px;color:#dadfe0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:180px}
+  .lora-controls{display:flex;align-items:center;gap:12px}.range{width:100%;height:15px;accent-color:var(--a);cursor:pointer}.param-num{width:54px;padding:6px 5px;text-align:center;font-variant-numeric:tabular-nums;font-size:10.5px}
+  .adv-field{display:flex;gap:9px;align-items:center;margin-top:9px}.adv-field label{color:#aeb6b9;font-size:11px;min-width:56px}.adv-field .input{height:30px}.adv-field .param-num{margin-left:auto}
+  .save-notice{font-size:10px;color:#9fa7a8;line-height:1.55;margin-top:6px}
+  .footer-note{height:33px;min-height:33px;border-top:1px solid #41454a;padding:0 15px;display:flex;align-items:center;justify-content:space-between;font-size:10px;color:#8d9399}.footer-note .live{color:#c5cacc}.footer-note .icon{width:12px;height:12px}
+  .modal-backdrop{position:fixed;inset:0;background:rgba(9,12,15,.74);z-index:30;display:flex;align-items:center;justify-content:center;padding:26px}.modal-backdrop[hidden]{display:none}
+  .modal{width:min(520px,96vw);max-height:min(790px,94vh);overflow:auto;background:#292d32;color:#e7eaec;border:1px solid #535961;box-shadow:0 24px 75px #000a;border-radius:10px;padding:20px 23px}
+  .modal-header{display:flex;align-items:start;gap:14px;justify-content:space-between;margin-bottom:15px}.modal-headline{font-size:16px;font-weight:720}.modal-desc{font-size:11px;color:#9fa7ac;line-height:1.65;margin-top:6px}.close-modal{background:transparent;color:#aeb5b9;border:0;padding:3px}
+  .modal-field{margin-top:14px}.modal-field label{display:block;font-size:11px;font-weight:580;color:#d6dcdf;margin-bottom:7px}.modal .input{height:38px}
+  .map-list{margin-top:18px;padding:11px;border:1px solid #454b51;border-radius:6px;background:#31363b}.map-title{font-weight:650;font-size:11px;display:flex;justify-content:space-between;margin-bottom:9px}.map-row{display:flex;justify-content:space-between;gap:12px;font-size:10px;padding:6px 0;border-top:1px solid #43484e}.map-row:first-of-type{border-top:0}.map-row .target{color:#abcfc7;text-align:right}.map-row .field{color:#afb7bd;min-width:0;overflow-wrap:anywhere}
+  .modal-btn{border:1px solid #5b6065;background:#3c4146;color:#e7e9ec;border-radius:5px;padding:9px 14px;font-size:11px}.modal-btn.primary{background:#6db9ad;color:#112a28;border-color:transparent;font-weight:700}.modal-btn:hover{filter:brightness(1.12)}.modal-actions{margin-top:18px;display:flex;justify-content:flex-end;gap:10px}
+  .modal-success{color:#9bdacb;font-size:10px;min-height:16px;margin-top:8px}
+  .psb-item{padding:10px 8px;border-bottom:1px solid #484e54;display:flex;align-items:center;gap:10px}.psb-item .name{flex:1;font-size:11px}.psb-item .del{background:none;color:#b5bfc2;border:0;padding:5px}.psb-item.selected{background:#364643}.psb-item .eye{border:0;background:transparent;color:#a5b9b6;padding:4px}
+  .upload-menu{position:fixed;z-index:31;background:#303439;border:1px solid #575d63;box-shadow:0 12px 25px #0008;border-radius:7px;padding:6px;min-width:180px;display:none}.upload-menu button{display:block;background:transparent;border:0;color:#e1e4e6;text-align:left;padding:10px 11px;width:100%;font-size:11px;border-radius:4px}.upload-menu button:hover{background:#414b4c}
+  .toast{position:fixed;bottom:20px;left:50%;transform:translateX(-50%);background:#222a2d;border:1px solid #526462;color:#e2efe9;padding:10px 16px;border-radius:6px;font-size:12px;box-shadow:0 10px 25px #0007;z-index:80;opacity:0;pointer-events:none;transition:opacity .2s;max-width:90vw;text-align:center}.toast.show{opacity:1}
+  .version-banner{position:absolute;top:12px;left:12px;color:#4c6062;font-size:11px;letter-spacing:1px;z-index:8;opacity:.8}
+  @media (max-width:1200px){.pslayers{display:none}.artboard-wrap{padding:20px 19px}.panel{width:353px;flex-basis:353px}}
+  @media (max-width:850px){.rail{display:none}.desktop{min-width:330px}.workarea{display:none}.panel{flex:1;width:100%;border:0}.menubar{gap:10px}.toolbar .docinfo{display:none}.toolbar .small-select{min-width:0}}
+  @media (max-height:700px){.panel-scroll{padding-top:9px}.panel-block{margin-bottom:11px}.prompt{height:76px}.plugin-head{height:47px;min-height:47px}}
+</style>
+</head>
+<body>
+<!-- SVG sprite is local; no external CDN, images or libraries. -->
+<svg xmlns="http://www.w3.org/2000/svg" style="position:absolute;width:0;height:0;overflow:hidden" aria-hidden="true">
+  <symbol id="i-layers" viewBox="0 0 24 24"><path d="m12 2 9 5-9 5-9-5 9-5Zm-9 9 9 5 9-5M3 16l9 5 9-5"/></symbol>
+  <symbol id="i-settings" viewBox="0 0 24 24"><circle cx="12" cy="12" r="3"/><path d="M19.5 13.5a1.7 1.7 0 0 0 0-3l1-1.7-2.4-2.4-1.7 1a1.7 1.7 0 0 0-3 0L12 3l-1.4 4.4a1.7 1.7 0 0 0-3 0l-1.7-1-2.4 2.4 1 1.7a1.7 1.7 0 0 0 0 3l-1 1.7 2.4 2.4 1.7-1a1.7 1.7 0 0 0 3 0L12 21l1.4-4.4a1.7 1.7 0 0 0 3 0l1.7 1 2.4-2.4-1-1.7Z"/></symbol>
+  <symbol id="i-sliders" viewBox="0 0 24 24"><path d="M4 7h10m4 0h2M4 17h2m4 0h10"/><circle cx="16" cy="7" r="2"/><circle cx="8" cy="17" r="2"/></symbol>
+  <symbol id="i-image" viewBox="0 0 24 24"><rect x="3" y="3" width="18" height="18" rx="2"/><circle cx="8.5" cy="8.5" r="1.5"/><path d="m21 15-5-5L5 21"/></symbol>
+  <symbol id="i-plus" viewBox="0 0 24 24"><path d="M12 5v14M5 12h14"/></symbol>
+  <symbol id="i-chevron" viewBox="0 0 24 24"><path d="m6 9 6 6 6-6"/></symbol>
+  <symbol id="i-wand" viewBox="0 0 24 24"><path d="m4 20 12-12 4 4L8 24M15 2v4m-6 1-2-2m10 12 2 2M2 12h4"/></symbol>
+  <symbol id="i-eye" viewBox="0 0 24 24"><path d="M2 12s3.5-6 10-6 10 6 10 6-3.5 6-10 6-10-6-10-6Z"/><circle cx="12" cy="12" r="3"/></symbol>
+  <symbol id="i-check" viewBox="0 0 24 24"><path d="m4 12 5 5L20 6"/></symbol>
+  <symbol id="i-x" viewBox="0 0 24 24"><path d="M6 6 18 18M18 6 6 18"/></symbol>
+  <symbol id="i-edit" viewBox="0 0 24 24"><path d="m12 20-8 1 1-8L16 2l6 6-10 12Z"/></symbol>
+  <symbol id="i-trash" viewBox="0 0 24 24"><path d="M3 6h18M8 6V3h8v3M6 6l1 15h10l1-15M10 10v7m4-7v7"/></symbol>
+  <symbol id="i-workflow" viewBox="0 0 24 24"><rect x="2" y="2" width="7" height="7" rx="1"/><rect x="15" y="2" width="7" height="7" rx="1"/><rect x="15" y="15" width="7" height="7" rx="1"/><path d="M9 5h6m-3 0v13h3"/></symbol>
+  <symbol id="i-cursor" viewBox="0 0 24 24"><path d="M4 2 4 20l5-5 4 7 3-2-4-7 8-1L4 2Z"/></symbol>
+  <symbol id="i-box" viewBox="0 0 24 24"><path d="m3 7 9-5 9 5v10l-9 5-9-5V7Zm0 0 9 5 9-5M12 12v10"/></symbol>
+  <symbol id="i-info" viewBox="0 0 24 24"><circle cx="12" cy="12" r="10"/><path d="M12 11v6M12 7h.01"/></symbol>
+</svg>
+<div class="desktop" id="desktop">
+  <div class="menubar">
+    <span class="brand-mini">Ps</span><span>文件</span><span>编辑</span><span>图像</span><span>图层</span><span>选择</span><span>滤镜</span><span>窗口</span>
+    <span class="spacer"></span><span class="chip">V1.4 · UI DESIGN DEMO</span>
+  </div>
+  <div class="toolbar">
+    <button class="tool active" title="移动工具"><svg class="icon"><use href="#i-cursor"></use></svg></button>
+    <button class="tool" title="选区工具"><svg class="icon"><use href="#i-box"></use></svg></button>
+    <button class="tool" title="编辑工具"><svg class="icon"><use href="#i-edit"></use></svg></button>
+    <span class="barsep"></span><span class="docinfo">模拟画布设置：用于预览选区反馈</span>
+    <div class="tools-right"><span style="font-size:10px;color:#abb0b6">选区</span><select class="small-select" id="selection-sim" aria-label="模拟 Photoshop 选区"><option value="full">无选区（全画布）</option><option value="partial">局部选区</option></select></div>
+  </div>
+  <div class="main">
+    <aside class="rail" aria-label="模拟 Photoshop 工具栏">
+      <button class="railbtn active"><svg class="icon"><use href="#i-cursor"></use></svg></button><button class="railbtn"><svg class="icon"><use href="#i-box"></use></svg></button><button class="railbtn"><svg class="icon"><use href="#i-image"></use></svg></button><button class="railbtn"><svg class="icon"><use href="#i-wand"></use></svg></button>
+    </aside>
+    <section class="workarea" aria-label="模拟 Photoshop 画布">
+      <div class="document-tab"><strong>waveplug-demo.psd</strong><span class="mini">@ 66.7% (RGB/8) · 模拟画布</span><span style="margin-left:auto;color:#82918c">不会更改任何实际 PSD</span></div>
+      <div class="artboard-wrap">
+        <div class="artboard-shadow">
+          <div class="artboard" id="artboard">
+            <div class="poster-left">
+              <div class="poster-overline">STUDIO / OBJECT STUDY — 2026</div>
+              <div class="poster-title"><span>FORM</span><span>AND</span><span>FEEL.</span></div>
+              <div class="poster-sub">DESIGNED IN LIGHT.</div>
+              <div class="poster-copy">A quieter composition. Objects, material and light finding a balanced place.</div>
+              <div class="poster-footer">WAVE LAB / CONCEPT IMAGE SERIES  &nbsp; 001—004</div>
+            </div>
+            <div class="poster-right"><div class="circle-frame"></div><div class="orbit">REF. 001</div><div class="product" id="demo-product"><div class="cap"></div><div class="bottle"><div class="label"><span class="small">WAVE / STUDIO</span><span class="large">FORM<br>01</span><span class="rule"></span></div></div></div></div>
+            <div id="selection-guide" class="guide"><span class="tag">PS 选区 · 1280 × 720</span></div>
+            <div class="version-banner" id="version-banner">SMART OBJECT / VERSION 004</div>
+          </div>
+        </div>
+      </div>
+      <div class="canvas-caption"><span id="canvas-caption-left">当前显示：智能对象版本 004</span><span>1920 × 1200 px · 原型模拟</span></div>
+    </section>
+    <aside class="pslayers" aria-label="模拟 Photoshop 图层面板"><div class="pslayers-title">图层 <svg class="icon"><use href="#i-layers"></use></svg></div>
+      <div class="layer-row"><svg class="icon"><use href="#i-eye"></use></svg><span class="layer-thumb check"></span><span class="name">排版文字<span class="layer-meta">文字 / 设计元素</span></span></div>
+      <div class="layer-row active"><svg class="icon"><use href="#i-eye"></use></svg><span class="layer-thumb"></span><span class="name">AI 结果 · 智能对象<span class="layer-meta">含 <span id="layer-count">4</span> 个内部图层</span></span></div>
+      <div class="layer-row"><svg class="icon"><use href="#i-eye"></use></svg><span class="layer-thumb check"></span><span class="name">原始背景<span class="layer-meta">保持不变</span></span></div>
+      <button id="open-psb" class="edit-psb">打开智能对象（演示）</button>
+      <p class="psb-note">这里模拟 Photoshop 原生图层区。真实插件不另做图层编辑器。</p>
+    </aside>
+    <aside class="panel" aria-label="PS AI Studio 插件预览">
+      <div class="plugin-head"><div class="plugin-logo"><svg class="icon" style="width:18px;height:18px"><use href="#i-layers"></use></svg></div><div><div class="plugin-name">PS AI Studio</div><div class="plugin-sub">WAVEPLUG · COMPACT WORKSPACE</div></div><span class="status-dot"></span><span class="status">演示模式</span></div>
+      <div class="panel-scroll">
+        <section class="panel-block" aria-label="生成历史"><div class="label-row"><span class="label">生成历史</span><span class="hint" id="history-count">4 个版本 · 智能对象</span></div><div class="hist-strip" id="history-strip"></div></section>
+        <div class="subtle-divider"></div>
+        <section class="panel-block" aria-label="工作流选择"><div class="compact-workflow"><svg class="icon"><use href="#i-workflow"></use></svg><select id="workflow" class="input" aria-label="当前 ComfyUI 工作流"><option value="qwen">Qwen-Image 2.1 · 精细编辑</option><option value="turbo">Qwen-Image 2.1 · Turbo</option><option value="inpaint">Qwen-Image 2.1 · Inpaint</option><option value="flux">FLUX 3 · Klein</option></select><button class="icon-btn" id="open-calibration" title="手动校准工作流接口" aria-label="接口校准"><svg class="icon"><use href="#i-settings"></use></svg></button></div></section>
+        <section class="panel-block" aria-label="提示词及参考图" style="margin-bottom:12px">
+          <textarea id="prompt" class="prompt" placeholder="输入生成或编辑提示词……">保持主体结构不变，优化光影与材质，生成干净自然的商业摄影效果。</textarea>
+          <div class="ref-strip" id="reference-strip" aria-label="参考素材"></div>
+          <div class="toggle-row"><label class="toggle-label"><input type="checkbox" id="use-current" checked><span>参考当前画面</span></label><span class="range-label" id="selection-status">无选区 · 全画布</span></div>
+        </section>
+        <section class="panel-block" style="margin-bottom:9px"><button class="generate" id="generate"><svg class="icon"><use href="#i-wand"></use></svg><span id="generate-label">模拟生成</span></button><div class="progress-line" id="progress-line"><span id="progress-bar"></span></div></section>
+        <button type="button" class="advanced-head" id="advanced-toggle" aria-expanded="false" aria-controls="advanced-body"><svg class="icon"><use href="#i-sliders"></use></svg>高级参数 <svg class="icon chev"><use href="#i-chevron"></use></svg></button>
+        <div class="advanced-body" id="advanced-body" hidden><div class="param-row"><span class="param-title">LoRA 强度</span><span class="param-help">仅控制已存在并校准的节点</span></div><div id="lora-list"></div><div style="height:1px;background:#464b50;margin:5px 0 10px"></div><div class="adv-field"><label for="steps">采样步数</label><input class="param-num" type="number" id="steps" min="1" max="80" value="28"></div><div class="adv-field"><label for="seed">随机种子</label><select id="seed" class="input"><option value="random">随机</option><option value="fixed">固定 · 20261030</option></select></div><p class="save-notice">Demo 仅模拟强度数值变化。真实插件不会新增、删除、重接任何 LoRA 节点。</p></div>
+      </div>
+      <div class="footer-note"><span id="panel-status" class="live">就绪 · 可模拟交互</span><span>V1.4 / OFFLINE</span></div>
+    </aside>
+  </div>
+</div>
+<div class="modal-backdrop" id="calibration-modal" hidden><section class="modal" role="dialog" aria-modal="true" aria-labelledby="cal-title"><div class="modal-header"><div><div class="modal-headline" id="cal-title">工作流接口校准</div><div class="modal-desc">选择节点 → 选择可用字段 → 绑定 Photoshop 数据。<br>仅保存映射，不修改原始 ComfyUI 节点连接。</div></div><button class="close-modal" data-close="calibration-modal" aria-label="关闭"><svg class="icon"><use href="#i-x"></use></svg></button></div>
+  <div class="modal-field"><label for="node-select">01 · 节点</label><select class="input" id="node-select"></select></div>
+  <div class="modal-field"><label for="port-select">02 · 参数 / 接口</label><select class="input" id="port-select"></select></div>
+  <div class="modal-field"><label for="role-select">03 · Photoshop 数据来源</label><select class="input" id="role-select"></select></div>
+  <div class="map-list"><div class="map-title"><span>已记录的接口</span><span id="map-count" style="color:#9bc6be">0 项</span></div><div id="map-rows"></div></div>
+  <div class="modal-success" id="cal-message" aria-live="polite"></div><div class="modal-actions"><button class="modal-btn" data-close="calibration-modal">返回工作台</button><button class="modal-btn primary" id="save-mapping">记录此项映射</button></div>
+  <p class="save-notice">这是用于确认交互的模拟节点列表。真实插件须读取 ComfyUI API 工作流与 /object_info，并在运行前核验映射仍有效。</p>
+</section></div>
+<div class="modal-backdrop" id="psb-modal" hidden><section class="modal" role="dialog" aria-modal="true" aria-labelledby="psb-title"><div class="modal-header"><div><div class="modal-headline" id="psb-title">智能对象内部图层 · PSB</div><div class="modal-desc">模拟 Photoshop 自带的图层编辑行为：切换独显、删除任意版本。<br>插件历史应按真实图层状态刷新。</div></div><button class="close-modal" data-close="psb-modal" aria-label="关闭"><svg class="icon"><use href="#i-x"></use></svg></button></div><div id="psb-rows"></div><div class="modal-actions"><button class="modal-btn" data-close="psb-modal">保存并返回主文档</button></div><p class="save-notice">仅是浏览器 UI 演示，不会写入 PSB/PSD。版本号删除后不重排、不复用。</p></section></div>
+<div class="upload-menu" id="upload-menu"><button id="select-demo-layer">模拟引用 Photoshop 图层</button><button id="select-local-image">选择本地图片作预览</button><button id="clear-ref">清空此槽位</button></div><input type="file" id="file-picker" accept="image/*" style="display:none" />
+<div class="toast" id="toast" role="status" aria-live="polite"></div>
+<script>
+// Self-contained browser prototype, NOT a Photoshop UXP plugin.
+(()=>{'use strict';
+  const $=(s)=>document.querySelector(s);
+  const icons={eye:'i-eye',image:'i-image',plus:'i-plus',x:'i-x',trash:'i-trash'};
+  const icon=(name)=>`<svg class="icon" aria-hidden="true"><use href="#${icons[name]||name}"></use></svg>`;
+  const roleDefs={image:['不绑定','PS 当前画面','PS 当前图层','PS 参考图 1','PS 参考图 2','PS 参考图 3'],mask:['不绑定','PS 当前选区蒙版'],prompt:['不绑定','PS 提示词','PS 负面提示词'],number:['不绑定','PS LoRA 强度','PS 采样步数','PS 随机种子','PS CFG'],output:['不绑定','PS 智能对象输出']};
+  const workflows={
+    qwen:{label:'Qwen-Image 2.1 · 精细编辑',nodes:[{id:'12',name:'Load Image',fields:[{id:'image',label:'image（图片文件）',kind:'image'}]},{id:'18',name:'Text Encode',fields:[{id:'text',label:'text（提示词）',kind:'prompt'}]},{id:'23',name:'Load Mask',fields:[{id:'mask',label:'mask（蒙版文件）',kind:'mask'}]},{id:'31',name:'LoRA Loader · Restore',fields:[{id:'strength_model',label:'strength_model（浮点数）',kind:'number'},{id:'strength_clip',label:'strength_clip（浮点数）',kind:'number'}]},{id:'36',name:'LoRA Loader · Photography',fields:[{id:'strength_model',label:'strength_model（浮点数）',kind:'number'}]},{id:'45',name:'Save Image',fields:[{id:'images',label:'images（输出结果）',kind:'output'}]}], loras:[{id:'restore',label:'Restore · 细节修复',node:'31',field:'strength_model',strength:.75},{id:'realism',label:'Photography · 摄影写实',node:'36',field:'strength_model',strength:.55}],steps:28},
+    turbo:{label:'Qwen-Image 2.1 · Turbo',nodes:[{id:'7',name:'Load Image',fields:[{id:'image',label:'image（图片文件）',kind:'image'}]},{id:'14',name:'Text Encode',fields:[{id:'text',label:'text（提示词）',kind:'prompt'}]},{id:'27',name:'KSampler',fields:[{id:'steps',label:'steps（步数）',kind:'number'}]},{id:'33',name:'Save Image',fields:[{id:'images',label:'images（输出结果）',kind:'output'}]}],loras:[],steps:8},
+    inpaint:{label:'Qwen-Image 2.1 · Inpaint',nodes:[{id:'2',name:'Load Image',fields:[{id:'image',label:'image（图片文件）',kind:'image'}]},{id:'9',name:'Load Mask',fields:[{id:'mask',label:'mask（蒙版文件）',kind:'mask'}]},{id:'17',name:'Text Encode',fields:[{id:'text',label:'text（提示词）',kind:'prompt'}]},{id:'24',name:'LoRA Loader · Detail',fields:[{id:'strength_model',label:'strength_model（强度）',kind:'number'}]},{id:'41',name:'Save Image',fields:[{id:'images',label:'images（输出结果）',kind:'output'}]}],loras:[{id:'detail',label:'Detail · 局部细节',node:'24',field:'strength_model',strength:.7}],steps:25},
+    flux:{label:'FLUX 3 · Klein',nodes:[{id:'5',name:'Text Encode',fields:[{id:'text',label:'text（提示词）',kind:'prompt'}]},{id:'11',name:'Load Image',fields:[{id:'image',label:'image（参考图）',kind:'image'}]},{id:'26',name:'Save Image',fields:[{id:'images',label:'images（输出结果）',kind:'output'}]}],loras:[],steps:16}
+  };
+  const bindDefault={qwen:{'12.image':'PS 当前画面','18.text':'PS 提示词','23.mask':'PS 当前选区蒙版','31.strength_model':'PS LoRA 强度','36.strength_model':'PS LoRA 强度','45.images':'PS 智能对象输出'},turbo:{'7.image':'PS 当前画面','14.text':'PS 提示词','27.steps':'PS 采样步数','33.images':'PS 智能对象输出'},inpaint:{'2.image':'PS 当前画面','9.mask':'PS 当前选区蒙版','17.text':'PS 提示词','24.strength_model':'PS LoRA 强度','41.images':'PS 智能对象输出'},flux:{'5.text':'PS 提示词','11.image':'PS 参考图 1','26.images':'PS 智能对象输出'}};
+  const themes=[{bg:'#e4e4dc',a:'#7dafa6',a2:'#c1d9d0',r:'-12deg',x:'28%',y:'21%'},{bg:'#e9e4d9',a:'#b6a47d',a2:'#d5d4c6',r:'-5deg',x:'22%',y:'24%'},{bg:'#e4e7e8',a:'#809fab',a2:'#c6d3d7',r:'9deg',x:'32%',y:'20%'},{bg:'#e7e7df',a:'#8caea5',a2:'#d3dcd6',r:'-12deg',x:'28%',y:'21%'},{bg:'#dce6df',a:'#7e9ea1',a2:'#b7cfc9',r:'6deg',x:'24%',y:'24%'},{bg:'#eadfd6',a:'#be9188',a2:'#d3bbb3',r:'-9deg',x:'31%',y:'21%'}];
+  const state={workflow:'qwen',versions:[1,2,3,4],active:4,nextVersion:5,refs:[{id:1,type:'empty'},{id:2,type:'empty'}],mapping:structuredClone(bindDefault),nodeId:'12',fieldId:'image',menuRef:null,busy:false,toastTimer:null,loras:{}};
+  for(const [key,w] of Object.entries(workflows)){state.loras[key]=w.loras.map(l=>({...l}));}
+  function showToast(t){$('#toast').textContent=t;$('#toast').classList.add('show');clearTimeout(state.toastTimer);state.toastTimer=setTimeout(()=>$('#toast').classList.remove('show'),3000)}
+  function pad(n){return String(n).padStart(3,'0')}
+  function renderHistory(){const strip=$('#history-strip');strip.replaceChildren();state.versions.forEach(n=>{const b=document.createElement('button');b.type='button';b.className='history-item'+(n===state.active?' selected':'');b.setAttribute('aria-label',`切换生成版本 ${pad(n)}`);b.title=`版本 ${pad(n)} · 仅在此原型中切换`;const mini=document.createElement('div');mini.className='history-thumb';mini.style.setProperty('--thumb',themes[(n-1)%themes.length].a2);const label=document.createElement('div');label.className='history-number';const number=document.createElement('span');number.textContent=pad(n);label.append(number);if(n===state.active){const activeIcon=document.createElement('span');activeIcon.innerHTML=icon('eye');label.append(activeIcon)}b.append(mini,label);b.onclick=()=>setActive(n);strip.append(b)});$('#history-count').textContent=`${state.versions.length} 个版本 · 智能对象`;$('#layer-count').textContent=String(state.versions.length);}
+  function setActive(n){if(!state.versions.includes(n))return;state.active=n;renderHistory();const theme=themes[(n-1)%themes.length];const board=$('#artboard');board.style.setProperty('--canvas',theme.bg);board.style.setProperty('--accent',theme.a);board.style.setProperty('--accent2',theme.a2);const product=$('#demo-product');product.style.left=theme.x;product.style.top=theme.y;product.style.transform=`rotate(${theme.r})`;$('#version-banner').textContent=`SMART OBJECT / VERSION ${pad(n)}`;$('#canvas-caption-left').textContent=`当前显示：智能对象版本 ${pad(n)}`;$('#panel-status').textContent=`已切换到 ${pad(n)} · 模拟独显`}
+  function renderReferences(){const holder=$('#reference-strip');holder.replaceChildren();state.refs.forEach((ref,i)=>{let btn=document.createElement('div');btn.className='ref-tile';btn.title='点击配置此参考槽位';btn.setAttribute('role','button');btn.tabIndex=0;btn.setAttribute('aria-label',`参考图 ${i+1}`);if(ref.type==='image'&&ref.url){let image=document.createElement('img');image.src=ref.url;image.alt='已选参考素材预览';btn.append(image);let caption=document.createElement('span');caption.className='ref-label-overlay';caption.textContent=`参考 ${i+1}`;btn.append(caption)}else if(ref.type==='demo'){let sample=document.createElement('div');sample.style.cssText='position:absolute;inset:0;background:linear-gradient(135deg,#95b1a2 10%,#d1c7af 60%,#84968c);';btn.append(sample);let caption=document.createElement('span');caption.className='ref-label-overlay';caption.textContent=`PS 图层 ${i+1}`;btn.append(caption)}else{btn.innerHTML=icon('image')+`<span class="caption">参考 ${i+1}</span>`}let del=document.createElement('button');del.type='button';del.className='ref-remove';del.textContent='×';del.title='移除参考槽位';del.onclick=(event)=>{event.stopPropagation();state.refs.splice(i,1);renderReferences()};btn.onclick=(e)=>openUploadMenu(e,i);btn.onkeydown=(e)=>{if(e.key==='Enter'||e.key===' '){e.preventDefault();openUploadMenu(e,i)}};btn.append(del);holder.append(btn)});if(state.refs.length<10){let add=document.createElement('button');add.type='button';add.className='ref-tile ref-add';add.setAttribute('aria-label','添加参考槽位');add.innerHTML=icon('plus')+'<span class="caption">添加</span>';add.onclick=()=>{const next=Math.max(0,...state.refs.map(r=>r.id))+1;state.refs.push({id:next,type:'empty'});renderReferences()};holder.append(add)} }
+  function openUploadMenu(event,i){state.menuRef=i;let menu=$('#upload-menu');let rect=event.currentTarget.getBoundingClientRect();menu.style.left=Math.min(rect.left,window.innerWidth-194)+'px';menu.style.top=Math.min(rect.bottom+5,window.innerHeight-135)+'px';menu.style.display='block';event.stopPropagation()}
+  function closeMenu(){ $('#upload-menu').style.display='none'; }
+  $('#select-demo-layer').onclick=()=>{const r=state.refs[state.menuRef];if(r){r.type='demo';r.url=null;renderReferences()}closeMenu();showToast('已为该槽位引用模拟 Photoshop 图层')};
+  $('#select-local-image').onclick=()=>{$('#file-picker').click();closeMenu()};
+  $('#file-picker').onchange=async(e)=>{const file=e.target.files?.[0];if(!file)return;const i=state.menuRef;const r=state.refs[i];if(!r)return;if(file.size>12*1024*1024){showToast('演示版限制：请选择小于 12 MB 的图片');return}const data=await new Promise(res=>{const rd=new FileReader();rd.onload=()=>res(rd.result);rd.readAsDataURL(file)});r.type='image';r.url=data;renderReferences();showToast('已载入本地参考图预览（未上传）');e.target.value='';};
+  $('#clear-ref').onclick=()=>{const r=state.refs[state.menuRef];if(r){r.type='empty';r.url=null;renderReferences()}closeMenu()};
+  document.addEventListener('click',(e)=>{if(!e.target.closest('#upload-menu'))closeMenu()});
+  function renderLoras(){const box=$('#lora-list');box.replaceChildren();const loras=state.loras[state.workflow].filter(l=>state.mapping[state.workflow][l.node+'.'+l.field]==='PS LoRA 强度');if(!loras.length){const p=document.createElement('div');p.className='param-help';p.style.padding='10px 0';p.textContent='当前工作流未绑定 LoRA 强度。请先在 ComfyUI 中添加并手动校准。';box.append(p);return}loras.forEach(l=>{const row=document.createElement('div');row.className='lora-row';row.innerHTML=`<div class="lora-top"><span class="lora-name"></span><span class="param-help"></span></div><div class="lora-controls"><input class="range" type="range" min="0" max="1.5" step="0.05" aria-label="LoRA 强度"><input class="param-num" type="number" min="0" max="1.5" step="0.05" aria-label="LoRA 强度数值"></div>`;row.querySelector('.lora-name').textContent=l.label;row.querySelector('.param-help').textContent='#'+l.node+'.'+l.field;const slider=row.querySelector('.range'),num=row.querySelector('.param-num');slider.value=String(l.strength);num.value=l.strength.toFixed(2);const apply=(value)=>{let v=Math.max(0,Math.min(1.5,Number(value)||0));l.strength=v;slider.value=String(v);num.value=v.toFixed(2)};slider.addEventListener('input',e=>apply(e.target.value));num.addEventListener('change',e=>apply(e.target.value));box.append(row)})}
+  function renderWorkflow(){ $('#workflow').value=state.workflow;$('#steps').value=String(workflows[state.workflow].steps);renderLoras();state.nodeId=workflows[state.workflow].nodes[0].id;state.fieldId=workflows[state.workflow].nodes[0].fields[0].id;renderCalibration();}
+  $('#workflow').onchange=(e)=>{state.workflow=e.target.value;renderWorkflow();showToast('已切换演示工作流：'+workflows[state.workflow].label)};
+  $('#selection-sim').onchange=(e)=>{let sel=e.target.value==='partial';$('#selection-guide').classList.toggle('on',sel);$('#selection-status').textContent=sel?'局部选区 · 1280 × 720':'无选区 · 全画布';showToast(sel?'已模拟局部选区':'已模拟全画布')};
+  $('#advanced-toggle').onclick=()=>{let opened=$('#advanced-body').hidden;$('#advanced-body').hidden=!opened;$('#advanced-toggle').setAttribute('aria-expanded',String(opened))};
+  $('#open-calibration').onclick=()=>openModal('calibration-modal');$('#open-psb').onclick=()=>{renderPSB();openModal('psb-modal')};
+  function openModal(id){const el=document.getElementById(id);el.hidden=false;el.querySelector('button,input,select')?.focus()}
+  function closeModal(id){document.getElementById(id).hidden=true}
+  document.querySelectorAll('[data-close]').forEach(b=>b.onclick=()=>closeModal(b.dataset.close));
+  document.querySelectorAll('.modal-backdrop').forEach(b=>b.addEventListener('click',e=>{if(e.target===b)closeModal(b.id)}));document.addEventListener('keydown',e=>{if(e.key==='Escape'){document.querySelectorAll('.modal-backdrop').forEach(b=>b.hidden=true);closeMenu()}});
+  function selectOptions(select,options,value){select.replaceChildren();options.forEach(o=>{const x=document.createElement('option');x.value=o.value;x.textContent=o.label;select.append(x)});if(value&&options.some(o=>o.value===value))select.value=value}
+  function renderCalibration(){const w=workflows[state.workflow];const old=state.nodeId;state.nodeId=w.nodes.some(n=>n.id===old)?old:w.nodes[0].id;selectOptions($('#node-select'),w.nodes.map(n=>({value:n.id,label:`#${n.id} · ${n.name}`})),state.nodeId);renderPorts()}
+  function renderPorts(){const node=workflows[state.workflow].nodes.find(n=>n.id===state.nodeId);if(!node)return;state.fieldId=node.fields.some(f=>f.id===state.fieldId)?state.fieldId:node.fields[0].id;selectOptions($('#port-select'),node.fields.map(p=>({value:p.id,label:`${p.id} · ${p.kind.toUpperCase()}`})),state.fieldId);renderRoles()}
+  function renderRoles(){const node=workflows[state.workflow].nodes.find(n=>n.id===state.nodeId);const field=node.fields.find(p=>p.id===state.fieldId);const list=roleDefs[field.kind];const current=state.mapping[state.workflow][state.nodeId+'.'+state.fieldId];selectOptions($('#role-select'),list.map(s=>({value:s,label:s})),current||list[0]);renderMappingList()}
+  function renderMappingList(){const rows=$('#map-rows');rows.replaceChildren();const map=Object.entries(state.mapping[state.workflow]).filter(([_,v])=>v!=='不绑定');$('#map-count').textContent=map.length+' 项';if(!map.length){const p=document.createElement('p');p.className='param-help';p.textContent='尚无任何绑定；请添加至少一个提示词和一个图片输出。';rows.append(p)}map.forEach(([key,val])=>{const row=document.createElement('div');row.className='map-row';const left=document.createElement('span');left.className='field';left.textContent='#'+key;const right=document.createElement('span');right.className='target';right.textContent=val;row.append(left,right);rows.append(row)})}
+  $('#node-select').onchange=e=>{state.nodeId=e.target.value;state.fieldId=workflows[state.workflow].nodes.find(n=>n.id===state.nodeId).fields[0].id;renderPorts();$('#cal-message').textContent=''};
+  $('#port-select').onchange=e=>{state.fieldId=e.target.value;renderRoles();$('#cal-message').textContent=''};
+  $('#save-mapping').onclick=()=>{const key=state.nodeId+'.'+state.fieldId;let val=$('#role-select').value;if(val==='不绑定')delete state.mapping[state.workflow][key];else state.mapping[state.workflow][key]=val;renderMappingList();renderLoras();$('#cal-message').textContent='此项映射已在浏览器演示状态中更新（未写入文件）。'};
+  function renderPSB(){let rows=$('#psb-rows');rows.replaceChildren();if(!state.versions.length){rows.textContent='智能对象内部已没有任何生成图层。';return}[...state.versions].reverse().forEach(n=>{const row=document.createElement('div');row.className='psb-item'+(state.active===n?' selected':'');const eye=document.createElement('button');eye.className='eye';eye.title='模拟独显此图层';eye.innerHTML=icon('eye');eye.onclick=()=>{setActive(n);renderPSB()};const name=document.createElement('span');name.className='name';name.textContent=pad(n)+(state.active===n?' · 独显':' · 隐藏');const del=document.createElement('button');del.className='del';del.title='模拟删除此内部图层';del.innerHTML=icon('trash');del.onclick=()=>{state.versions=state.versions.filter(x=>x!==n);if(state.active===n){state.active=state.versions.length?state.versions[state.versions.length-1]:null;}if(state.active!==null)setActive(state.active);else{renderHistory();$('#version-banner').textContent='SMART OBJECT / EMPTY';$('#panel-status').textContent='智能对象无内部图层'}renderPSB();showToast('已模拟在 PSB 中删除图层 '+pad(n))};row.append(eye,name,del);rows.append(row)})}
+  $('#generate').onclick=()=>{if(state.busy)return;const prompt=$('#prompt').value.trim();if(!prompt){showToast('请输入生成提示词');$('#prompt').focus();return}const mapped=Object.values(state.mapping[state.workflow]);if(!$('#use-current').checked && ['qwen','inpaint'].includes(state.workflow)){showToast('此编辑工作流需要主图：请开启“参考当前画面”或选择文生图工作流');return}if($('#use-current').checked && ['qwen','inpaint'].includes(state.workflow) && !mapped.includes('PS 当前画面')){showToast('当前编辑工作流尚未绑定主图片');return}if(!mapped.includes('PS 智能对象输出')){showToast('当前工作流尚未校准输出节点，请先设置');return}state.busy=true;$('#generate').disabled=true;$('#generate-label').textContent='模拟生成中…';$('#progress-line').classList.add('visible');$('#panel-status').textContent='正在模拟执行（非 ComfyUI）';let n=0;const timer=setInterval(()=>{n+=12;$('#progress-bar').style.width=Math.min(100,n)+'%';if(n>=100){clearInterval(timer);const id=state.nextVersion++;state.versions.push(id);state.busy=false;$('#generate').disabled=false;$('#generate-label').textContent='模拟生成';$('#progress-line').classList.remove('visible');$('#progress-bar').style.width='0%';setActive(id);showToast('模拟生成完成：新增版本 '+pad(id)+'（无真实图片）')}},145)};
+  // initialize
+  renderReferences();renderHistory();renderWorkflow();setActive(4);
+})();
+</script>
+</body>
+</html>

@@ -1,0 +1,21 @@
+{
+  "warning": "EXAMPLE ONLY. Replace all node IDs, field names and workflow fingerprints with values read from the actual API workflow.",
+  "schema_version": "waveplug.mapping.v0.1",
+  "profile_id": "demo-qwen21-edit",
+  "profile_name": "Qwen-Image 2.1 / Demo Edit",
+  "workflow_fingerprint": "replace-with-sha256-of-api-workflow",
+  "required_inputs": ["prompt", "output"],
+  "bindings": [
+    {"role": "source_image", "node_id": "12", "node_class": "LoadImage", "input_name": "image", "value_type": "STRING_FILE", "connected": false},
+    {"role": "selection_mask", "node_id": "23", "node_class": "LoadImageMask", "input_name": "image", "value_type": "STRING_FILE", "connected": false},
+    {"role": "prompt", "node_id": "18", "node_class": "CLIPTextEncode", "input_name": "text", "value_type": "STRING", "connected": false},
+    {"role": "lora_strength_model", "node_id": "31", "node_class": "LoraLoader", "input_name": "strength_model", "value_type": "FLOAT", "connected": false},
+    {"role": "result_image", "node_id": "45", "node_class": "SaveImage", "source": "history_output", "image_index": 0}
+  ],
+  "return_policy": {
+    "target": "photoshop_embedded_smart_object",
+    "version_layer_name": "zero_padded_monotonic_counter",
+    "preserve_original_pixels_outside_selection": true,
+    "require_document_identity_match": true
+  }
+}
