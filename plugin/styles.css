@@ -216,3 +216,6 @@ button, .ub { font: inherit; color: inherit; background: none; border: 0; paddin
 .sum-k { width: 80px; flex: none; color: var(--muted); }
 .sum-v { flex: 1 1 auto; min-width: 0; overflow-wrap: anywhere; }
 .sum-opt { margin-top: 4px; }
+
+/* check rows are divs (UXP dims <label> text); keep their text at full contrast */
+.check-row, .check-row span, .check-row .param-label { color: var(--text); user-select: none; }

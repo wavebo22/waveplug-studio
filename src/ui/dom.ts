@@ -6,7 +6,7 @@ type Attrs = Record<string, unknown> & { class?: string; style?: string };
 export function h<K extends keyof HTMLElementTagNameMap>(tag: K, attrs: Attrs | null = null, ...children: (Child | Child[])[]): HTMLElementTagNameMap[K] {
   // UXP renders <button> as a native Spectrum widget that ignores most CSS (and hides inline SVG),
   // so buttons are divs with button semantics.
-  const el = tag === "button" ? fakeButton() : document.createElement(tag);
+  const el = tag === "button" ? fakeButton() : tag === "label" ? fakeLabel() : document.createElement(tag);
   for (const [k, v] of Object.entries(attrs ?? {})) {
     if (v === undefined || v === null || v === false) continue;
     if (k.startsWith("on") && typeof v === "function") el.addEventListener(k.slice(2).toLowerCase(), v as EventListener);
@@ -17,6 +17,19 @@ export function h<K extends keyof HTMLElementTagNameMap>(tag: K, attrs: Attrs | 
   }
   for (const c of children.flat()) if (c !== null && c !== undefined && c !== false) el.append(c);
   return el as HTMLElementTagNameMap[K];
+}
+
+// UXP paints <label> text in its own dim grey regardless of CSS, so check rows are divs that
+// forward a click on the text to their checkbox.
+function fakeLabel(): HTMLElement {
+  const el = document.createElement("div");
+  el.addEventListener("click", e => {
+    const box = el.querySelector("input[type=checkbox]") as HTMLInputElement | null;
+    if (!box || box.disabled || e.target === box) return;
+    box.checked = !box.checked;
+    box.dispatchEvent(new Event("change"));
+  });
+  return el;
 }
 
 function fakeButton(): HTMLElement {
