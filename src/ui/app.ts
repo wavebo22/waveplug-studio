@@ -47,7 +47,7 @@ export function mountApp(root: HTMLElement, svc: Services) {
   // fill group (or a layer in it) is selected, another fill is picked in the panel, or a new fill is made.
   const pinned = new Map<number, number>();
   let fills: { layerId: number; name: string }[] = [];
-  let lastActive = "";
+  let lastActive = "", lastGroupKey = "";
   // explicit choice of the context chip for the current selection (add to the fill / make a new one)
   let choice: { sel: string; add: boolean } | null = null;
   const selKey = (r: Rect | null) => r ? `${r.left},${r.top},${r.right},${r.bottom}` : "";
@@ -349,6 +349,8 @@ export function mountApp(root: HTMLElement, svc: Services) {
       group = doc && pin !== undefined ? await svc.host.fillGroupById(doc.id, pin) : null;
       if (doc && !group && pin !== undefined && !fills.some(f => f.layerId === pin)) pinned.delete(doc.id);
       variations = group ? await svc.host.variations(group) : [];
+      const now = group ? `${group.docId}:${group.layerId}` : "";
+      if (now !== lastGroupKey) { log("info", "current fill", now || "none", active ? "(selected)" : pin !== undefined ? "(pinned)" : ""); lastGroupKey = now; }
     } catch (e) { log("warn", "refresh failed", e); }
     finally { refreshing = false; }
     renderHistory(); renderSelection(); renderAction();

@@ -128,17 +128,32 @@ export class UxpHost implements PsHost {
     if (!l) return null;
     if (!isFillGroup(l)) l = l.parent;
     if (!isFillGroup(l)) return null;
-    return this.groupInfo(d, l).catch(() => null);
+    return this.groupInfo(d, l).catch(e => { log("warn", "active fill group unreadable", l.id, e); return null; });
   }
 
   /** The fill area = non-zero bounds of a variation's layer mask (variations may extend past it). */
+  /** fill rect per "docId:groupId" — reading a mask needs a modal scope, so it is done once */
+  private rects = new Map<string, Rect>();
+
   private async groupInfo(doc: any, group: any): Promise<FillGroup> {
     const vs = variationLayers(group);
     if (!vs.length) throw new Error("AI 填充图层组里没有变体");
-    const lb = boundsRect(vs[0].layer);
-    const r = await ps().imaging.getLayerMask({ documentID: doc.id, layerID: vs[0].layer.id, sourceBounds: lb });
-    const mask = await grayInto(r, lb, 0);
-    const rect = nonZeroBounds(mask.data, mask.width, mask.height, lb) ?? lb;
+    const key = `${doc.id}:${group.id}`;
+    let rect = this.rects.get(key);
+    if (!rect) {
+      const lb = boundsRect(vs[0].layer);
+      try {
+        rect = await modal("WavePlug 读取填充范围", async () => {
+          const mask = await grayInto(await ps().imaging.getLayerMask({ documentID: doc.id, layerID: vs[0].layer.id, sourceBounds: lb }), lb, 0);
+          return nonZeroBounds(mask.data, mask.width, mask.height, lb) ?? lb;
+        });
+        this.rects.set(key, rect);
+      } catch (e) {
+        // e.g. Photoshop busy with another modal operation: use the layer bounds for now, retry next time
+        log("warn", "fill rect from mask failed, using layer bounds", e);
+        rect = lb;
+      }
+    }
     return { docId: doc.id, layerId: group.id, name: String(group.name).slice(FILL_PREFIX.length), rect };
   }
 
@@ -153,7 +168,7 @@ export class UxpHost implements PsHost {
     if (!this.docExists(docId)) return null;
     const doc = docById(docId);
     const l = findLayer(doc.layers, layerId);
-    return isFillGroup(l) ? this.groupInfo(doc, l).catch(() => null) : null;
+    return isFillGroup(l) ? this.groupInfo(doc, l).catch(e => { log("warn", "fill group unreadable", layerId, e); return null; }) : null;
   }
 
   async refreshFillGroup(g: FillGroup): Promise<FillGroup> {
@@ -239,6 +254,7 @@ export class UxpHost implements PsHost {
       const doc = docById(docId);
       ps().app.activeDocument = doc;
       const group = await doc.createLayerGroup({ name: FILL_PREFIX + (prompt.trim().slice(0, 24) || "移除") });
+      this.rects.set(`${docId}:${group.id}`, rect);
       return { docId, layerId: group.id, name: String(group.name).slice(FILL_PREFIX.length), rect };
     });
   }
