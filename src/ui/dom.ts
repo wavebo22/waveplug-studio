@@ -4,16 +4,34 @@ type Child = Node | string | null | undefined | false;
 type Attrs = Record<string, unknown> & { class?: string; style?: string };
 
 export function h<K extends keyof HTMLElementTagNameMap>(tag: K, attrs: Attrs | null = null, ...children: (Child | Child[])[]): HTMLElementTagNameMap[K] {
-  const el = document.createElement(tag);
+  // UXP renders <button> as a native Spectrum widget that ignores most CSS (and hides inline SVG),
+  // so buttons are divs with button semantics.
+  const el = tag === "button" ? fakeButton() : document.createElement(tag);
   for (const [k, v] of Object.entries(attrs ?? {})) {
     if (v === undefined || v === null || v === false) continue;
     if (k.startsWith("on") && typeof v === "function") el.addEventListener(k.slice(2).toLowerCase(), v as EventListener);
-    else if (k === "class") el.className = String(v);
+    else if (k === "class") el.className = (tag === "button" ? "ub " : "") + String(v);
     else if (k === "style") el.setAttribute("style", String(v));
     else if (k in el && typeof v !== "string") (el as any)[k] = v;
     else el.setAttribute(k, v === true ? "" : String(v));
   }
   for (const c of children.flat()) if (c !== null && c !== undefined && c !== false) el.append(c);
+  return el as HTMLElementTagNameMap[K];
+}
+
+function fakeButton(): HTMLElement {
+  const el = document.createElement("div");
+  el.className = "ub";
+  el.setAttribute("role", "button");
+  el.tabIndex = 0;
+  let disabled = false;
+  Object.defineProperty(el, "disabled", {
+    get: () => disabled,
+    set: (v: boolean) => { disabled = !!v; el.classList.toggle("is-disabled", disabled); el.setAttribute("aria-disabled", String(disabled)); },
+  });
+  // swallow clicks while disabled, before any listener added later runs
+  el.addEventListener("click", e => { if (disabled) { e.stopImmediatePropagation(); e.preventDefault(); } });
+  el.addEventListener("keydown", e => { if ((e as KeyboardEvent).key === "Enter" || (e as KeyboardEvent).key === " ") { e.preventDefault(); el.click(); } });
   return el;
 }
 

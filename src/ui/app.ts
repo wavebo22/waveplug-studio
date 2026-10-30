@@ -5,7 +5,7 @@ import { type Comfy, ComfyError } from "../core/comfy/client.ts";
 import type { Rect } from "../core/image/region.ts";
 import { asApiGraph } from "../core/workflow/api.ts";
 import { MAX_SEED, randomSeed } from "../core/workflow/inject.ts";
-import { type Profile, carryOver, newProfile, validateProfile } from "../core/workflow/profile.ts";
+import { type Binding, type Profile, carryOver, newProfile, validateProfile } from "../core/workflow/profile.ts";
 import { recognize } from "../core/workflow/recognize.ts";
 import { uiToApi, widgetNamesFromObjectInfo } from "../core/workflow/uiToApi.ts";
 import { type RefSource, StashedResult, runInpaint } from "../app/generate.ts";
@@ -174,7 +174,7 @@ export function mountApp(root: HTMLElement, svc: Services) {
     if (conn.state !== "ok") return "未连接 ComfyUI";
     if (!doc) return "请先打开 PSD";
     if (!sel && !group) return "请先建立选区";
-    if (!profile.options.allowEmptyPrompt && profile.bindings.some(b => b.role === "prompt") && !prompt.value.trim()) return "请输入提示词";
+    if (!profile.options.allowEmptyPrompt && profile.bindings.some(b => b.role === "prompt") && !prompt.value.trim()) return "请输入提示词（留空移除可在「接口校准」里开启）";
     return null;
   }
 
@@ -374,20 +374,88 @@ export function mountApp(root: HTMLElement, svc: Services) {
   }
 
   /** New import, or re-import of a workflow with the same name: carry valid bindings over. */
+  /** Bindings to use without asking, when every required role was recognised unambiguously. */
+  function autoBindings(rec: ReturnType<typeof recognize>): Binding[] | null {
+    if (rec.blockers.length) return null;
+    const one = (role: string) => rec.suggestions.filter(s => s.binding.role === role);
+    const image = one("image"), output = one("output"), prompt = one("prompt"), mask = one("mask");
+    if (image.length !== 1 || image[0].confidence !== "certain") return null;
+    if (output.length !== 1 || output[0].confidence !== "certain") return null;
+    if (prompt.length && prompt[0].confidence !== "certain") return null;
+    if (mask.length && mask[0].confidence !== "certain") return null;
+    return rec.suggestions.filter(s => s.confidence === "certain").map(s => s.binding);
+  }
+
+  const looksLikeRemoval = (name: string, bindings: Binding[]) =>
+    /移除|清除|擦除|remove|erase/i.test(name + " " + bindings.filter(b => b.role === "prompt").map(b => b.title ?? "").join(" "));
+
+  /** Short confirmation shown instead of the full calibration sheet when recognition is clear. */
+  function openSummary(name: string, bindings: Binding[], options: Profile["options"]): Promise<"ok" | "adjust" | null> {
+    return new Promise(resolve => {
+      const line = (label: string, b?: Binding, note = "") => b
+        ? h("div", { class: "sum-row" }, h("span", { class: "sum-k" }, label), h("span", { class: "sum-v" }, `#${b.nodeId} ${b.title ?? b.classType}${note}`))
+        : null;
+      const params = bindings.filter(b => b.role === "param").map(b => b.label ?? b.input);
+      const img = bindings.find(b => b.role === "image");
+      const empty = h("input", { type: "checkbox", checked: options.allowEmptyPrompt, onChange: (e: Event) => { options.allowEmptyPrompt = (e.target as HTMLInputElement).checked; } });
+      const done = (v: "ok" | "adjust" | null) => { sheet.remove(); resolve(v); };
+      const sheet = h("div", { class: "sheet" },
+        h("div", { class: "sheet-head" }, h("span", { class: "sheet-title" }, "已识别工作流"),
+          h("button", { class: "icon-btn", title: "关闭", onClick: () => done(null) }, icon("close"))),
+        h("div", { class: "sheet-body" },
+          h("div", { class: "sum-name" }, icon("check", 16), h("span", null, name)),
+          h("div", { class: "muted small" }, "所有必需的接口都已自动找到，可以直接使用。"),
+          h("div", { class: "sum" },
+            line("画面 + 选区", img, img?.encoding === "rgba-alpha-mask" ? "（选区写入透明通道）" : ""),
+            line("选区遮罩", bindings.find(b => b.role === "mask")),
+            line("提示词", bindings.find(b => b.role === "prompt")),
+            line("输出", bindings.find(b => b.role === "output")),
+            params.length ? h("div", { class: "sum-row" }, h("span", { class: "sum-k" }, "高级参数"), h("span", { class: "sum-v" }, params.join("、"))) : null),
+          bindings.some(b => b.role === "prompt")
+            ? h("label", { class: "check-row sum-opt" }, empty, h("span", null, "提示词留空时执行「移除选区内容」")) : null),
+        h("div", { class: "sheet-foot" },
+          h("button", { class: "btn", onClick: () => done("adjust") }, "手动调整"),
+          h("button", { class: "btn primary", onClick: () => done("ok") }, "完成")));
+      sheetHost.append(sheet);
+    });
+  }
+
+  /** New import, or re-import of a workflow with the same name: carry valid bindings over. */
   async function adopt(name: string, api: ReturnType<typeof asApiGraph>, warnings: string[]) {
     const rec = recognize(api);
     if (warnings.length) rec.notes.push(...warnings);
     const old = profiles.find(p => p.name === name);
     if (old) {
       const c = carryOver(old, api);
+      if (!c.broken.length && !validateProfile(c.profile).length) {
+        Object.assign(old, { ...c.profile, updatedAt: Date.now() });
+        saveProfiles(old.id);
+        setStatus(`已更新「${old.name}」，原有绑定全部有效`, "ok");
+        return;
+      }
       const result = await openCalibration(sheetHost, api, rec, { name, bindings: c.profile.bindings, options: c.profile.options }, false);
       if (!result) return;
       Object.assign(old, { ...c.profile, name: result.name, bindings: result.bindings, options: result.options, updatedAt: Date.now() });
       saveProfiles(old.id);
-      setStatus(`已更新「${old.name}」：保留 ${c.kept.length} 项，自动迁移 ${c.remapped.length} 项` + (c.broken.length ? `，${c.broken.length} 项需重新绑定` : ""), c.broken.length ? "error" : "ok");
+      setStatus(`已更新「${old.name}」：保留 ${c.kept.length} 项，自动迁移 ${c.remapped.length} 项` + (c.broken.length ? `，${c.broken.length} 项已重新绑定` : ""), "ok");
       return;
     }
-    const result = await openCalibration(sheetHost, api, rec, { name, bindings: [], options: newProfile(name, api, []).options }, true);
+    const options = newProfile(name, api, []).options;
+    const auto = autoBindings(rec);
+    if (auto) {
+      options.allowEmptyPrompt = looksLikeRemoval(name, auto);
+      const choice = await openSummary(name, auto, options);
+      if (!choice) return;
+      if (choice === "ok") {
+        const p = newProfile(name, api, auto);
+        p.options = options;
+        profiles.push(p);
+        saveProfiles(p.id);
+        setStatus(`已导入「${p.name}」，可以开始生成`, "ok");
+        return;
+      }
+    }
+    const result = await openCalibration(sheetHost, api, rec, { name, bindings: auto ?? [], options }, true);
     if (!result) return;
     const p = newProfile(result.name, api, result.bindings);
     p.options = result.options;
