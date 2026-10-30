@@ -22,7 +22,11 @@ export interface Services {
 
 // ── persistent settings / profiles (UXP localStorage is per-plugin and survives restarts) ──
 
-export interface Settings { comfyUrl: string; activeProfile: string | null; advancedOpen: boolean }
+export interface Settings {
+  comfyUrl: string; activeProfile: string | null; advancedOpen: boolean;
+  /** save sent/received images and the submitted workflow to reports\debug_* (large files) */
+  debugFiles: boolean;
+}
 export interface ProfileState { prompt: string; params: Record<string, number | boolean>; seedMode: "random" | "fixed"; seed: number; count?: number; fullRun?: boolean }
 
 const KEY = { settings: "wp.settings", profiles: "wp.profiles", state: "wp.state.", thumb: "wp.thumb." };
@@ -35,7 +39,7 @@ function write(k: string, v: unknown) {
 }
 
 export const store = {
-  settings: (): Settings => ({ comfyUrl: "http://127.0.0.1:8188", activeProfile: null, advancedOpen: false, ...read<Partial<Settings>>(KEY.settings, {}) }),
+  settings: (): Settings => ({ comfyUrl: "http://127.0.0.1:8188", activeProfile: null, advancedOpen: false, debugFiles: false, ...read<Partial<Settings>>(KEY.settings, {}) }),
   saveSettings: (s: Settings) => write(KEY.settings, s),
   profiles: (): Profile[] => read<Profile[]>(KEY.profiles, []),
   saveProfiles: (p: Profile[]) => write(KEY.profiles, p),

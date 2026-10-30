@@ -363,7 +363,11 @@ export function mountApp(root: HTMLElement, svc: Services) {
       h("div", { class: "sheet-body" },
         h("div", { class: "group-label" }, "地址"), url,
         h("div", { class: "muted small" }, "可以只填 IP 和端口，例如 127.0.0.1:8188。插件只调用 ComfyUI 自带的接口，不需要安装节点或修改启动参数。"),
-        result),
+        result,
+        h("div", { class: "group-label" }, "排查问题"),
+        h("label", { class: "check-row", title: "每次生成时把发送的图片、返回的图片和提交的工作流保存到 F:\\waveplug\\studio\\reports\\debug_*。大图一张可达几十 MB，排查完请关闭" },
+          h("input", { type: "checkbox", checked: settings.debugFiles, onChange: (e: Event) => { settings.debugFiles = (e.target as HTMLInputElement).checked; store.saveSettings(settings); } }),
+          h("span", null, "保存调试文件（图片较大，仅排查时打开）"))),
       h("div", { class: "sheet-foot" },
         svc.diagnose ? h("button", { class: "btn", title: "逐项测试 fetch / XHR / WebSocket，结果同时写入日志", onClick: async () => {
           settings.comfyUrl = normalizeUrl(url.value); url.value = settings.comfyUrl;
@@ -635,7 +639,7 @@ export function mountApp(root: HTMLElement, svc: Services) {
         progress: (f, t) => { current.progress = f; current.detail = t ?? ""; renderAction(); renderHistory(); },
         promptQueued: id => { current.promptId = id; },
         variationAdded: (g, v) => { group = g; variations = [...variations.map(x => ({ ...x, visible: false })), v]; renderHistory(); },
-        debug: svc.debugSave,
+        debug: settings.debugFiles ? svc.debugSave : undefined,
       });
       if (ps.seedMode === "random") { ps.seed = res.seeds[res.seeds.length - 1]; store.saveState(p.id, ps); }
       setStatus(`${res.continued ? "已加入" : "已新建 AI 填充，"}变体 ${res.variations.map(v => v.number).join("、")} · seed ${res.seeds.join("、")}`, "ok");
