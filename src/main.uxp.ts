@@ -11,7 +11,7 @@ declare const require: (m: string) => any;
 
 const uxp = require("uxp");
 const { localFileSystem: fs, formats } = uxp.storage;
-const VERSION = "0.1.12";
+const VERSION = "0.1.13";
 
 // Diagnostic log: plugin data folder, mirrored into the project's reports folder on F: when that
 // drive is reachable, so it can be read without the UXP developer console.

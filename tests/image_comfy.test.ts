@@ -101,3 +101,9 @@ test("selection trimmed to its own bounds is placed back into the captured area"
   assert.deepEqual([...out.data.slice(6, 12)], [0, 0, 0, 255, 128, 0]);
   assert.equal(out.data.reduce((a, b) => a + b, 0), 383);
 });
+
+test("optional red mark tints only the selected pixels, alpha unchanged", () => {
+  const img = { width: 2, height: 1, channels: 3 as const, data: new Uint8Array([100, 100, 100, 100, 100, 100]) };
+  const sel = { width: 2, height: 1, channels: 1 as const, data: new Uint8Array([255, 0]) };
+  assert.deepEqual([...imageWithAlphaMask(img, sel, 0.5).data], [178, 50, 50, 0, 100, 100, 100, 255]);
+});

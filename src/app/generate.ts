@@ -103,7 +103,7 @@ export async function runInpaint(host: PsHost, comfy: Comfy, input: RunInput, ho
   const t0 = Date.now();
   const img = profile.bindings.find(b => b.role === "image")!;
   const values = {
-    image: await upload(imageFile(cap.image, img.encoding ?? "rgb", cap.selection), "image"),
+    image: await upload(imageFile(cap.image, img.encoding ?? "rgb", cap.selection, profile.options.markSelection ?? 0), "image"),
     mask: undefined as string | undefined,
     references: {} as Record<number, string>,
   };

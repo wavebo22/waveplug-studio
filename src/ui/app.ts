@@ -236,6 +236,14 @@ export function mountApp(root: HTMLElement, svc: Services) {
         h("div", { class: "param-ctl" }, mode, seedNum,
           h("button", { class: "icon-btn", title: "换一个种子", onClick: () => { ps.seed = randomSeed(); ps.seedMode = "fixed"; save(); renderAdvanced(); } }, icon("dice")))));
     }
+    if (p.bindings.some(b => b.role === "image" && b.encoding === "rgba-alpha-mask")) {
+      rows.push(h("label", { class: "param check-row", title: "在发送给 ComfyUI 的图片上，把选区染成 50% 红色。部分编辑类工作流靠颜色找到要改的区域" },
+        h("input", { type: "checkbox", checked: (p.options.markSelection ?? 0) > 0, onChange: (e: Event) => {
+          p.options.markSelection = (e.target as HTMLInputElement).checked ? 0.5 : 0;
+          store.saveProfiles(profiles);
+        } }),
+        h("span", { class: "param-label" }, "选区叠加红色标记（实验）")));
+    }
     if (!rows.length) rows.push(h("div", { class: "muted small" }, "该工作流没有绑定可调参数。可在「接口校准」中添加已有 LoRA 强度、步数等字段。"));
     replace(advBody, ...rows);
   }
