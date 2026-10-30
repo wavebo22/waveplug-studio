@@ -1,6 +1,6 @@
 @echo off
 rem Installs the newest WavePlug Studio .ccx with Adobe UPIA.
-rem Double-click this file yourself (normal desktop session, not elevated) with Photoshop closed.
+rem Close Photoshop, then right-click this file -> Run as administrator (a non-elevated run returned -432 on mainpc).
 chcp 65001 >nul
 setlocal
 set "UPIA=J:\AI things\OpenLayer\Adobe-UPIA-Extract\UPI64-unpacked\UnifiedPluginInstallerAgent\UnifiedPluginInstallerAgent.exe"
