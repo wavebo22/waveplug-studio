@@ -9,6 +9,15 @@ set "LOG=%ROOT%\reports\install_%DATE:~0,4%%DATE:~5,2%%DATE:~8,2%_%RANDOM%.log"
 set "CCX="
 for /f "delims=" %%f in ('dir /b /o:n "%ROOT%\releases\WavePlug_Studio_*_local.ccx"') do set "CCX=%ROOT%\releases\%%f"
 
+rem UPIA resolves a root-relative Adobe user path against its current drive.
+rem Keep the working drive on the user's profile drive, even when run from F:.
+cd /d "%USERPROFILE%"
+if errorlevel 1 (
+  echo Could not switch UPIA working directory to %USERPROFILE%.
+  pause
+  exit /b 1
+)
+
 tasklist /fi "imagename eq Photoshop.exe" | find /i "Photoshop.exe" >nul && (
   echo 请先保存并完全关闭 Photoshop，再运行本脚本。
   pause
@@ -22,6 +31,9 @@ tasklist /fi "imagename eq Photoshop.exe" | find /i "Photoshop.exe" >nul && (
   echo APPDATA=%APPDATA%
   echo LOCALAPPDATA=%LOCALAPPDATA%
   echo TEMP=%TEMP%
+  echo HOMEDRIVE=%HOMEDRIVE%
+  echo HOMEPATH=%HOMEPATH%
+  echo WORKDIR=%CD%
   echo CCX=%CCX%
   echo === install ===
 )
