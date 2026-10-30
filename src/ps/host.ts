@@ -1,8 +1,8 @@
 // What the panel needs from Photoshop. Implemented for real UXP (uxpHost.ts) and for the
 // browser preview (main.preview.ts) so the UI can be developed without Photoshop.
 //
-// Results follow Photoshop's Generative Fill model: one layer group per fill (masked by the
-// selection), one pixel layer per variation inside it, exactly one variation visible. New
+// Results follow Photoshop's Generative Fill model: one layer group per fill, one masked pixel
+// layer per variation inside it, exactly one variation visible. New
 // variations are always generated from the document *without* the group, i.e. from the original.
 
 import type { Pixels } from "../core/image/png.ts";
@@ -68,10 +68,11 @@ export interface PsHost {
   variations(g: FillGroup): Promise<Variation[]>;
   showVariation(g: FillGroup, layerId: number): Promise<void>;
   deleteVariation(g: FillGroup, layerId: number): Promise<void>;
-  /** New group masked by `mask` (1-channel over `rect`). */
-  createFillGroup(docId: number, rect: Rect, mask: Pixels, prompt: string): Promise<FillGroup>;
-  /** Places the PNG (which covers `placement` in document pixels) as the next variation and shows it. */
-  addVariation(g: FillGroup, png: Uint8Array, placement: Rect, prompt: string): Promise<Variation>;
+  /** New, empty fill group for the area `rect`. */
+  createFillGroup(docId: number, rect: Rect, prompt: string): Promise<FillGroup>;
+  /** Places the PNG (which covers `placement` in document pixels) as the next variation, masked by
+   *  `mask` (1-channel over the group rect, everything outside hidden), and shows it. */
+  addVariation(g: FillGroup, png: Uint8Array, placement: Rect, prompt: string, mask: Pixels): Promise<Variation>;
   thumbnail(g: FillGroup, layerId: number, size: number): Promise<string>;
   /** Called (debounced) whenever document, selection or layers may have changed. */
   onChange(cb: () => void): void;

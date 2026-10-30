@@ -4,7 +4,7 @@
 
 import { encodePng, type Pixels } from "../core/image/png.ts";
 import { imageFile, isEmptySelection, maskFile } from "../core/image/compose.ts";
-import { type Rect, clampRect, expand, rectH, rectW } from "../core/image/region.ts";
+import { type Rect, clampRect, expandBy, rectH, rectW } from "../core/image/region.ts";
 import { type Comfy, type JobEvent, outputImage, pngSize, utf8 } from "../core/comfy/client.ts";
 import { log } from "./log.ts";
 import { prepareRun } from "../core/workflow/inject.ts";
@@ -89,7 +89,11 @@ export async function runInpaint(host: PsHost, comfy: Comfy, input: RunInput, ho
     const s = clampRect(selBounds, doc.width, doc.height);
     focus = { left: Math.min(s.left, focus.left), top: Math.min(s.top, focus.top), right: Math.max(s.right, focus.right), bottom: Math.max(s.bottom, focus.bottom) };
   }
-  const sendRect = profile.options.sendScope === "canvas" ? canvas : expand(focus, profile.options.cropMargin, doc.width, doc.height);
+  // Crop: the selection plus a margin of `cropMargin` × its shorter side (≥ what crop-and-restore
+  // workflows such as 孤海遮罩裁剪V2 expand by), so the workflow sees the same context while
+  // files stay small — a full 3508×4959 canvas made write-back heavy enough to crash Photoshop.
+  const sendRect = profile.options.sendScope === "canvas" ? canvas
+    : expandBy(focus, Math.ceil(Math.min(rectW(focus), rectH(focus)) * profile.options.cropMargin), doc.width, doc.height);
 
   let selection: "active" | Pixels = "active";
   if (!selBounds && target) selection = paste(await host.groupMask(target), sendRect, target.rect);
@@ -165,11 +169,11 @@ export async function runInpaint(host: PsHost, comfy: Comfy, input: RunInput, ho
     try {
       group = group
         ? await host.refreshFillGroup(group)
-        : await host.createFillGroup(doc.id, groupRect, crop(cap.selection, sendRect, groupRect), input.prompt);
+        : await host.createFillGroup(doc.id, groupRect, input.prompt);
     } catch (e) {
       throw new StashedResult((e as Error).message + "，结果未写入", png);
     }
-    const v = await host.addVariation(group, png, sendRect, input.prompt);
+    const v = await host.addVariation(group, png, sendRect, input.prompt, crop(cap.selection, sendRect, groupRect));
     variations.push(v); seeds.push(run.seed);
     hooks.variationAdded?.(group, v, run.seed);
     check();

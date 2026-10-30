@@ -107,3 +107,10 @@ test("optional red mark tints only the selected pixels, alpha unchanged", () => 
   const sel = { width: 2, height: 1, channels: 1 as const, data: new Uint8Array([255, 0]) };
   assert.deepEqual([...imageWithAlphaMask(img, sel, 0.5).data], [178, 50, 50, 0, 100, 100, 100, 255]);
 });
+
+test("crop margin and mask bounds helpers", async () => {
+  const { expandBy, nonZeroBounds } = await import("../src/core/image/region.ts");
+  assert.deepEqual(expandBy({ left: 100, top: 100, right: 200, bottom: 300 }, 100, 1000, 350), { left: 0, top: 0, right: 300, bottom: 350 });
+  const d = new Uint8Array(4 * 3); d[1 * 4 + 2] = 9; d[2 * 4 + 3] = 1;
+  assert.deepEqual(nonZeroBounds(d, 4, 3, { left: 10, top: 20, right: 14, bottom: 23 }), { left: 12, top: 21, right: 14, bottom: 23 });
+});

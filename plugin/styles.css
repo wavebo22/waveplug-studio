@@ -206,3 +206,4 @@ select.field { padding-right: 2px; }
 .var-fill { position: absolute; left: 0; top: 0; bottom: 0; background: rgba(79, 174, 158, .22); }
 .var-prompt { font-size: 10px; margin-top: 2px; overflow-wrap: anywhere; }
 .var-prompt .link { margin-left: 4px; }
+.prompt-hint { font-size: 10px; color: var(--muted); margin: 3px 0 0 2px; }

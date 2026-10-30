@@ -59,8 +59,10 @@ export interface Profile {
     allowEmptyPrompt: boolean;
     /** what part of the document is sent: whole canvas or selection bounds + margin */
     sendScope: "canvas" | "crop";
-    /** margin around the selection when sendScope = crop, as a fraction of the selection size */
+    /** margin around the selection when sendScope = crop, in multiples of the selection's shorter side */
     cropMargin: number;
+    /** set once the crop default (introduced in 0.2.3) has been applied to an older profile */
+    cropDefault?: boolean;
     /** links that make the sampler respect the selection (execution copy only), see localMask.ts */
     localMask?: { enabled: boolean; links: { nodeId: string; input: string; from: [string, number] }[] };
   };
@@ -72,7 +74,7 @@ export function newProfile(name: string, api: ApiGraph, bindings: Binding[]): Pr
     schema: "waveplug.profile.v1",
     id: "p" + now.toString(36) + Math.random().toString(36).slice(2, 6),
     name, taskType: "inpaint", createdAt: now, updatedAt: now, api, bindings,
-    options: { allowEmptyPrompt: false, sendScope: "canvas", cropMargin: 0.5 },
+    options: { allowEmptyPrompt: false, sendScope: "crop", cropMargin: 1, cropDefault: true },
   };
 }
 

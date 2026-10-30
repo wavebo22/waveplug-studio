@@ -1,7 +1,7 @@
 // Browser preview: the real panel UI driven by a simulated Photoshop document and ComfyUI backend.
 // Only for looking at layout and interaction — nothing here talks to Photoshop or ComfyUI.
 
-import type { Comfy, HistoryEntry, JobEvent } from "../core/comfy/client.ts";
+import { type Comfy, type HistoryEntry, type JobEvent, pngSize } from "../core/comfy/client.ts";
 import { encodePng, type Pixels } from "../core/image/png.ts";
 import type { Rect } from "../core/image/region.ts";
 import { uiToApi } from "../core/workflow/uiToApi.ts";
@@ -51,7 +51,7 @@ class MockHost implements PsHost {
   async variations() { return this.list.map(v => ({ ...v })); }
   async showVariation(_g: FillGroup, layerId: number) { this.list.forEach(v => { v.visible = v.layerId === layerId; }); }
   async deleteVariation(_g: FillGroup, layerId: number) { this.list = this.list.filter(v => v.layerId !== layerId); if (!this.list.some(v => v.visible) && this.list.length) this.list[this.list.length - 1].visible = true; }
-  async createFillGroup(_d: number, rect: Rect, _m: Pixels, prompt: string): Promise<FillGroup> { this.groupSelected = true; this.list = []; this.group = { ...this.group, rect, name: prompt.slice(0, 24) }; return this.group; }
+  async createFillGroup(_d: number, rect: Rect, prompt: string): Promise<FillGroup> { this.groupSelected = true; this.list = []; this.group = { ...this.group, rect, name: prompt.slice(0, 24) }; return this.group; }
   async addVariation(_g: FillGroup, _png: Uint8Array, _p: Rect, prompt: string): Promise<Variation> {
     const n = Math.max(0, ...this.list.map(v => v.number)) + 1;
     const v = { layerId: 100 + n, number: n, label: String(n), prompt, visible: true };
@@ -72,10 +72,14 @@ class MockComfy implements Comfy {
   async objectInfo() { return {}; }
   async listWorkflows() { return ["孤海 Qwen2.1 Turbo PS专用/Qwen-2.1-移除、局部重绘_PS插件连接本地comfyui专用_本机适配.json"]; }
   async readWorkflow() { return fixtureUi; }
-  async uploadImage(_b: Uint8Array, name: string) { await sleep(150); return "waveplug/" + name; }
+  last = { width: 16, height: 10 };
+  async uploadImage(b: Uint8Array, name: string) { this.last = pngSize(b) ?? this.last; await sleep(150); return "waveplug/" + name; }
   async queue() { return { promptId: "mock-" + Date.now(), number: 1 }; }
   async history(): Promise<HistoryEntry | null> { return null; }
-  async view() { return encodePng({ width: 16, height: 10, channels: 3, data: new Uint8Array(480).fill(90) }); } // 1920×1200 aspect
+  async view() { // same aspect as the uploaded image, tiny
+    const { width, height } = this.last;
+    return encodePng({ width, height, channels: 3, data: new Uint8Array(width * height * 3).fill(90) });
+  }
   async cancel() {}
   async freeCache() {}
   async waitFor(promptId: string, onEvent: (e: JobEvent) => void, opts: { signal?: { aborted: boolean } } = {}): Promise<HistoryEntry> {

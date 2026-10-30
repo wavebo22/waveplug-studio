@@ -2,9 +2,9 @@
 // selection, one cropped pixel layer per variation inside it.
 
 import { encodePng, type Pixels } from "../core/image/png.ts";
-import { type Rect, rectH, rectW } from "../core/image/region.ts";
+import { type Rect, nonZeroBounds, rectH, rectW } from "../core/image/region.ts";
 import { placeGray } from "../core/image/compose.ts";
-import { log } from "../app/log.ts";
+import { flushLog, log } from "../app/log.ts";
 import { type Capture, type DocInfo, FILL_PREFIX, type FillGroup, type LayerInfo, type PsHost, type Variation } from "./host.ts";
 
 declare const require: (m: string) => any;
@@ -131,15 +131,14 @@ export class UxpHost implements PsHost {
     return this.groupInfo(d, l).catch(() => null);
   }
 
+  /** The fill area = non-zero bounds of a variation's layer mask (variations may extend past it). */
   private async groupInfo(doc: any, group: any): Promise<FillGroup> {
     const vs = variationLayers(group);
-    let rect: Rect | null = vs.length ? boundsRect(vs[0].layer) : null;
-    if (!rect || rectW(rect) <= 0) {
-      // no variation left: fall back to the group mask's extent
-      const r = await ps().imaging.getLayerMask({ documentID: doc.id, layerID: group.id });
-      try { rect = boundsOf(r.sourceBounds, { left: 0, top: 0, right: Math.round(doc.width), bottom: Math.round(doc.height) }); }
-      finally { r.imageData.dispose(); }
-    }
+    if (!vs.length) throw new Error("AI 填充图层组里没有变体");
+    const lb = boundsRect(vs[0].layer);
+    const r = await ps().imaging.getLayerMask({ documentID: doc.id, layerID: vs[0].layer.id, sourceBounds: lb });
+    const mask = await grayInto(r, lb, 0);
+    const rect = nonZeroBounds(mask.data, mask.width, mask.height, lb) ?? lb;
     return { docId: doc.id, layerId: group.id, name: String(group.name).slice(FILL_PREFIX.length), rect };
   }
 
@@ -153,7 +152,11 @@ export class UxpHost implements PsHost {
 
   async groupMask(g: FillGroup): Promise<Pixels> {
     return modal("WavePlug 读取遮罩", async () => {
-      const r = await ps().imaging.getLayerMask({ documentID: g.docId, layerID: g.layerId, sourceBounds: g.rect });
+      const group = findLayer(docById(g.docId).layers, g.layerId);
+      const vs = group ? variationLayers(group) : [];
+      const src = vs.find(v => v.layer.visible) ?? vs[0];
+      if (!src) throw new Error("AI 填充图层组里没有变体，请重新框选");
+      const r = await ps().imaging.getLayerMask({ documentID: g.docId, layerID: src.layer.id, sourceBounds: g.rect });
       return grayInto(r, g.rect, 0);
     });
   }
@@ -217,23 +220,18 @@ export class UxpHost implements PsHost {
     });
   }
 
-  async createFillGroup(docId: number, rect: Rect, mask: Pixels, prompt: string): Promise<FillGroup> {
+  async createFillGroup(docId: number, rect: Rect, prompt: string): Promise<FillGroup> {
     return step("WavePlug 新建 AI 填充", docId, async () => {
-      const { app, imaging } = ps();
       const doc = docById(docId);
-      app.activeDocument = doc;
+      ps().app.activeDocument = doc;
       const group = await doc.createLayerGroup({ name: FILL_PREFIX + (prompt.trim().slice(0, 24) || "移除") });
-      await selectLayer(group.id);
-      await play([{ _obj: "make", new: { _class: "channel" }, at: { _ref: "channel", _enum: "channel", _value: "mask" }, using: { _enum: "userMaskEnabled", _value: "revealAll" }, _options: DONT }]);
-      const m = await imaging.createImageDataFromBuffer(mask.data, { width: mask.width, height: mask.height, components: 1, colorSpace: "Grayscale", chunky: true });
-      try { await imaging.putLayerMask({ documentID: docId, layerID: group.id, imageData: m, targetBounds: { left: rect.left, top: rect.top } }); }
-      finally { m.dispose(); }
       return { docId, layerId: group.id, name: String(group.name).slice(FILL_PREFIX.length), rect };
     });
   }
 
-  async addVariation(g: FillGroup, png: Uint8Array, placement: Rect, prompt: string): Promise<Variation> {
+  async addVariation(g: FillGroup, png: Uint8Array, placement: Rect, prompt: string, mask: Pixels): Promise<Variation> {
     const token = await tempPng(png);
+    const trace = async (what: string) => { log("info", "write-back", what); await flushLog(); };
     return step("WavePlug AI 填充", g.docId, async () => {
       const { app, imaging, constants } = ps();
       const userDoc = app.activeDocument;
@@ -242,8 +240,8 @@ export class UxpHost implements PsHost {
       const group = findLayer(doc.layers, g.layerId);
       if (!isFillGroup(group)) throw new Error("AI 填充图层组已不存在");
       const n = Math.max(0, ...variationLayers(group).map(v => v.n)) + 1;
-      const name = `v${n} · ${prompt.trim().slice(0, 40) || "移除"}`;
 
+      await trace(`place v${n} ${rectW(placement)}x${rectH(placement)}`);
       await selectLayer(group.id);
       await play([{
         _obj: "placeEvent", null: { _path: token, _kind: "local" },
@@ -251,29 +249,32 @@ export class UxpHost implements PsHost {
         offset: { _obj: "offset", horizontal: { _unit: "pixelsUnit", _value: 0 }, vertical: { _unit: "pixelsUnit", _value: 0 } },
         _options: DONT,
       }]);
-      const placed = doc.activeLayers[0];
-      const b = boundsRect(placed);
-      await placed.scale(rectW(placement) / rectW(b) * 100, rectH(placement) / rectH(b) * 100, constants.AnchorPosition.TOPLEFT);
-      const nb = boundsRect(placed);
-      await placed.translate(placement.left - nb.left, placement.top - nb.top);
-      await placed.rasterize(constants.RasterizeType.ENTIRELAYER);
-
-      // keep only the fill area (a full-canvas layer per variation would bloat the PSD)
-      let layer = placed;
-      try {
-        const r = await imaging.getPixels({ documentID: doc.id, layerID: placed.id, sourceBounds: g.rect });
-        try {
-          const cropped = await doc.createPixelLayer({ name });
-          await imaging.putPixels({ documentID: doc.id, layerID: cropped.id, imageData: r.imageData, targetBounds: { left: g.rect.left, top: g.rect.top } });
-          await placed.delete();
-          layer = cropped;
-        } finally { r.imageData.dispose(); }
-      } catch (e) { log("warn", "crop variation failed, keeping full layer", e); }
-      layer.name = name;
+      const layer = doc.activeLayers[0];
+      const b = boundsRect(layer);
+      await trace(`scale ${rectW(b)}x${rectH(b)} -> ${rectW(placement)}x${rectH(placement)}`);
+      if (rectW(b) !== rectW(placement) || rectH(b) !== rectH(placement)) {
+        await layer.scale(rectW(placement) / rectW(b) * 100, rectH(placement) / rectH(b) * 100, constants.AnchorPosition.TOPLEFT);
+      }
+      const nb = boundsRect(layer);
+      if (nb.left !== placement.left || nb.top !== placement.top) await layer.translate(placement.left - nb.left, placement.top - nb.top);
+      await trace("rasterize");
+      await layer.rasterize(constants.RasterizeType.ENTIRELAYER);
+      layer.name = `v${n} · ${prompt.trim().slice(0, 40) || "移除"}`;
+      await trace("move into group");
       if (layer.parent?.id !== group.id) await layer.move(group, constants.ElementPlacement.PLACEINSIDE);
+
+      // mask: hide everything, then reveal the selection inside the fill rect
+      await trace("mask");
+      await selectLayer(layer.id);
+      await play([{ _obj: "make", new: { _class: "channel" }, at: { _ref: "channel", _enum: "channel", _value: "mask" }, using: { _enum: "userMaskEnabled", _value: "hideAll" }, _options: DONT }]);
+      const m = await imaging.createImageDataFromBuffer(mask.data, { width: mask.width, height: mask.height, components: 1, colorSpace: "Grayscale", chunky: true });
+      try { await imaging.putLayerMask({ documentID: doc.id, layerID: layer.id, imageData: m, targetBounds: { left: g.rect.left, top: g.rect.top } }); }
+      finally { m.dispose(); }
+
       for (const v of variationLayers(group)) v.layer.visible = v.layer.id === layer.id;
       group.visible = true;
       if (userDoc && userDoc.id !== doc.id && this.docExists(userDoc.id)) app.activeDocument = userDoc;
+      await trace(`done v${n}`);
       return { layerId: layer.id, number: n, label: String(n), prompt: prompt.trim(), visible: true };
     });
   }

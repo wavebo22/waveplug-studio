@@ -100,7 +100,7 @@ export function openCalibration(host: HTMLElement, g: ApiGraph, rec: Recognition
     };
 
     const emptyPrompt = h("input", { type: "checkbox", checked: options.allowEmptyPrompt, onChange: (e: Event) => { options.allowEmptyPrompt = (e.target as HTMLInputElement).checked; } });
-    const scope = h("select", { class: "field" }, h("option", { value: "canvas" }, "整张画布（工作流自己裁剪）"), h("option", { value: "crop" }, "选区周围（插件裁剪）"));
+    const scope = h("select", { class: "field" }, h("option", { value: "canvas" }, "整张画布（工作流自己裁剪）"), h("option", { value: "crop" }, "选区周围（推荐，文件小、更快）"));
     scope.value = options.sendScope;
     scope.addEventListener("change", () => { options.sendScope = scope.value as "canvas" | "crop"; });
 

@@ -9,6 +9,9 @@ let queue: Promise<void> = Promise.resolve();
 
 export function setLogSink(s: Sink) { sink = s; }
 
+/** Resolves once every line logged so far has been written (used before risky host calls). */
+export function flushLog(): Promise<void> { return queue; }
+
 function fmt(x: unknown): string {
   if (x instanceof Error) return `${x.name}: ${x.message}${x.stack ? "\n    " + x.stack.split("\n").slice(1, 4).join("\n    ") : ""}`;
   if (typeof x === "string") return x;

@@ -18,6 +18,13 @@ import { h, icon, replace } from "./dom.ts";
 
 type Conn = { state: "checking" | "ok" | "down"; text: string };
 
+const OLD_HINTS = ["描述要画进选区的内容；留空 = 移除选区内的内容", "描述要画进选区的内容"];
+/** Strips hint text that older versions' placeholder may have merged into the prompt. */
+export function cleanPrompt(s: string): string {
+  for (const h of OLD_HINTS) s = s.split(h).join("");
+  return s.trim();
+}
+
 /** Accepts "127.0.0.1", "127.0.0.1:8188", "http://host:port/" … and returns "http://host:port". */
 export function normalizeUrl(input: string): string {
   let s = input.trim().replace(/\/+$/, "");
@@ -52,6 +59,7 @@ export function mountApp(root: HTMLElement, svc: Services) {
   const flowSel = h("select", { class: "field grow", title: "工作流" });
   const prompt = h("textarea", { class: "prompt", rows: 4 }) as HTMLTextAreaElement;
   const refsEl = h("div", { class: "refs" });
+  const promptHint = h("div", { class: "prompt-hint" });
   const selEl = h("span", { class: "sel-state" });
   const genBtn = h("button", { class: "generate" });
   const progEl = h("div", { class: "progress" });
@@ -93,7 +101,7 @@ export function mountApp(root: HTMLElement, svc: Services) {
         flowSel,
         h("button", { class: "icon-btn", title: "接口校准", onClick: () => calibrate() }, icon("sliders")),
         h("button", { class: "icon-btn", title: "导入工作流", onClick: () => importMenu() }, icon("plus"))),
-      h("section", { class: "block tight" }, prompt, refsEl,
+      h("section", { class: "block tight" }, prompt, promptHint, refsEl,
         h("div", { class: "opt-row" },
           h("label", { class: "check-row locked", title: "局部重绘始终以当前画面为底图" },
             h("input", { type: "checkbox", checked: true, disabled: true }), h("span", null, "参考当前画面")),
@@ -103,6 +111,7 @@ export function mountApp(root: HTMLElement, svc: Services) {
     (footEl.append(statusEl, h("span", { class: "ver" }, svc.version)), footEl),
     sheetHost);
 
+  prompt.addEventListener("input", () => { promptHint.hidden = !!prompt.value; });
   prompt.addEventListener("input", () => { if (pstate && profile) { pstate.prompt = prompt.value; store.saveState(profile.id, pstate); } });
   flowSel.addEventListener("change", () => selectProfile(flowSel.value));
   genBtn.addEventListener("click", () => (run ? cancel() : generate()));
@@ -170,8 +179,11 @@ export function mountApp(root: HTMLElement, svc: Services) {
     flowSel.value = profile?.id ?? "";
     flowSel.disabled = !profiles.length || !!run;
     const allowEmpty = profile?.options.allowEmptyPrompt;
-    prompt.placeholder = allowEmpty ? "描述要画进选区的内容；留空 = 移除选区内的内容" : "描述要画进选区的内容";
+    // UXP's native textarea can merge its placeholder into the typed text, so the hint lives outside it
+    promptHint.textContent = allowEmpty ? "描述要画进选区的内容；留空 = 移除选区内的内容" : "描述要画进选区的内容";
+    prompt.title = promptHint.textContent;
     prompt.value = pstate?.prompt ?? "";
+    promptHint.hidden = !!prompt.value;
   }
 
   function renderRefs() {
@@ -576,6 +588,7 @@ export function mountApp(root: HTMLElement, svc: Services) {
       const c = carryOver(p, api);
       if (c.broken.length) return `ComfyUI 中的工作流已修改，${c.broken.length} 项绑定失效（${c.broken[0].reason}），请点「接口校准」重新确认`;
       Object.assign(p, { api: c.profile.api, bindings: c.profile.bindings, source: { kind: "comfy", path }, updatedAt: Date.now() });
+      if (!p.options.cropDefault) Object.assign(p.options, { sendScope: "crop", cropMargin: 1, cropDefault: true });
       refreshMaskLinks(p);
       store.saveProfiles(profiles);
       log("info", "workflow synced", path, c.remapped.length ? `remapped ${c.remapped.length}` : "");
@@ -612,7 +625,7 @@ export function mountApp(root: HTMLElement, svc: Services) {
     renderAll();
     try {
       const res = await runInpaint(svc.host, comfy, {
-        profile: p, prompt: prompt.value, seed: ps.seedMode === "fixed" ? ps.seed : null, params: ps.params,
+        profile: p, prompt: cleanPrompt(prompt.value), seed: ps.seedMode === "fixed" ? ps.seed : null, params: ps.params,
         references: Object.fromEntries(Object.entries(refs).map(([k, v]) => [k, v])),
         count: ps.count ?? 1,
         fullRun: !!ps.fullRun,
