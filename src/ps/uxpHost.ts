@@ -142,6 +142,20 @@ export class UxpHost implements PsHost {
     return { docId: doc.id, layerId: group.id, name: String(group.name).slice(FILL_PREFIX.length), rect };
   }
 
+  listFillGroups(docId: number): { layerId: number; name: string }[] {
+    const out: { layerId: number; name: string }[] = [];
+    const walk = (ls: any[]) => { for (const l of ls) { if (isFillGroup(l)) out.push({ layerId: l.id, name: String(l.name).slice(FILL_PREFIX.length) }); else if (l.layers?.length) walk(l.layers); } };
+    if (this.docExists(docId)) walk(docById(docId).layers);
+    return out;
+  }
+
+  async fillGroupById(docId: number, layerId: number): Promise<FillGroup | null> {
+    if (!this.docExists(docId)) return null;
+    const doc = docById(docId);
+    const l = findLayer(doc.layers, layerId);
+    return isFillGroup(l) ? this.groupInfo(doc, l).catch(() => null) : null;
+  }
+
   async refreshFillGroup(g: FillGroup): Promise<FillGroup> {
     if (!this.docExists(g.docId)) throw new Error("填充所在的 PSD 已关闭");
     const doc = docById(g.docId);

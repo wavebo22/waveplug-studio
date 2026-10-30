@@ -43,6 +43,22 @@ export function mountApp(root: HTMLElement, svc: Services) {
   let comfy: Comfy = svc.comfy(settings.comfyUrl);
   let conn: Conn = { state: "checking", text: "连接中…" };
   let doc: DocInfo | null = null, sel: Rect | null = null, group: FillGroup | null = null;
+  // The panel's current fill stays put while other layers are selected; it only changes when an AI
+  // fill group (or a layer in it) is selected, another fill is picked in the panel, or a new fill is made.
+  const pinned = new Map<number, number>();
+  let fills: { layerId: number; name: string }[] = [];
+  let lastActive = "";
+  // explicit choice of the context chip for the current selection (add to the fill / make a new one)
+  let choice: { sel: string; add: boolean } | null = null;
+  const selKey = (r: Rect | null) => r ? `${r.left},${r.top},${r.right},${r.bottom}` : "";
+  const near = (a: Rect, b: Rect) => Math.abs(a.left - b.left) <= 2 && Math.abs(a.top - b.top) <= 2 && Math.abs(a.right - b.right) <= 2 && Math.abs(a.bottom - b.bottom) <= 2;
+  /** true: the next 生成 adds variations to the current fill; false: it creates a new fill */
+  const willAdd = () => {
+    if (!group) return false;
+    if (!sel) return true;
+    if (choice && choice.sel === selKey(sel)) return choice.add;
+    return near(sel, group.rect);
+  };
   let variations: Variation[] = [];
   // thumbnails keyed "docId:layerId" — rebuilt from Photoshop when missing
   const thumbs = new Map<string, string>();
@@ -54,9 +70,16 @@ export function mountApp(root: HTMLElement, svc: Services) {
   // ── skeleton ──
   const connEl = h("button", { class: "conn", title: "ComfyUI 连接设置", onClick: () => openSettings() });
   const targetEl = h("span", { class: "target" });
+  targetEl.addEventListener("click", () => {
+    if (!group || !sel) return;
+    choice = { sel: selKey(sel), add: !willAdd() };
+    renderHistory(); renderAction();
+  });
   const historyEl = h("div", { class: "history vars" });
   const varPromptEl = h("div", { class: "var-prompt" });
   const varCountEl = h("span", { class: "hint" });
+  const fillSel = h("select", { class: "field fill-sel", title: "当前填充（切换其他图层不会改变它）" }) as HTMLSelectElement;
+  fillSel.addEventListener("change", () => { if (doc) { pinned.set(doc.id, Number(fillSel.value)); choice = null; void refresh(); } });
   const regenBtn = h("button", { class: "regen", onClick: () => void regenerate() }, icon("refresh", 12), h("span", null, "再生成"));
   const flowSel = h("select", { class: "field grow", title: "工作流" });
   const prompt = h("textarea", { class: "prompt", rows: 4 }) as HTMLTextAreaElement;
@@ -109,6 +132,7 @@ export function mountApp(root: HTMLElement, svc: Services) {
       h("section", { class: "block" }, genBtn, progEl),
       h("section", { class: "block" },
         h("div", { class: "label-row" }, h("span", { class: "label" }, "变体"), h("div", { class: "row tools" }, varCountEl, regenBtn)),
+        fillSel,
         historyEl, varPromptEl),
       h("section", { class: "block adv" }, advHead, advBody)), mainEl),
     (footEl.append(statusEl, h("span", { class: "ver" }, svc.version)), footEl),
@@ -134,11 +158,15 @@ export function mountApp(root: HTMLElement, svc: Services) {
   }
 
   function renderHistory() {
-    targetEl.textContent = group ? `添加到「${group.name}」` : "新建填充";
-    targetEl.title = group
-      ? "已选中 AI 填充图层组：新的变体基于原图生成，并加入这个图层组"
-      : "未选中 AI 填充图层组：将用当前选区新建一个。选中已有的 AI 填充图层组即可继续生成变体";
-    targetEl.className = "target " + (group ? "cont" : "new");
+    const add = willAdd();
+    targetEl.textContent = add ? `添加到「${group!.name}」` : "新建填充";
+    targetEl.title = !group ? "用当前选区新建一个 AI 填充"
+      : add ? `新变体加入「${group.name}」，使用它原来的遮罩${sel ? "。点击改为用当前选区新建填充" : ""}`
+      : `当前选区和「${group.name}」不同，将新建填充。点击改为添加到「${group.name}」`;
+    targetEl.className = "target " + (add ? "cont" : "new") + (group && sel ? " switchable" : "");
+    replace(fillSel, ...fills.map(f => h("option", { value: String(f.layerId) }, f.name)));
+    fillSel.hidden = fills.length < 1;
+    fillSel.value = group ? String(group.layerId) : "";
     const ratio = group ? (group.rect.bottom - group.rect.top) / Math.max(1, group.rect.right - group.rect.left) : 1;
     const h0 = Math.round(Math.max(56, Math.min(132, 96 * ratio)));
     const tiles: HTMLElement[] = variations.map(v => {
@@ -208,7 +236,7 @@ export function mountApp(root: HTMLElement, svc: Services) {
   function renderSelection() {
     if (!doc) { selEl.textContent = "未打开文档"; return; }
     if (sel) selEl.textContent = `选区 ${sel.right - sel.left} × ${sel.bottom - sel.top}`;
-    else selEl.textContent = group ? "无选区 · 沿用填充范围" : "无选区";
+    else selEl.textContent = group ? "无选区 · 用原来的遮罩" : "无选区";
     selEl.className = "sel-state" + (!sel && !group ? " warn" : "");
   }
 
@@ -237,7 +265,7 @@ export function mountApp(root: HTMLElement, svc: Services) {
     genBtn.className = "generate";
     genBtn.disabled = !!why;
     genBtn.title = why ?? "";
-    replace(genBtn, icon("spark"), h("span", null, group ? "生成更多变体" : "生成"));
+    replace(genBtn, icon("spark"), h("span", null, willAdd() ? "生成更多变体" : "生成"));
     progEl.hidden = !why;
     replace(progEl, why ? h("div", { class: "stage muted" }, why) : null);
   }
@@ -310,7 +338,15 @@ export function mountApp(root: HTMLElement, svc: Services) {
     try {
       doc = svc.host.activeDoc();
       sel = doc ? await svc.host.selectionBounds(doc.id) : null;
-      group = doc ? await svc.host.activeFillGroup() : null;
+      fills = doc ? svc.host.listFillGroups(doc.id) : [];
+      const active = doc ? await svc.host.activeFillGroup() : null;
+      // only a *newly* selected fill layer takes over, so picking another fill in the panel sticks
+      const activeKey = active ? `${active.docId}:${active.layerId}` : "";
+      if (doc && active && activeKey !== lastActive && pinned.get(doc.id) !== active.layerId) { pinned.set(doc.id, active.layerId); choice = null; }
+      lastActive = activeKey;
+      const pin = doc ? pinned.get(doc.id) : undefined;
+      group = doc && pin !== undefined ? await svc.host.fillGroupById(doc.id, pin) : null;
+      if (doc && !group && pin !== undefined && !fills.some(f => f.layerId === pin)) pinned.delete(doc.id);
       variations = group ? await svc.host.variations(group) : [];
     } catch (e) { log("warn", "refresh failed", e); }
     finally { refreshing = false; }
@@ -625,10 +661,10 @@ export function mountApp(root: HTMLElement, svc: Services) {
   async function regenerate() {
     const v = variations.find(x => x.visible) ?? variations[variations.length - 1];
     if (!group || !v || run) return;
-    await generate({ group, prompt: v.prompt === "移除" ? "" : v.prompt });
+    await generate({ addTo: group, prompt: v.prompt === "移除" ? "" : v.prompt });
   }
 
-  async function generate(again?: { group: FillGroup; prompt: string }) {
+  async function generate(again?: { addTo: FillGroup; prompt: string }) {
     if (!profile || !pstate || run) return;
     await checkConn();
     await refresh();
@@ -645,7 +681,7 @@ export function mountApp(root: HTMLElement, svc: Services) {
     try {
       const res = await runInpaint(svc.host, comfy, {
         profile: p, prompt: again ? again.prompt : cleanPrompt(prompt.value), seed: ps.seedMode === "fixed" ? ps.seed : null, params: ps.params,
-        regenerate: again?.group,
+        addTo: again ? again.addTo : willAdd() ? group ?? undefined : undefined,
         references: Object.fromEntries(Object.entries(refs).map(([k, v]) => [k, v])),
         count: ps.count ?? 1,
         fullRun: !!ps.fullRun,
@@ -654,7 +690,11 @@ export function mountApp(root: HTMLElement, svc: Services) {
         stage: t => { current.stage = t; current.detail = ""; renderAction(); },
         progress: (f, t) => { current.progress = f; current.detail = t ?? ""; renderAction(); renderHistory(); },
         promptQueued: id => { current.promptId = id; },
-        variationAdded: (g, v) => { group = g; variations = [...variations.map(x => ({ ...x, visible: false })), v]; renderHistory(); },
+        variationAdded: (g, v) => {
+          if (group?.layerId !== g.layerId) variations = [];
+          group = g; pinned.set(g.docId, g.layerId); choice = null;
+          variations = [...variations.map(x => ({ ...x, visible: false })), v]; renderHistory();
+        },
         debug: settings.debugFiles ? svc.debugSave : undefined,
       });
       if (ps.seedMode === "random") { ps.seed = res.seeds[res.seeds.length - 1]; store.saveState(p.id, ps); }

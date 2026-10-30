@@ -56,6 +56,10 @@ export interface PsHost {
   selectionBounds(docId: number): Promise<Rect | null>;
   /** The fill group the active layer is (or is inside), else null. */
   activeFillGroup(): Promise<FillGroup | null>;
+  /** All AI fill groups in the document (top to bottom). */
+  listFillGroups(docId: number): { layerId: number; name: string }[];
+  /** A fill group by id, or null if it no longer exists / has no variations. */
+  fillGroupById(docId: number, layerId: number): Promise<FillGroup | null>;
   /** Fails with a readable message if the group is gone. */
   refreshFillGroup(g: FillGroup): Promise<FillGroup>;
   /** The group's own mask over its rect (used when adding variations without a new selection). */

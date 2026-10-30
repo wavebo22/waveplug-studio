@@ -37,6 +37,8 @@ class MockHost implements PsHost {
   docExists() { return true; }
   async selectionBounds() { return this.sel; }
   async activeFillGroup() { return this.groupSelected ? this.group : null; }
+  listFillGroups() { return this.list.length || this.groupSelected ? [{ layerId: this.group.layerId, name: this.group.name }, { layerId: 77, name: "价格牌" }] : []; }
+  async fillGroupById(_d: number, id: number) { return id === this.group.layerId ? this.group : id === 77 ? { ...this.group, layerId: 77, name: "价格牌", rect: { left: 200, top: 200, right: 600, bottom: 500 } } : null; }
   async refreshFillGroup(g: FillGroup) { return g; }
   async groupMask(g: FillGroup): Promise<Pixels> { const w = g.rect.right - g.rect.left, h = g.rect.bottom - g.rect.top; return { width: w, height: h, channels: 1, data: new Uint8Array(w * h).fill(255) }; }
   async capture(_d: number, rect: Rect): Promise<Capture> {

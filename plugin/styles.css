@@ -248,3 +248,6 @@ select.field { padding-right: 2px; }
 .regen:hover { background: var(--hover); border-color: var(--accent); }
 .regen.is-disabled { opacity: .4; }
 .row.tools { display: flex; align-items: center; }
+.fill-sel { margin-bottom: 8px; }
+.target.switchable { cursor: pointer; }
+.target.switchable:hover { border-color: var(--accent-hi); color: var(--text); }
