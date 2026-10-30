@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { inflateSync } from "node:zlib";
 import { encodePng } from "../src/core/image/png.ts";
 import { imageWithAlphaMask, maskFile } from "../src/core/image/compose.ts";
-import { expand, fitSize, placementInGroup } from "../src/core/image/region.ts";
+import { fitSize } from "../src/core/image/region.ts";
 import { ComfyClient, describeError, outputImage } from "../src/core/comfy/client.ts";
 
 function decode(png: Uint8Array) {
@@ -37,8 +37,6 @@ test("selection becomes transparency; RGB under transparent pixels is preserved"
 });
 
 test("region helpers", () => {
-  assert.deepEqual(expand({ left: 100, top: 100, right: 200, bottom: 150 }, 0.5, 220, 1000), { left: 50, top: 75, right: 220, bottom: 175 });
-  assert.deepEqual(placementInGroup({ left: 50, top: 75, right: 250, bottom: 175 }, { left: 100, top: 100, right: 200, bottom: 150 }), { left: -50, top: -25, right: 150, bottom: 75 });
   const s = fitSize(3000, 2000);
   assert.equal(s.width % 16, 0); assert.ok(s.width * s.height <= 1024 * 1024 * 1.05);
   assert.ok(Math.abs(s.width / s.height - 1.5) < 0.03);
@@ -102,11 +100,6 @@ test("selection trimmed to its own bounds is placed back into the captured area"
   assert.equal(out.data.reduce((a, b) => a + b, 0), 383);
 });
 
-test("optional red mark tints only the selected pixels, alpha unchanged", () => {
-  const img = { width: 2, height: 1, channels: 3 as const, data: new Uint8Array([100, 100, 100, 100, 100, 100]) };
-  const sel = { width: 2, height: 1, channels: 1 as const, data: new Uint8Array([255, 0]) };
-  assert.deepEqual([...imageWithAlphaMask(img, sel, 0.5).data], [178, 50, 50, 0, 100, 100, 100, 255]);
-});
 
 test("crop margin and mask bounds helpers", async () => {
   const { expandBy, nonZeroBounds } = await import("../src/core/image/region.ts");

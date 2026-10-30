@@ -1,34 +1,41 @@
 # WavePlug Studio
 
-Photoshop UXP 面板：把当前画面 + 选区交给 ComfyUI 局部重绘工作流，结果按版本 001、002… 追加进同一个智能对象。
-插件 ID `com.waveplug.studio`（与旧版 `com.waveplug.psai` 并存，互不影响）。**ComfyUI 端零改动**：只调用其原生接口。
+Photoshop UXP 面板：框选区域 → 交给 ComfyUI 局部重绘工作流 → 结果像 Photoshop「创成式填充」一样，以变体的形式回到文档里。
+ComfyUI 端零改动，只调用它自带的接口。插件 ID `com.waveplug.studio`，开发版 `com.waveplug.studio.dev`。
+
+## 使用方式
+
+1. **连接**：面板右上角的状态 → 地址填 `127.0.0.1:8188`（可只填 IP 和端口）→「保存并连接」。连不上时用「诊断」查看 fetch / XHR / WebSocket 的具体结果。
+2. **导入工作流**：「+」→「ComfyUI 中已保存的工作流」（推荐）或 API 格式 JSON。能明确识别时只显示一页确认；识别不全时进入接口校准。
+   - 来自 ComfyUI 的工作流在**每次生成前都会重新读取并转换**，在 ComfyUI 里改完保存即可，不用重新导入；绑定失效时会提示重新校准。
+3. **生成**：在 PS 里建立选区，写提示词（局部重绘工作流允许留空 = 移除），点「生成」。
+   - 结果是一个图层组「AI填充 · 提示词」，组内每个变体是一个带蒙版的图层「v1 · 提示词」，同时只显示一个。
+   - 选中已有的 AI 填充图层组再生成 = 添加变体；**每个变体都基于原图生成**（读取画面时会隐藏这个图层组）。
+   - 面板上方的变体网格：点击切换、× 删除，下方显示当前变体的提示词，可一键填回。
+4. **高级参数**：工作流公开的参数（作者「# 编号」标注的节点、已有 LoRA 强度等）、随机种子、每次生成的变体数（1–4）、「只重绘选区内」、「每次完整运行（不使用 ComfyUI 缓存）」。
+
+### 「只重绘选区内」
+孤海的局部重绘工作流让编辑模型重画整块裁剪区，遮罩只在贴回时使用。打开这个开关后，插件会在**本次提交的副本**里把与裁剪图对齐的遮罩接到编码节点的空 `mask` 输入上（例如 `#250 → #255.mask`），模型只在选区内生成。ComfyUI 中保存的工作流不会被修改；关掉即恢复作者的原始流程。
+
+## 文档类型与图像
+
+- 支持 RGB / CMYK 8 位文档。读取时转为 sRGB 发送；结果 PNG 标记为 sRGB 并写入文档分辨率后置入，由 Photoshop 转回文档色彩空间，并按像素 1:1 放置。
+- 发送范围默认是「选区 + 选区短边 1 倍的边距」（足够孤海「遮罩裁剪V2」需要的上下文），可在校准页改为整张画布。
 
 ## 目录
 
 | 路径 | 内容 |
 |---|---|
-| `src/core/workflow/` | API 工作流读取、界面格式 → API 转换、自动识别、配置（profile）、执行副本注入 |
-| `src/core/comfy/client.ts` | ComfyUI 原生 HTTP/WS 客户端（上传、提交、进度、历史、取图、只取消自己的任务） |
-| `src/core/image/` | PNG 编码、选区 → 透明通道 / 遮罩文件、区域计算 |
-| `src/core/xmp.ts` | 版本号计数器（存于 PSB 的 XMP，删层后编号不复用） |
-| `src/ps/uxpHost.ts` | Photoshop 侧：读画面与选区、建任务组、写入版本、Layer Comp 切换、手动编辑后的同步 |
-| `src/app/generate.ts` | 一次生成的完整流程（快照 → 上传 → 执行 → 写回发起时的文档） |
-| `src/ui/` | 面板与校准界面 |
-| `src/preview/` | 浏览器预览（模拟 PS 与 ComfyUI，只用于看界面与交互） |
-| `poc/` | 智能对象版本链实机 POC（ExtendScript）与报告 |
-| `tests/` | 离线测试；`tests/fixtures/ui/` 为用户机上 5 个真实工作流 |
+| `src/core/workflow/` | API 工作流、界面格式 → API 转换、自动识别、配置、执行副本注入、「只重绘选区内」连线 |
+| `src/core/comfy/client.ts` | ComfyUI 原生接口（上传、提交、进度、历史、取图、只取消自己的任务、`/free`） |
+| `src/core/image/` | PNG 编解码辅助、选区 → 透明通道、区域计算 |
+| `src/ps/uxpHost.ts` | Photoshop 侧：读画面/选区、AI 填充图层组与变体、缩略图 |
+| `src/ps/net.ts` | fetch（失败时改用 XHR）与连接诊断 |
+| `src/app/generate.ts` | 一次生成的完整流程 |
+| `src/ui/` | 面板、导入确认、接口校准 |
+| `src/preview/` | 浏览器预览（模拟 PS 与 ComfyUI） |
+| `dev/` | 开发版加载器 |
+| `tests/` | 离线测试；`tests/fixtures/ui/` 为真实工作流样本 |
+| `poc/` | 早期实验记录（智能对象方案、UXP 兼容性问题） |
 
-## 命令
-
-```
-npm install
-npm test          # 离线测试
-npm run typecheck
-npm run build     # dist/plugin = 可加载的 UXP 插件目录；dist/preview = 浏览器预览
-```
-
-## 状态（2026-10-30）
-
-- 已实机验证（Photoshop 27.10，ExtendScript）：智能对象内追加版本、主文档切换 Layer Comp、羽化遮罩、选区外像素不变、手删后同步、编号不复用、XMP 计数器读写。见 `poc/README.md`。
-- 已离线验证：5 个真实工作流的识别（孤海局部重绘两版全部关键项「明确」；编辑/文生图工作流被正确拒绝）、执行副本注入、重新导入时绑定迁移、PNG/透明通道编码、ComfyUI 客户端协议。
-- **尚未验证**：插件在 UXP 中的首次运行（未安装）；UXP 网络请求是否被 ComfyUI 来源校验拦截；`uxpHost.ts` 中 batchPlay / DOM 调用的实机行为；真实 Qwen 生成闭环。
+开发、构建、安装与排查见 [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md)。

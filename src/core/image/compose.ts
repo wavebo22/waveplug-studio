@@ -23,16 +23,12 @@ function sameSize(a: Pixels, b: Pixels) {
  * ComfyUI LoadImage derives MASK = 1 - alpha, so the repaint area must be transparent.
  * RGB under transparent pixels is kept as-is (the encoder never premultiplies).
  */
-export function imageWithAlphaMask(image: Pixels, selection: Pixels, mark = 0): Pixels {
+export function imageWithAlphaMask(image: Pixels, selection: Pixels): Pixels {
   sameSize(image, selection);
   if (selection.channels !== 1) throw new Error("选区必须是单通道灰度");
   const rgb = toRgb(image), n = image.width * image.height, out = new Uint8Array(n * 4);
   for (let i = 0, k = 0, q = 0; i < n; i++, k += 3, q += 4) {
-    // optional red tint over the selection: some edit-model workflows locate the area by colour
-    const t = mark * selection.data[i] / 255;
-    out[q] = Math.round(rgb[k] * (1 - t) + 255 * t);
-    out[q + 1] = Math.round(rgb[k + 1] * (1 - t));
-    out[q + 2] = Math.round(rgb[k + 2] * (1 - t));
+    out[q] = rgb[k]; out[q + 1] = rgb[k + 1]; out[q + 2] = rgb[k + 2];
     out[q + 3] = 255 - selection.data[i];
   }
   return { width: image.width, height: image.height, channels: 4, data: out };
@@ -47,11 +43,11 @@ export function maskFile(selection: Pixels, encoding: "mask-alpha" | "mask-gray"
   return { width: selection.width, height: selection.height, channels: 4, data: out };
 }
 
-export function imageFile(image: Pixels, encoding: Encoding, selection?: Pixels, mark = 0): Pixels {
+export function imageFile(image: Pixels, encoding: Encoding, selection?: Pixels): Pixels {
   switch (encoding) {
     case "rgba-alpha-mask":
       if (!selection) throw new Error("该工作流需要选区");
-      return imageWithAlphaMask(image, selection, mark);
+      return imageWithAlphaMask(image, selection);
     case "rgb":
       return { width: image.width, height: image.height, channels: 3, data: toRgb(image) };
     default:

@@ -1,3 +1,5 @@
+> **历史记录**：智能对象版本链方案已在 0.2.0 被「AI 填充图层组」取代（继续生成时会把已修改的版本当作输入）。保留此 POC 仅供参考。
+
 # P1 · 智能对象版本链 POC（2026-10-30，mainpc 实机）
 
 执行方式：Photoshop 2026 (27.10.0) 中通过 ExtendScript Action Manager 运行 `so_lib.jsx`。

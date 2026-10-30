@@ -14,12 +14,6 @@ export function clampRect(r: Rect, width: number, height: number): Rect {
   return out;
 }
 
-/** Selection bounds grown by `margin` × its size on every side, clamped to the canvas. */
-export function expand(r: Rect, margin: number, width: number, height: number): Rect {
-  const dx = Math.round(rectW(r) * margin), dy = Math.round(rectH(r) * margin);
-  return clampRect({ left: r.left - dx, top: r.top - dy, right: r.right + dx, bottom: r.bottom + dy }, width, height);
-}
-
 /** `r` grown by `px` pixels on every side, clamped to the canvas. */
 export function expandBy(r: Rect, px: number, width: number, height: number): Rect {
   return clampRect({ left: r.left - px, top: r.top - px, right: r.right + px, bottom: r.bottom + px }, width, height);
@@ -32,14 +26,6 @@ export function nonZeroBounds(data: Uint8Array, width: number, height: number, a
     if (data[y * width + x]) { if (x < l) l = x; if (x > r) r = x; if (y < t) t = y; if (y > b) b = y; }
   }
   return r < 0 ? null : { left: at.left + l, top: at.top + t, right: at.left + r + 1, bottom: at.top + b + 1 };
-}
-
-/**
- * Where a result covering `sent` must be placed inside a task-group PSB whose canvas is `group`.
- * Returns the target rect in PSB coordinates (may extend past the PSB canvas; PS clips it).
- */
-export function placementInGroup(sent: Rect, group: Rect): Rect {
-  return { left: sent.left - group.left, top: sent.top - group.top, right: sent.right - group.left, bottom: sent.bottom - group.top };
 }
 
 /** Generation size for workflows that don't resize on their own: keep aspect, cap pixel count, snap to a multiple. */

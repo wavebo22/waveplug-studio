@@ -12,7 +12,7 @@ declare const require: (m: string) => any;
 const uxp = require("uxp");
 const { localFileSystem: fs, formats } = uxp.storage;
 declare const __BUILT_AT__: string;
-const VERSION = "0.3.0";
+const VERSION = "0.3.1";
 const DEV = typeof (globalThis as any).__waveplugDevReload === "function";
 
 // Diagnostic log: plugin data folder, mirrored into the project's reports folder on F: when that
@@ -24,7 +24,7 @@ async function openLog(): Promise<any[]> {
     const dir = await fs.getDataFolder();
     try { files.push(await dir.getEntry("waveplug.log")); } catch { files.push(await dir.createFile("waveplug.log", { overwrite: false })); }
   } catch (e) { console.warn("data-folder log unavailable", e); }
-  for (const url of MIRROR) {
+  for (const url of DEV ? MIRROR : []) {
     try { files.push(await fs.getEntryWithUrl(url)); break; } catch { /* not there yet */ }
     try { files.push(await fs.createEntryWithUrl(url, { overwrite: false })); break; } catch { /* try next form */ }
   }
@@ -45,13 +45,13 @@ const services: Services = {
   host,
   comfy: base => new ComfyClient(base, { fetch: uxpFetch, WebSocket }),
   diagnose,
-  debugSave(name, png) {
+  debugSave: DEV ? (name, png) => {
     void (async () => {
       for (const url of [`file:F:/waveplug/studio/reports/debug_${name}`, `file:///F:/waveplug/studio/reports/debug_${name}`]) {
         try { const f = await fs.createEntryWithUrl(url, { overwrite: true }); await f.write(png, { format: formats.binary }); return; } catch { /* next form */ }
       }
     })();
-  },
+  } : undefined,
   async pickJson() {
     const f = await fs.getFileForOpening({ types: ["json"] });
     return f ? { name: f.name, text: await f.read({ format: formats.utf8 }) } : null;
