@@ -11,7 +11,9 @@ declare const require: (m: string) => any;
 
 const uxp = require("uxp");
 const { localFileSystem: fs, formats } = uxp.storage;
-const VERSION = "0.2.4";
+declare const __BUILT_AT__: string;
+const VERSION = "0.3.0";
+const DEV = typeof (globalThis as any).__waveplugDevReload === "function";
 
 // Diagnostic log: plugin data folder, mirrored into the project's reports folder on F: when that
 // drive is reachable, so it can be read without the UXP developer console.
@@ -35,8 +37,12 @@ setLogSink(async line => {
 });
 log("info", "uxp", JSON.stringify(uxp.versions ?? {}), "host", JSON.stringify(uxp.host ?? {}));
 
+const host = new UxpHost();
+// lets the development loader detach this build's Photoshop listeners before loading a new one
+(globalThis as any).__waveplugDispose = () => host.dispose();
+
 const services: Services = {
-  host: new UxpHost(),
+  host,
   comfy: base => new ComfyClient(base, { fetch: uxpFetch, WebSocket }),
   diagnose,
   debugSave(name, png) {
@@ -65,7 +71,8 @@ const services: Services = {
     await f.write(png, { format: formats.binary });
     return true;
   },
-  version: VERSION,
+  version: DEV ? `dev · ${__BUILT_AT__}` : VERSION,
+  devReload: DEV ? () => (globalThis as any).__waveplugDevReload() : undefined,
 };
 
 try {

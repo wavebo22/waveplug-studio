@@ -1,7 +1,7 @@
 // Photoshop UXP implementation, Generative-Fill style: one layer group per fill, masked by the
 // selection, one cropped pixel layer per variation inside it.
 
-import { encodePng, type Pixels } from "../core/image/png.ts";
+import { encodePng, type Pixels, withPlacementHints } from "../core/image/png.ts";
 import { type Rect, nonZeroBounds, rectH, rectW } from "../core/image/region.ts";
 import { placeGray } from "../core/image/compose.ts";
 import { flushLog, log } from "../app/log.ts";
@@ -230,7 +230,10 @@ export class UxpHost implements PsHost {
   }
 
   async addVariation(g: FillGroup, png: Uint8Array, placement: Rect, prompt: string, mask: Pixels): Promise<Variation> {
-    const token = await tempPng(png);
+    const target = docById(g.docId);
+    const dpi = Number(target.resolution) || 72;
+    log("info", "document", JSON.stringify({ mode: String(target.mode), profile: target.colorProfileName ?? null, dpi }));
+    const token = await tempPng(withPlacementHints(png, dpi));
     const trace = async (what: string) => { log("info", "write-back", what); await flushLog(); };
     return step("WavePlug AI 填充", g.docId, async () => {
       const { app, imaging, constants } = ps();
@@ -287,9 +290,18 @@ export class UxpHost implements PsHost {
     return "data:image/png;base64," + btoa(bin);
   }
 
+  private listeners: [string[], () => void][] = [];
+
   onChange(cb: () => void): void {
     let timer: ReturnType<typeof setTimeout> | null = null;
     const fire = () => { if (timer) clearTimeout(timer); timer = setTimeout(cb, 150); };
-    ps().action.addNotificationListener(["select", "set", "make", "delete", "open", "close", "move", "show", "hide", "historyStateChanged"], fire);
+    const events = ["select", "set", "make", "delete", "open", "close", "move", "show", "hide", "historyStateChanged"];
+    ps().action.addNotificationListener(events, fire);
+    this.listeners.push([events, fire]);
+  }
+
+  dispose() {
+    for (const [events, fn] of this.listeners) { try { ps().action.removeNotificationListener(events, fn); } catch { /* host gone */ } }
+    this.listeners = [];
   }
 }

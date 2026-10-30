@@ -114,3 +114,14 @@ test("crop margin and mask bounds helpers", async () => {
   const d = new Uint8Array(4 * 3); d[1 * 4 + 2] = 9; d[2 * 4 + 3] = 1;
   assert.deepEqual(nonZeroBounds(d, 4, 3, { left: 10, top: 20, right: 14, bottom: 23 }), { left: 12, top: 21, right: 14, bottom: 23 });
 });
+
+test("placement hints: sRGB + document DPI chunks, image data untouched", async () => {
+  const { withPlacementHints } = await import("../src/core/image/png.ts");
+  const png = encodePng({ width: 3, height: 2, channels: 3, data: new Uint8Array(18).fill(7) });
+  const out = withPlacementHints(png, 300);
+  const types: string[] = []; const dv = new DataView(out.buffer, out.byteOffset);
+  for (let o = 8; o < out.length;) { const len = dv.getUint32(o); types.push(String.fromCharCode(...out.slice(o + 4, o + 8))); if (types.at(-1) === "pHYs") assert.equal(dv.getUint32(o + 8), Math.round(300 / 0.0254)); o += 12 + len; }
+  assert.deepEqual(types, ["IHDR", "sRGB", "pHYs", "IDAT", "IEND"]);
+  assert.deepEqual([...decode(out).raw], [...decode(png).raw]);
+  assert.deepEqual(withPlacementHints(out, 72).length, out.length, "re-applying replaces, not duplicates");
+});

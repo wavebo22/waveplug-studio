@@ -78,3 +78,42 @@ export function encodePng(p: Pixels): Uint8Array {
   chunk("IEND", 0, () => {});
   return out;
 }
+
+/**
+ * Prepares a PNG for placing into Photoshop: tags it as sRGB (the colour space it was captured in,
+ * so Photoshop converts it into the document's profile instead of reading the numbers as document
+ * RGB) and writes the document resolution, so it is placed at 1:1 pixels instead of being scaled
+ * to fit the canvas and resampled back. An embedded ICC profile is kept as is.
+ */
+export function withPlacementHints(png: Uint8Array, dpi: number): Uint8Array {
+  const dv = new DataView(png.buffer, png.byteOffset, png.byteLength);
+  const chunks: { type: string; start: number; end: number }[] = [];
+  for (let o = 8; o + 12 <= png.length;) {
+    const len = dv.getUint32(o);
+    const type = String.fromCharCode(png[o + 4], png[o + 5], png[o + 6], png[o + 7]);
+    chunks.push({ type, start: o, end: o + 12 + len });
+    o += 12 + len;
+    if (type === "IEND") break;
+  }
+  if (!chunks.length || chunks[0].type !== "IHDR") throw new Error("不是有效的 PNG");
+  const hasIcc = chunks.some(c => c.type === "iCCP");
+  const make = (type: string, data: number[]) => {
+    const out = new Uint8Array(12 + data.length), d = new DataView(out.buffer);
+    d.setUint32(0, data.length);
+    for (let i = 0; i < 4; i++) out[4 + i] = type.charCodeAt(i);
+    out.set(data, 8);
+    d.setUint32(8 + data.length, crc32(out, 4, 8 + data.length));
+    return out;
+  };
+  const ppm = Math.max(1, Math.round(dpi / 0.0254));
+  const u32 = (v: number) => [(v >>> 24) & 255, (v >>> 16) & 255, (v >>> 8) & 255, v & 255];
+  const extra = [make("pHYs", [...u32(ppm), ...u32(ppm), 1])];
+  if (!hasIcc) extra.unshift(make("sRGB", [0]));
+  const drop = new Set(hasIcc ? ["pHYs"] : ["pHYs", "sRGB", "gAMA", "cHRM"]);
+  const parts: Uint8Array[] = [png.subarray(0, 8), png.subarray(chunks[0].start, chunks[0].end), ...extra];
+  for (const c of chunks.slice(1)) if (!drop.has(c.type)) parts.push(png.subarray(c.start, c.end));
+  const out = new Uint8Array(parts.reduce((n, p) => n + p.length, 0));
+  let o = 0;
+  for (const p of parts) { out.set(p, o); o += p.length; }
+  return out;
+}

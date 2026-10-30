@@ -49,6 +49,7 @@ const PATHS: Record<string, string> = {
   check: "M5 10l3 3 7-7",
   warn: "M10 4l7 12H3zM10 9v3M10 14h.01",
   folder: "M3 6h5l2 2h7v8H3z",
+  refresh: "M16 10a6 6 0 1 1-1.8-4.3M16 4v3h-3",
 };
 
 export function icon(name: keyof typeof PATHS | string, size = 14): SVGElement {

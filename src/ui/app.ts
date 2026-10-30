@@ -90,7 +90,8 @@ export function mountApp(root: HTMLElement, svc: Services) {
 
   root.append(
     h("header", { class: "top" },
-      h("div", { class: "brand" }, h("span", { class: "mark" }, "W"), h("span", null, "WavePlug Studio")),
+      h("div", { class: "brand" }, h("span", { class: "mark" }, "W"), h("span", null, "WavePlug Studio"),
+        svc.devReload ? h("button", { class: "icon-btn dev-reload", title: "重新加载开发版代码（F:\\waveplug\\studio\\dist\\plugin）", onClick: () => svc.devReload!() }, icon("refresh")) : null),
       connEl),
     (mainEl.append(
       h("section", { class: "block" },

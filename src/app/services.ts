@@ -17,6 +17,8 @@ export interface Services {
   diagnose?(base: string): Promise<string[]>;
   /** Saves an exchanged image next to the diagnostic log (F:\\waveplug\\studio\\reports\\debug_*). */
   debugSave?(name: string, png: Uint8Array): void;
+  /** present only in the development build: reloads the code from disk */
+  devReload?(): void;
   version: string;
 }
 
