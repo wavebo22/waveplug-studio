@@ -9,3 +9,9 @@ Photoshop 27.10.0 / Studio 0.1.2：连接页诊断结果被主面板提示词 te
 
 官方依据：https://developer.adobe.com/photoshop/uxp/2021/uxp/known-issues/ （User Interface：编辑控件不遵守普通叠层，可通过隐藏被覆盖控件避免）。
 状态：修复已实现，等待重装实测，不把截图前的观察当作修复后通过。
+
+
+## 0.1.4 实机异常与回退
+2026-10-31 02:58:50，尝试打开连接设置附近 Photoshop 崩溃。Windows Application Error 1000：dynamic-torqnative.dll 9.4.1.0，0xc0000005，offset 0x2607cfc。用户确认非主动关闭；dump 位于 C:/Users/WAVE/AppData/Local/CrashDumps/Photoshop.exe.14184.dmp。
+尚不能区分覆盖页 visibility 切换、UIA 自动化与宿主其他故障。不能宣称此显隐方案通过。
+0.1.5 只撤回此显隐方案，保留独立的 XHR Response 修复，作为单变量对照。原提示词遮挡问题仍未解决。待人工打开设置/诊断，与已崩溃的0.1.4对比；不在有用户文档时重复自动化触发崩溃。
