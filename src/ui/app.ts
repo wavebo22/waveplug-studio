@@ -366,7 +366,7 @@ export function mountApp(root: HTMLElement, svc: Services) {
               const [ui, info] = await Promise.all([comfy.readWorkflow(pickSel.value), comfy.objectInfo()]);
               const { api, warnings } = uiToApi(ui, info);
               await adopt(pickSel.value.split("/").pop()!.replace(/\.json$/, ""), api, warnings, { kind: "comfy", path: pickSel.value });
-              if (warnings.length) { log("warn", "conversion", warnings); setStatus("转换提示：" + warnings[0] + (warnings.length > 1 ? ` 等 ${warnings.length} 条` : ""), "error"); }
+              if (warnings.length) log("warn", "conversion", warnings);
             } catch (e) { setStatus("导入失败：" + (e as Error).message, "error"); }
           } }, "导入")));
       sheetHost.append(sheet);
@@ -525,8 +525,9 @@ export function mountApp(root: HTMLElement, svc: Services) {
       setStatus("同步 ComfyUI 工作流…");
       objectInfo ??= await comfy.objectInfo();
       const { api, warnings } = uiToApi(await comfy.readWorkflow(path), objectInfo);
-      const bad = warnings.filter(w => /错位/.test(w));
-      if (bad.length) { log("warn", "conversion", warnings); return "工作流转换有疑问：" + bad.join("；"); }
+      // ComfyUI validates every node itself and reports misalignments precisely, so conversion
+      // warnings are logged rather than blocking (display-only widgets also trigger them).
+      if (warnings.length) log("warn", "conversion", warnings);
       const c = carryOver(p, api);
       if (c.broken.length) return `ComfyUI 中的工作流已修改，${c.broken.length} 项绑定失效（${c.broken[0].reason}），请点「接口校准」重新确认`;
       Object.assign(p, { api: c.profile.api, bindings: c.profile.bindings, source: { kind: "comfy", path }, updatedAt: Date.now() });

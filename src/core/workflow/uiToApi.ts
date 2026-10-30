@@ -130,7 +130,8 @@ export function uiToApi(ui: unknown, info?: ObjectInfo): { api: ApiGraph; warnin
     if (!names && !hasLinks) continue; // isolated decoration (comments etc.)
     const inputs: Record<string, InputValue> = {};
     const values = n.widgets_values;
-    if (names && Array.isArray(values) && values.length > names.length) {
+    // nodes without parameters may still store display-only values (e.g. "show any" nodes)
+    if (names && names.length && Array.isArray(values) && values.length > names.length) {
       warnings.push(`#${n.id} ${n.type}: 参数个数（${values.length}）多于已知参数名（${names.length}），转换结果可能错位`);
     }
     if (names && Array.isArray(values)) {
