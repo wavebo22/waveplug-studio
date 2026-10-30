@@ -1,0 +1,10 @@
+10/31/26 02:22:08:419 | [INFO] |  | Upia | Upia |  |  |  | 18956 | Upia::upia::Upia::handleListByProduct: Execution completed with status 0
+10/31/26 02:46:04:361 | [INFO] |  | Upia | Upia |  |  |  | 13976 | Upia::`anonymous-namespace'::getUpiaHelperInstance: UPIA helper is using Upi directly
+10/31/26 02:46:04:361 | [INFO] |  | Upia | Upia |  |  |  | 13976 | Upia::upia::Upia::Upia: Running elevated
+10/31/26 02:46:04:362 | [INFO] |  | Upia | Upia |  |  |  | 13976 | UpiLoader::upia::UpiLoader::UpiLoader: dll/dylib handle found, loaded is 1
+10/31/26 02:46:05:494 | [INFO] |  | Upia | Upia |  |  |  | 13976 | Upia::upia::Upia::handleInstallExtension: Execution completed with status 0
+10/31/26 02:46:05:629 | [INFO] |  | Upia | Upia |  |  |  | 39652 | Upia::`anonymous-namespace'::getUpiaHelperInstance: UPIA helper is using Upi directly
+10/31/26 02:46:05:630 | [INFO] |  | Upia | Upia |  |  |  | 39652 | Upia::upia::Upia::Upia: Running elevated
+10/31/26 02:46:05:630 | [INFO] |  | Upia | Upia |  |  |  | 39652 | Upia::upia::Upia::handleListByProduct: Executed in elevated mode
+10/31/26 02:46:05:632 | [INFO] |  | Upia | Upia |  |  |  | 39652 | UpiLoader::upia::UpiLoader::UpiLoader: dll/dylib handle found, loaded is 1
+10/31/26 02:46:06:760 | [INFO] |  | Upia | Upia |  |  |  | 39652 | Upia::upia::Upia::handleListByProduct: Execution completed with status 0
