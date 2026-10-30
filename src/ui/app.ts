@@ -11,7 +11,7 @@ import { uiToApi } from "../core/workflow/uiToApi.ts";
 import { findLocalMaskLinks } from "../core/workflow/localMask.ts";
 import { type RefSource, StashedResult, runInpaint } from "../app/generate.ts";
 import { type ProfileState, type Services, type Settings, store } from "../app/services.ts";
-import type { DocInfo, TaskGroup, Version } from "../ps/host.ts";
+import type { DocInfo, FillGroup, Variation } from "../ps/host.ts";
 import { log, withTimeout } from "../app/log.ts";
 import { openCalibration } from "./calibrate.ts";
 import { h, icon, replace } from "./dom.ts";
@@ -35,8 +35,10 @@ export function mountApp(root: HTMLElement, svc: Services) {
   let pstate: ProfileState | null = profile ? store.state(profile.id) : null;
   let comfy: Comfy = svc.comfy(settings.comfyUrl);
   let conn: Conn = { state: "checking", text: "连接中…" };
-  let doc: DocInfo | null = null, sel: Rect | null = null, group: TaskGroup | null = null;
-  let versions: Version[] = [], currentComp: number | null = null;
+  let doc: DocInfo | null = null, sel: Rect | null = null, group: FillGroup | null = null;
+  let variations: Variation[] = [];
+  // thumbnails keyed "docId:layerId" — rebuilt from Photoshop when missing
+  const thumbs = new Map<string, string>();
   const refs: Record<number, RefSlot | undefined> = {};
   let run: null | { stage: string; progress: number | null; detail: string; promptId?: string; signal: { aborted: boolean } } = null;
   let status: { text: string; kind: "info" | "ok" | "error" } = { text: "就绪", kind: "info" };
@@ -45,7 +47,8 @@ export function mountApp(root: HTMLElement, svc: Services) {
   // ── skeleton ──
   const connEl = h("button", { class: "conn", title: "ComfyUI 连接设置", onClick: () => openSettings() });
   const targetEl = h("span", { class: "target" });
-  const historyEl = h("div", { class: "history" });
+  const historyEl = h("div", { class: "history vars" });
+  const varPromptEl = h("div", { class: "var-prompt" });
   const flowSel = h("select", { class: "field grow", title: "工作流" });
   const prompt = h("textarea", { class: "prompt", rows: 4 }) as HTMLTextAreaElement;
   const refsEl = h("div", { class: "refs" });
@@ -83,8 +86,8 @@ export function mountApp(root: HTMLElement, svc: Services) {
       connEl),
     (mainEl.append(
       h("section", { class: "block" },
-        h("div", { class: "label-row" }, h("span", { class: "label" }, "版本"), targetEl),
-        historyEl),
+        h("div", { class: "label-row" }, h("span", { class: "label" }, "变体"), targetEl),
+        historyEl, varPromptEl),
       h("section", { class: "block row" },
         h("span", { class: "flow-icon", title: "工作流" }, icon("flow")),
         flowSel,
@@ -119,24 +122,45 @@ export function mountApp(root: HTMLElement, svc: Services) {
   }
 
   function renderHistory() {
-    targetEl.textContent = group ? `续写 · ${group.layerName}` : "新任务";
+    targetEl.textContent = group ? `继续 · ${group.name}` : "新建填充";
     targetEl.title = group
-      ? "已选中 WavePlug 任务组：新结果会追加为下一个版本"
-      : "未选中任务组：将用当前选区新建一个智能对象。选中已有的 AI 结果智能对象即可续写";
+      ? "已选中 AI 填充图层组：新的变体基于原图生成，并加入这个图层组"
+      : "未选中 AI 填充图层组：将用当前选区新建一个。选中已有的 AI 填充图层组即可继续生成变体";
     targetEl.className = "target " + (group ? "cont" : "new");
-    const tiles: HTMLElement[] = versions.map(v => {
-      const thumb = group ? store.thumb(group.taskId, v.label) : null;
-      return h("button", { class: "tile" + (v.compId === currentComp ? " on" : ""), title: v.comment || v.label, onClick: () => switchTo(v) },
-        thumb ? h("img", { src: thumb }) : h("span", { class: "tile-ph" }, icon("image", 16)),
-        h("span", { class: "tile-num" }, v.label));
+    const ratio = group ? (group.rect.bottom - group.rect.top) / Math.max(1, group.rect.right - group.rect.left) : 1;
+    const h0 = Math.round(Math.max(56, Math.min(132, 96 * ratio)));
+    const tiles: HTMLElement[] = variations.map(v => {
+      const thumb = thumbs.get(`${group!.docId}:${v.layerId}`);
+      return h("div", { class: "var" + (v.visible ? " on" : ""), title: v.prompt || "（无提示词）" },
+        h("button", { class: "var-img", style: `height:${h0}px`, onClick: () => showVariation(v) },
+          thumb ? h("img", { src: thumb }) : h("span", { class: "tile-ph" }, icon("image", 16))),
+        h("div", { class: "var-foot" },
+          h("span", { class: "var-num" }, String(v.number)),
+          h("button", { class: "var-del", title: "删除这个变体", onClick: () => deleteVariation(v) }, icon("close", 10))));
     });
-    if (run) tiles.push(h("div", { class: "tile pending" },
-      h("span", { class: "tile-fill", style: `height:${Math.round((run.progress ?? 0) * 100)}%` }),
-      h("span", { class: "tile-num" }, "…")));
-    if (!tiles.length) tiles.push(h("div", { class: "history-empty" }, group ? "该任务组还没有版本" : "生成后的每个版本都会出现在这里，点击即可切换"));
+    if (run) tiles.push(h("div", { class: "var pending" },
+      h("div", { class: "var-img", style: `height:${h0}px` }, h("span", { class: "var-fill", style: `width:${Math.round((run.progress ?? 0) * 100)}%` })),
+      h("div", { class: "var-foot" }, h("span", { class: "var-num" }, "生成中"))));
+    if (!tiles.length) tiles.push(h("div", { class: "history-empty" }, group ? "这个填充还没有变体" : "框选区域并生成后，变体会出现在这里，点击即可切换"));
     replace(historyEl, ...tiles);
-    const on = historyEl.querySelector(".tile.on, .tile.pending") as HTMLElement | null;
-    on?.scrollIntoView?.({ inline: "nearest", block: "nearest" });
+    const active = variations.find(v => v.visible);
+    replace(varPromptEl, active ? h("span", null, h("span", { class: "muted" }, `变体 ${active.number}：`), active.prompt || "（无提示词）",
+      active.prompt && active.prompt !== prompt.value ? h("button", { class: "link", onClick: () => { prompt.value = active.prompt; prompt.dispatchEvent(new Event("input")); renderAction(); } }, " 使用") : null) : null);
+    void loadThumbs();
+  }
+
+  let loadingThumbs = false;
+  async function loadThumbs() {
+    if (!group || loadingThumbs) return;
+    loadingThumbs = true;
+    try {
+      for (const v of variations) {
+        const key = `${group.docId}:${v.layerId}`;
+        if (thumbs.has(key)) continue;
+        try { thumbs.set(key, await svc.host.thumbnail(group, v.layerId, 128)); } catch (e) { log("warn", "thumbnail", e); thumbs.set(key, ""); }
+        renderHistory();
+      }
+    } finally { loadingThumbs = false; }
   }
 
   function renderFlows() {
@@ -164,7 +188,7 @@ export function mountApp(root: HTMLElement, svc: Services) {
   function renderSelection() {
     if (!doc) { selEl.textContent = "未打开文档"; return; }
     if (sel) selEl.textContent = `选区 ${sel.right - sel.left} × ${sel.bottom - sel.top}`;
-    else selEl.textContent = group ? "无选区 · 沿用任务组遮罩" : "无选区";
+    else selEl.textContent = group ? "无选区 · 沿用填充范围" : "无选区";
     selEl.className = "sel-state" + (!sel && !group ? " warn" : "");
   }
 
@@ -193,7 +217,7 @@ export function mountApp(root: HTMLElement, svc: Services) {
     genBtn.className = "generate";
     genBtn.disabled = !!why;
     genBtn.title = why ?? "";
-    replace(genBtn, icon("spark"), h("span", null, group ? `生成新版本` : "生成"));
+    replace(genBtn, icon("spark"), h("span", null, group ? "生成更多变体" : "生成"));
     progEl.hidden = !why;
     replace(progEl, why ? h("div", { class: "stage muted" }, why) : null);
   }
@@ -243,13 +267,11 @@ export function mountApp(root: HTMLElement, svc: Services) {
         h("input", { type: "checkbox", checked: lm.enabled, onChange: (e: Event) => { lm.enabled = (e.target as HTMLInputElement).checked; store.saveProfiles(profiles); } }),
         h("span", { class: "param-label" }, "只重绘选区内")));
     }
-    if (p.bindings.some(b => b.role === "image" && b.encoding === "rgba-alpha-mask")) {
-      rows.push(h("label", { class: "param check-row", title: "在发送给 ComfyUI 的图片上，把选区染成 50% 红色。部分编辑类工作流靠颜色找到要改的区域" },
-        h("input", { type: "checkbox", checked: (p.options.markSelection ?? 0) > 0, onChange: (e: Event) => {
-          p.options.markSelection = (e.target as HTMLInputElement).checked ? 0.5 : 0;
-          store.saveProfiles(profiles);
-        } }),
-        h("span", { class: "param-label" }, "选区叠加红色标记（实验）")));
+    {
+      const count = h("select", { class: "field" }, ...[1, 2, 3, 4].map(n => h("option", { value: String(n) }, `${n} 个`))) as HTMLSelectElement;
+      count.value = String(ps.count ?? 1);
+      count.addEventListener("change", () => { ps.count = Number(count.value); save(); });
+      rows.push(h("div", { class: "param" }, h("div", { class: "param-top" }, h("span", { class: "param-label" }, "每次生成变体数")), h("div", { class: "param-ctl" }, count)));
     }
     if (!rows.length) rows.push(h("div", { class: "muted small" }, "该工作流没有绑定可调参数。可在「接口校准」中添加已有 LoRA 强度、步数等字段。"));
     replace(advBody, ...rows);
@@ -265,19 +287,24 @@ export function mountApp(root: HTMLElement, svc: Services) {
     try {
       doc = svc.host.activeDoc();
       sel = doc ? await svc.host.selectionBounds(doc.id) : null;
-      group = doc ? await svc.host.activeTaskGroup() : null;
-      if (group) ({ versions, currentCompId: currentComp } = await svc.host.versions(group));
-      else { versions = []; currentComp = null; }
+      group = doc ? await svc.host.activeFillGroup() : null;
+      variations = group ? await svc.host.variations(group) : [];
     } catch (e) { log("warn", "refresh failed", e); }
     finally { refreshing = false; }
     renderHistory(); renderSelection(); renderAction();
     if (again) { again = false; void refresh(); }
   }
 
-  async function switchTo(v: Version) {
+  async function showVariation(v: Variation) {
     if (!group || run) return;
-    try { await svc.host.switchVersion(group, v.compId); currentComp = v.compId; renderHistory(); setStatus(`已切换到 ${v.label}`, "ok"); }
+    try { await svc.host.showVariation(group, v.layerId); variations = variations.map(x => ({ ...x, visible: x.layerId === v.layerId })); renderHistory(); }
     catch (e) { setStatus("切换失败：" + (e as Error).message, "error"); }
+  }
+
+  async function deleteVariation(v: Variation) {
+    if (!group || run) return;
+    try { await svc.host.deleteVariation(group, v.layerId); await refresh(); setStatus(`已删除变体 ${v.number}`, "ok"); }
+    catch (e) { setStatus("删除失败：" + (e as Error).message, "error"); }
   }
 
   // ── connection ──
@@ -574,6 +601,7 @@ export function mountApp(root: HTMLElement, svc: Services) {
     if (why) { setStatus(why, "error"); return; }
     const syncError = await syncProfile(profile);
     if (syncError) { setStatus(syncError, "error"); return; }
+    setStatus("生成中…");
     const p = profile, ps = pstate;
     run = { stage: "准备中…", progress: null, detail: "", signal: { aborted: false } };
     const current = run;
@@ -583,16 +611,17 @@ export function mountApp(root: HTMLElement, svc: Services) {
       const res = await runInpaint(svc.host, comfy, {
         profile: p, prompt: prompt.value, seed: ps.seedMode === "fixed" ? ps.seed : null, params: ps.params,
         references: Object.fromEntries(Object.entries(refs).map(([k, v]) => [k, v])),
+        count: ps.count ?? 1,
       }, {
         signal: current.signal,
         stage: t => { current.stage = t; current.detail = ""; renderAction(); },
         progress: (f, t) => { current.progress = f; current.detail = t ?? ""; renderAction(); renderHistory(); },
         promptQueued: id => { current.promptId = id; },
+        variationAdded: (g, v) => { group = g; variations = [...variations.map(x => ({ ...x, visible: false })), v]; renderHistory(); },
         debug: svc.debugSave,
       });
-      try { store.saveThumb(res.group.taskId, res.version.label, await svc.host.thumbnail(res.group, 96)); } catch (e) { console.warn("缩略图失败", e); }
-      if (ps.seedMode === "random") { ps.seed = res.seed; store.saveState(p.id, ps); }
-      setStatus(`${res.continued ? "已追加" : "已新建任务组并写入"}版本 ${res.version.label} · seed ${res.seed}`, "ok");
+      if (ps.seedMode === "random") { ps.seed = res.seeds[res.seeds.length - 1]; store.saveState(p.id, ps); }
+      setStatus(`${res.continued ? "已加入" : "已新建 AI 填充，"}变体 ${res.variations.map(v => v.number).join("、")} · seed ${res.seeds.join("、")}`, "ok");
     } catch (e) {
       log("error", "generate failed", e);
       if (e instanceof StashedResult) { stash = e.png; setStatus(e.message, "error"); }

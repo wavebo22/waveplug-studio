@@ -8,7 +8,7 @@ import { uiToApi } from "../core/workflow/uiToApi.ts";
 import { recognize } from "../core/workflow/recognize.ts";
 import { newProfile } from "../core/workflow/profile.ts";
 import type { Services } from "../app/services.ts";
-import type { Capture, DocInfo, LayerInfo, PsHost, TaskGroup, Version } from "../ps/host.ts";
+import type { Capture, DocInfo, FillGroup, LayerInfo, PsHost, Variation } from "../ps/host.ts";
 import { mountApp } from "../ui/app.ts";
 
 const HUES = [168, 24, 210, 280, 96, 340];
@@ -28,20 +28,17 @@ class MockHost implements PsHost {
   doc: DocInfo = { id: 1, name: "poster_v3.psd", width: 1920, height: 1200, mode: "RGBColorMode", bits: 8 };
   sel: Rect | null = { left: 1020, top: 260, right: 1640, bottom: 900 };
   groupSelected = true;
-  group: TaskGroup = { docId: 1, layerId: 42, taskId: "K7Q2", fileName: "WavePlug_K7Q2.psb", layerName: "AI 结果 · K7Q2", rect: { left: 1020, top: 260, right: 1640, bottom: 900 } };
-  list: Version[] = [1, 2, 4].map(n => ({ number: n, label: String(n).padStart(3, "0"), compId: 1000 + n, comment: `seed ${n * 7919} · 玻璃瓶，柔和的侧光` }));
-  last = 4;
-  current: number | null = 1004;
+  group: FillGroup = { docId: 1, layerId: 42, name: "橘子汁", rect: { left: 1020, top: 260, right: 1640, bottom: 900 } };
+  list: Variation[] = [1, 2, 4].map(n => ({ layerId: 100 + n, number: n, label: String(n), prompt: n === 4 ? "把杯子换成橘子汁" : "橘子汁，玻璃杯", visible: n === 4 }));
   private cbs: (() => void)[] = [];
 
-  constructor() { for (const v of this.list) localStorage.setItem(`wp.thumb.K7Q2.${v.label}`, swatch(v.number)); }
   changed() { this.cbs.forEach(c => c()); }
   activeDoc() { return this.doc; }
   docExists() { return true; }
   async selectionBounds() { return this.sel; }
-  async activeTaskGroup() { return this.groupSelected ? this.group : null; }
-  async refreshTaskGroup(g: TaskGroup) { return g; }
-  async groupMask(g: TaskGroup): Promise<Pixels> { const w = g.rect.right - g.rect.left, h = g.rect.bottom - g.rect.top; return { width: w, height: h, channels: 1, data: new Uint8Array(w * h).fill(255) }; }
+  async activeFillGroup() { return this.groupSelected ? this.group : null; }
+  async refreshFillGroup(g: FillGroup) { return g; }
+  async groupMask(g: FillGroup): Promise<Pixels> { const w = g.rect.right - g.rect.left, h = g.rect.bottom - g.rect.top; return { width: w, height: h, channels: 1, data: new Uint8Array(w * h).fill(255) }; }
   async capture(_d: number, rect: Rect): Promise<Capture> {
     const w = rect.right - rect.left, h = rect.bottom - rect.top;
     const sel = new Uint8Array(w * h);
@@ -49,17 +46,22 @@ class MockHost implements PsHost {
     for (let y = s.top - rect.top; y < s.bottom - rect.top; y++) sel.fill(255, y * w + (s.left - rect.left), y * w + (s.right - rect.left));
     return { doc: this.doc, rect, image: { width: w, height: h, channels: 3, data: new Uint8Array(w * h * 3).fill(128) }, selection: { width: w, height: h, channels: 1, data: sel } };
   }
-  listLayers(): LayerInfo[] { return [{ id: 1, name: "标题文字", depth: 0, kind: "text" }, { id: 42, name: "AI 结果 · K7Q2", depth: 0, kind: "smartObject" }, { id: 7, name: "产品参考", depth: 0, kind: "pixel" }, { id: 3, name: "背景", depth: 0, kind: "pixel" }]; }
+  listLayers(): LayerInfo[] { return [{ id: 1, name: "标题文字", depth: 0, kind: "text" }, { id: 42, name: "AI填充 · 橘子汁", depth: 0, kind: "group" }, { id: 7, name: "产品参考", depth: 0, kind: "pixel" }, { id: 3, name: "背景", depth: 0, kind: "pixel" }]; }
   async layerPixels(): Promise<Pixels> { return { width: 8, height: 8, channels: 3, data: new Uint8Array(192) }; }
-  async versions() { return { versions: this.list, currentCompId: this.current }; }
-  async switchVersion(_g: TaskGroup, compId: number) { this.current = compId; }
-  async createTaskGroup(): Promise<TaskGroup> { this.groupSelected = true; this.list = []; this.last = 0; return this.group; }
-  async appendVersion(_g: TaskGroup, _png: Uint8Array, _p: Rect, comment: string): Promise<Version> {
-    const n = ++this.last, v = { number: n, label: String(n).padStart(3, "0"), compId: 1000 + n, comment };
-    this.list.push(v); this.current = v.compId;
-    return v;
+  async variations() { return this.list.map(v => ({ ...v })); }
+  async showVariation(_g: FillGroup, layerId: number) { this.list.forEach(v => { v.visible = v.layerId === layerId; }); }
+  async deleteVariation(_g: FillGroup, layerId: number) { this.list = this.list.filter(v => v.layerId !== layerId); if (!this.list.some(v => v.visible) && this.list.length) this.list[this.list.length - 1].visible = true; }
+  async createFillGroup(_d: number, rect: Rect, _m: Pixels, prompt: string): Promise<FillGroup> { this.groupSelected = true; this.list = []; this.group = { ...this.group, rect, name: prompt.slice(0, 24) }; return this.group; }
+  async addVariation(_g: FillGroup, _png: Uint8Array, _p: Rect, prompt: string): Promise<Variation> {
+    const n = Math.max(0, ...this.list.map(v => v.number)) + 1;
+    const v = { layerId: 100 + n, number: n, label: String(n), prompt, visible: true };
+    this.list.forEach(x => { x.visible = false; }); this.list.push(v);
+    return { ...v };
   }
-  async thumbnail() { return swatch(this.last); }
+  async thumbnail(g: FillGroup, layerId: number) {
+    const ratio = (g.rect.right - g.rect.left) / (g.rect.bottom - g.rect.top);
+    return swatch(layerId - 100, Math.round(96 * ratio), 96);
+  }
   onChange(cb: () => void) { this.cbs.push(cb); }
 }
 
@@ -73,7 +75,7 @@ class MockComfy implements Comfy {
   async uploadImage(_b: Uint8Array, name: string) { await sleep(150); return "waveplug/" + name; }
   async queue() { return { promptId: "mock-" + Date.now(), number: 1 }; }
   async history(): Promise<HistoryEntry | null> { return null; }
-  async view() { return encodePng({ width: 4, height: 4, channels: 3, data: new Uint8Array(48).fill(90) }); }
+  async view() { return encodePng({ width: 16, height: 10, channels: 3, data: new Uint8Array(480).fill(90) }); } // 1920×1200 aspect
   async cancel() {}
   async waitFor(promptId: string, onEvent: (e: JobEvent) => void, opts: { signal?: { aborted: boolean } } = {}): Promise<HistoryEntry> {
     onEvent({ type: "running", promptId, node: "255" });

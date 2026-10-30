@@ -188,3 +188,21 @@ select.field { padding-right: 2px; }
 .sum-v { flex: 1 1 auto; min-width: 0; overflow-wrap: anywhere; }
 .sum-opt { margin-top: 4px; }
 .sum-name span { min-width: 0; overflow-wrap: anywhere; }
+
+/* ── variations grid (Generative Fill style) ── */
+.history.vars { display: flex; flex-wrap: wrap; overflow: visible; min-height: 0; padding-bottom: 0; }
+.var { width: 31.3%; margin: 0 2% 8px 0; display: flex; flex-direction: column; }
+.var:nth-child(3n) { margin-right: 0; }
+.var-img { width: 100%; display: flex; align-items: center; justify-content: center; background: var(--field); border: 1px solid var(--line); border-radius: var(--r); overflow: hidden; position: relative; }
+.var-img img { width: 100%; height: 100%; object-fit: cover; display: block; }
+.var-img:hover { border-color: #777; }
+.var.on .var-img { border: 2px solid var(--accent); }
+.var-foot { display: flex; align-items: center; justify-content: space-between; height: 16px; padding: 0 2px; }
+.var-num { font-size: 10px; color: var(--muted); font-variant-numeric: tabular-nums; }
+.var.on .var-num { color: var(--accent-hi); font-weight: 600; }
+.var-del { width: 14px; height: 14px; color: #666; }
+.var-del:hover { color: var(--err); }
+.var.pending .var-img { border-style: dashed; justify-content: flex-start; }
+.var-fill { position: absolute; left: 0; top: 0; bottom: 0; background: rgba(79, 174, 158, .22); }
+.var-prompt { font-size: 10px; margin-top: 2px; overflow-wrap: anywhere; }
+.var-prompt .link { margin-left: 4px; }

@@ -1,14 +1,15 @@
-// One inpaint run: snapshot Photoshop → upload → queue → wait → write back into the task group.
-// Every write-back target is the one captured at the start, never "whatever is active now".
+// One fill: snapshot Photoshop → upload → queue (once per variation) → write each result as a
+// variation of the fill group. Variations are always generated from the original pixels (the fill
+// group is hidden while reading), and every write-back targets the document captured at the start.
 
 import { encodePng, type Pixels } from "../core/image/png.ts";
 import { imageFile, isEmptySelection, maskFile } from "../core/image/compose.ts";
-import { type Rect, clampRect, expand, placementInGroup, rectH, rectW } from "../core/image/region.ts";
+import { type Rect, clampRect, expand, rectH, rectW } from "../core/image/region.ts";
 import { type Comfy, type JobEvent, outputImage, pngSize } from "../core/comfy/client.ts";
 import { log } from "./log.ts";
 import { prepareRun } from "../core/workflow/inject.ts";
 import type { Profile } from "../core/workflow/profile.ts";
-import type { PsHost, TaskGroup, Version } from "../ps/host.ts";
+import type { FillGroup, PsHost, Variation } from "../ps/host.ts";
 
 export type RefSource =
   | { kind: "layer"; docId: number; layerId: number; name: string }
@@ -21,18 +22,22 @@ export interface RunInput {
   seed: number | null;
   params: Record<string, number | boolean>;
   references: Record<number, RefSource | undefined>;
+  /** variations to generate in this run (each with its own seed) */
+  count: number;
 }
 
 export interface RunHooks {
   stage(text: string): void;
   progress(fraction: number | null, text?: string): void;
+  /** called after each variation has been written */
+  variationAdded?(group: FillGroup, v: Variation, seed: number): void;
   promptQueued?(promptId: string): void;
   /** Saves a copy of an exchanged image for diagnosis (optional). */
   debug?(name: string, png: Uint8Array): void;
   signal: { aborted: boolean };
 }
 
-export interface RunResult { group: TaskGroup; version: Version; seed: number; continued: boolean }
+export interface RunResult { group: FillGroup; variations: Variation[]; seeds: number[]; continued: boolean }
 
 /** A finished result that could not be written back (document closed, group deleted …). */
 export class StashedResult extends Error {
@@ -61,8 +66,6 @@ function paste(mask: Pixels, into: Rect, at: Rect): Pixels {
   return { width: w, height: h, channels: 1, data: out };
 }
 
-const newTaskId = () => (Date.now().toString(36).slice(-3) + Math.random().toString(36).slice(2, 4)).toUpperCase();
-
 export async function runInpaint(host: PsHost, comfy: Comfy, input: RunInput, hooks: RunHooks): Promise<RunResult> {
   const { profile } = input;
   const check = () => { if (hooks.signal.aborted) throw new Error("已取消"); };
@@ -72,13 +75,13 @@ export async function runInpaint(host: PsHost, comfy: Comfy, input: RunInput, ho
   const doc = host.activeDoc();
   if (!doc) throw new Error("请先打开一个 PSD");
   if (!/RGB|CMYK/i.test(doc.mode) || doc.bits !== 8) throw new Error(`目前支持 RGB / CMYK 8 位文档（当前：${doc.mode} ${doc.bits} 位）`);
-  const target = await host.activeTaskGroup();
+  const target = await host.activeFillGroup();
   const selBounds = await host.selectionBounds(doc.id);
-  if (!target && !selBounds) throw new Error("请先用选区框出要重绘的区域（或选中已有的 AI 结果智能对象以续写）");
+  if (!target && !selBounds) throw new Error("请先用选区框出要重绘的区域（或选中已有的 AI 填充图层组）");
 
   const groupRect = target ? target.rect : clampRect(selBounds!, doc.width, doc.height);
   const canvas: Rect = { left: 0, top: 0, right: doc.width, bottom: doc.height };
-  // area of interest always contains the group rect, so the result can be placed into the PSB
+  // area of interest always contains the group rect, so every variation covers the whole fill
   let focus = groupRect;
   if (target && selBounds) {
     const s = clampRect(selBounds, doc.width, doc.height);
@@ -88,7 +91,7 @@ export async function runInpaint(host: PsHost, comfy: Comfy, input: RunInput, ho
 
   let selection: "active" | Pixels = "active";
   if (!selBounds && target) selection = paste(await host.groupMask(target), sendRect, target.rect);
-  const cap = await host.capture(doc.id, sendRect, selection);
+  const cap = await host.capture(doc.id, sendRect, selection, target ?? undefined);
   if (isEmptySelection(cap.selection)) throw new Error("选区为空");
   check();
 
@@ -103,7 +106,7 @@ export async function runInpaint(host: PsHost, comfy: Comfy, input: RunInput, ho
   const t0 = Date.now();
   const img = profile.bindings.find(b => b.role === "image")!;
   const values = {
-    image: await upload(imageFile(cap.image, img.encoding ?? "rgb", cap.selection, profile.options.markSelection ?? 0), "image"),
+    image: await upload(imageFile(cap.image, img.encoding ?? "rgb", cap.selection), "image"),
     mask: undefined as string | undefined,
     references: {} as Record<number, string>,
   };
@@ -118,45 +121,53 @@ export async function runInpaint(host: PsHost, comfy: Comfy, input: RunInput, ho
   }
   check();
 
-  // ── 3. run ──
-  const run = prepareRun(profile, { ...values, prompt: input.prompt, negative: input.negative, seed: input.seed, params: input.params });
-  const job = await comfy.queue(run.api);
-  hooks.promptQueued?.(job.promptId);
-  hooks.stage("排队中…");
-  const tQueued = Date.now();
-  const history = await comfy.waitFor(job.promptId, (e: JobEvent) => {
-    if (e.type === "cached") log("info", "comfy cached nodes", e.nodes.join(","));
-    if (e.type === "running") { hooks.stage(e.node ? `执行中 · 节点 #${e.node} ${run.api[e.node]?._meta?.title ?? run.api[e.node]?.class_type ?? ""}` : "执行中…"); log("info", "comfy executing", e.node, run.api[e.node ?? ""]?.class_type ?? "", `+${((Date.now() - tQueued) / 1000).toFixed(1)}s`); }
-    if (e.type === "progress") hooks.progress(e.max ? e.value / e.max : null, `采样 ${e.value}/${e.max}`);
-  }, { signal: hooks.signal });
-  const out = run.outputs[0];
-  hooks.stage("取回结果…");
-  const png = await comfy.view(outputImage(history, out.nodeId, out.imageIndex ?? 0));
-  hooks.debug?.(`${stamp}_output.png`, png);
-  const outSize = pngSize(png);
-  log("info", "run timing", `upload ${((tQueued - t0) / 1000).toFixed(1)}s`, `comfy ${((Date.now() - tQueued) / 1000).toFixed(1)}s`,
-    "sent", `${rectW(sendRect)}x${rectH(sendRect)}`, "output", outSize ? `${outSize.width}x${outSize.height}` : "?");
-  // A workflow that returns only its crop (not the full sent image) can't be placed by stretching.
-  if (outSize) {
-    const a = outSize.width / outSize.height, b = rectW(sendRect) / rectH(sendRect);
-    if (Math.abs(a - b) / b > 0.01) {
-      throw new StashedResult(`工作流输出 ${outSize.width}×${outSize.height} 与发送的画面 ${rectW(sendRect)}×${rectH(sendRect)} 比例不同，为避免错位未写入`, png);
+  // ── 3. run, once per variation ──
+  let group: FillGroup | null = target;
+  const variations: Variation[] = [], seeds: number[] = [];
+  const count = Math.max(1, Math.min(4, Math.floor(input.count) || 1));
+  for (let k = 0; k < count; k++) {
+    const tag = count > 1 ? `（${k + 1}/${count}）` : "";
+    const run = prepareRun(profile, { ...values, prompt: input.prompt, negative: input.negative, seed: input.seed === null ? null : input.seed + k, params: input.params });
+    log("info", "run", JSON.stringify({ prompt: input.prompt, seed: run.seed, profile: profile.name, localMask: !!profile.options.localMask?.enabled, continued: !!target }));
+    const job = await comfy.queue(run.api);
+    hooks.promptQueued?.(job.promptId);
+    hooks.stage("排队中" + tag);
+    const tQueued = Date.now();
+    const history = await comfy.waitFor(job.promptId, (e: JobEvent) => {
+      if (e.type === "cached") log("info", "comfy cached nodes", e.nodes.join(","));
+      if (e.type === "running") { hooks.stage((e.node ? `执行中 · #${e.node} ${run.api[e.node]?._meta?.title ?? run.api[e.node]?.class_type ?? ""}` : "执行中") + tag); log("info", "comfy executing", e.node, run.api[e.node ?? ""]?.class_type ?? "", `+${((Date.now() - tQueued) / 1000).toFixed(1)}s`); }
+      if (e.type === "progress") hooks.progress(e.max ? (k + e.value / e.max) / count : null, `采样 ${e.value}/${e.max}${tag}`);
+    }, { signal: hooks.signal });
+    const out = run.outputs[0];
+    hooks.stage("取回结果" + tag);
+    const png = await comfy.view(outputImage(history, out.nodeId, out.imageIndex ?? 0));
+    hooks.debug?.(`${stamp}_output${k ? "_" + k : ""}.png`, png);
+    const outSize = pngSize(png);
+    log("info", "run timing", `upload ${((tQueued - t0) / 1000).toFixed(1)}s`, `comfy ${((Date.now() - tQueued) / 1000).toFixed(1)}s`,
+      "sent", `${rectW(sendRect)}x${rectH(sendRect)}`, "output", outSize ? `${outSize.width}x${outSize.height}` : "?");
+    // A workflow that returns only its crop (not the full sent image) can't be placed by stretching.
+    if (outSize) {
+      const a = outSize.width / outSize.height, b = rectW(sendRect) / rectH(sendRect);
+      if (Math.abs(a - b) / b > 0.01) {
+        throw new StashedResult(`工作流输出 ${outSize.width}×${outSize.height} 与发送的画面 ${rectW(sendRect)}×${rectH(sendRect)} 比例不同，为避免错位未写入`, png);
+      }
     }
-  }
-  check();
+    check();
 
-  // ── 4. write back to the snapshot's document / group ──
-  hooks.stage("写入智能对象…");
-  if (!host.docExists(doc.id)) throw new StashedResult("发起任务的 PSD 已关闭，结果未写入", png);
-  let group: TaskGroup;
-  try {
-    group = target
-      ? await host.refreshTaskGroup(target)
-      : await host.createTaskGroup(doc.id, groupRect, crop(cap.image, sendRect, groupRect), crop(cap.selection, sendRect, groupRect), newTaskId());
-  } catch (e) {
-    throw new StashedResult((e as Error).message + "，结果未写入", png);
+    // ── 4. write back to the snapshot's document ──
+    hooks.stage("写入 Photoshop" + tag);
+    if (!host.docExists(doc.id)) throw new StashedResult("发起任务的 PSD 已关闭，结果未写入", png);
+    try {
+      group = group
+        ? await host.refreshFillGroup(group)
+        : await host.createFillGroup(doc.id, groupRect, crop(cap.selection, sendRect, groupRect), input.prompt);
+    } catch (e) {
+      throw new StashedResult((e as Error).message + "，结果未写入", png);
+    }
+    const v = await host.addVariation(group, png, sendRect, input.prompt);
+    variations.push(v); seeds.push(run.seed);
+    hooks.variationAdded?.(group, v, run.seed);
+    check();
   }
-  const comment = [`seed ${run.seed}`, input.prompt.trim().slice(0, 60) || "（无提示词）", profile.name].join(" · ");
-  const version = await host.appendVersion(group, png, placementInGroup(sendRect, groupRect), comment);
-  return { group, version, seed: run.seed, continued: !!target };
+  return { group: group!, variations, seeds, continued: !!target };
 }

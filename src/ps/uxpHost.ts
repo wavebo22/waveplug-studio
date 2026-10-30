@@ -1,22 +1,19 @@
-// Photoshop UXP implementation. The Action descriptors mirror poc/so_lib.jsx, which was verified
-// in Photoshop 27.10 via ExtendScript; this file still needs its first live run inside UXP.
+// Photoshop UXP implementation, Generative-Fill style: one layer group per fill, masked by the
+// selection, one cropped pixel layer per variation inside it.
 
-import type { Pixels } from "../core/image/png.ts";
+import { encodePng, type Pixels } from "../core/image/png.ts";
 import { type Rect, rectH, rectW } from "../core/image/region.ts";
-import { readCounter, writeCounter } from "../core/xmp.ts";
 import { placeGray } from "../core/image/compose.ts";
 import { log } from "../app/log.ts";
-import type { Capture, DocInfo, LayerInfo, PsHost, TaskGroup, Version } from "./host.ts";
+import { type Capture, type DocInfo, FILL_PREFIX, type FillGroup, type LayerInfo, type PsHost, type Variation } from "./host.ts";
 
 declare const require: (m: string) => any;
 
 const ps = () => require("photoshop");
 const uxpStorage = () => require("uxp").storage;
 const DONT = { dialogOptions: "dontDisplay" };
-const FILE_RE = /^WavePlug_([A-Za-z0-9]+)\.psb$/;
-const VERSION_NAME = /^\d{3,}$/;
 const SRGB = "sRGB IEC61966-2.1";
-const pad = (n: number) => String(n).padStart(3, "0");
+const VARIATION = /^v(\d+)(?:\s*·\s*(.*))?$/;
 
 async function play(descriptors: object[]): Promise<any[]> {
   return ps().action.batchPlay(descriptors, {});
@@ -24,6 +21,16 @@ async function play(descriptors: object[]): Promise<any[]> {
 
 async function modal<T>(name: string, fn: (ctx: any) => Promise<T>): Promise<T> {
   return ps().core.executeAsModal(fn, { commandName: name });
+}
+
+/** Runs `fn` as one undo step named `name` in document `docId`. */
+async function step<T>(name: string, docId: number, fn: () => Promise<T>): Promise<T> {
+  return modal(name, async ctx => {
+    const hc = ctx.hostControl;
+    const s = await hc.suspendHistory({ documentID: docId, name });
+    try { const r = await fn(); await hc.resumeHistory(s, true); return r; }
+    catch (e) { await hc.resumeHistory(s, false).catch(() => undefined); throw e; }
+  });
 }
 
 function docById(id: number): any {
@@ -36,21 +43,18 @@ function info(d: any): DocInfo {
   return { id: d.id, name: d.title ?? d.name, width: Math.round(d.width), height: Math.round(d.height), mode: String(d.mode), bits: Number(String(d.bitsPerChannel).replace(/\D/g, "")) || 8 };
 }
 
-async function layerDesc(docId: number, layerId: number): Promise<any> {
-  const [r] = await play([{ _obj: "get", _target: [{ _ref: "layer", _id: layerId }, { _ref: "document", _id: docId }], _options: DONT }]);
-  return r;
+function findLayer(layers: any[], id: number): any | null {
+  for (const l of layers) {
+    if (l.id === id) return l;
+    if (l.layers?.length) { const f = findLayer(l.layers, id); if (f) return f; }
+  }
+  return null;
 }
+
+const isFillGroup = (l: any) => !!l && String(l.kind) === "group" && String(l.name).startsWith(FILL_PREFIX);
 
 async function selectLayer(layerId: number) {
   await play([{ _obj: "select", _target: [{ _ref: "layer", _id: layerId }], makeVisible: false, _options: DONT }]);
-}
-
-function rectFromTransform(t: number[]): Rect | null {
-  // transform = 4 corners (x,y) clockwise from top-left
-  const [x0, y0, x1, y1, x2, y2, x3, y3] = t;
-  const axis = Math.abs(y0 - y1) < 0.5 && Math.abs(x1 - x2) < 0.5 && Math.abs(y2 - y3) < 0.5 && Math.abs(x3 - x0) < 0.5;
-  if (!axis) return null;
-  return { left: Math.round(x0), top: Math.round(y0), right: Math.round(x2), bottom: Math.round(y2) };
 }
 
 async function readPixels(opts: object): Promise<Pixels> {
@@ -86,36 +90,22 @@ async function tempPng(bytes: Uint8Array): Promise<string> {
   return fs.createSessionToken(file);
 }
 
-async function getXmp(docId: number): Promise<string> {
-  const [r] = await play([{ _obj: "get", _target: [{ _property: "XMPMetadataAsUTF8" }, { _ref: "document", _id: docId }], _options: DONT }]);
-  return r.XMPMetadataAsUTF8 ?? "";
-}
-async function setXmp(docId: number, xmp: string) {
-  await play([{ _obj: "set", _target: [{ _ref: "property", _property: "XMPMetadataAsUTF8" }, { _ref: "document", _id: docId }], to: { _obj: "document", XMPMetadataAsUTF8: xmp }, _options: DONT }]);
+function variationLayers(group: any): { layer: any; n: number; prompt: string }[] {
+  const out: { layer: any; n: number; prompt: string }[] = [];
+  for (const l of group.layers ?? []) {
+    const m = VARIATION.exec(String(l.name));
+    if (m) out.push({ layer: l, n: Number(m[1]), prompt: m[2] ?? "" });
+  }
+  return out.sort((a, b) => a.n - b.n);
 }
 
-function versionLayers(psb: any): any[] {
-  return psb.layers.filter((l: any) => VERSION_NAME.test(l.name));
-}
-
-/** One comp per version layer, each showing only that layer; comps of deleted layers are dropped. */
-async function rebuildComps(psb: any, comments: Record<string, string> = {}) {
-  const versions = versionLayers(psb);
-  const names = new Set(versions.map((l: any) => l.name));
-  for (const comp of [...psb.layerComps]) {
-    if (VERSION_NAME.test(comp.name) && !names.has(comp.name)) await (comp.delete ?? comp.remove).call(comp);
-  }
-  for (const layer of versions) {
-    for (const other of versions) other.visible = other === layer;
-    const comp = [...psb.layerComps].find((c: any) => c.name === layer.name);
-    if (comp) await comp.recapture({ visibility: true });
-    else await psb.layerComps.add({ name: layer.name, comment: comments[layer.name] ?? "", visibility: true, position: false, appearance: false });
-  }
+function boundsRect(l: any): Rect {
+  const b = l.boundsNoEffects ?? l.bounds;
+  return { left: Math.round(b.left), top: Math.round(b.top), right: Math.round(b.right), bottom: Math.round(b.bottom) };
 }
 
 export class UxpHost implements PsHost {
   readonly kind = "uxp" as const;
-  private reconciling = false;
 
   activeDoc(): DocInfo | null {
     const d = ps().app.activeDocument;
@@ -132,48 +122,59 @@ export class UxpHost implements PsHost {
     return { left: v(s.left), top: v(s.top), right: v(s.right), bottom: v(s.bottom) };
   }
 
-  async activeTaskGroup(): Promise<TaskGroup | null> {
+  async activeFillGroup(): Promise<FillGroup | null> {
     const d = ps().app.activeDocument;
-    const layer = d?.activeLayers?.[0];
-    if (!layer || String(layer.kind) !== "smartObject") return null;
-    return this.groupFromLayer(d.id, layer.id).catch(() => null);
+    let l = d?.activeLayers?.[0];
+    if (!l) return null;
+    if (!isFillGroup(l)) l = l.parent;
+    if (!isFillGroup(l)) return null;
+    return this.groupInfo(d, l).catch(() => null);
   }
 
-  private async groupFromLayer(docId: number, layerId: number): Promise<TaskGroup> {
-    const desc = await layerDesc(docId, layerId);
-    const file = desc.smartObject?.fileReference ?? "";
-    const m = FILE_RE.exec(file);
-    if (!m) throw new Error("所选智能对象不是 WavePlug 任务组");
-    const rect = rectFromTransform(desc.smartObjectMore?.transform ?? []);
-    if (!rect) throw new Error("任务组智能对象被旋转或变形，无法续写；请新建任务");
-    return { docId, layerId, taskId: m[1], fileName: file, layerName: desc.name, rect };
+  private async groupInfo(doc: any, group: any): Promise<FillGroup> {
+    const vs = variationLayers(group);
+    let rect: Rect | null = vs.length ? boundsRect(vs[0].layer) : null;
+    if (!rect || rectW(rect) <= 0) {
+      // no variation left: fall back to the group mask's extent
+      const r = await ps().imaging.getLayerMask({ documentID: doc.id, layerID: group.id });
+      try { rect = boundsOf(r.sourceBounds, { left: 0, top: 0, right: Math.round(doc.width), bottom: Math.round(doc.height) }); }
+      finally { r.imageData.dispose(); }
+    }
+    return { docId: doc.id, layerId: group.id, name: String(group.name).slice(FILL_PREFIX.length), rect };
   }
 
-  async refreshTaskGroup(g: TaskGroup): Promise<TaskGroup> {
-    if (!this.docExists(g.docId)) throw new Error("任务组所在的 PSD 已关闭");
-    const fresh = await this.groupFromLayer(g.docId, g.layerId).catch(e => { throw new Error("任务组智能对象已被删除或替换：" + e.message); });
-    if (fresh.fileName !== g.fileName) throw new Error("任务组智能对象已被替换");
-    return fresh;
+  async refreshFillGroup(g: FillGroup): Promise<FillGroup> {
+    if (!this.docExists(g.docId)) throw new Error("填充所在的 PSD 已关闭");
+    const doc = docById(g.docId);
+    const group = findLayer(doc.layers, g.layerId);
+    if (!isFillGroup(group)) throw new Error("AI 填充图层组已被删除或改名");
+    return { ...g, name: String(group.name).slice(FILL_PREFIX.length) };
   }
 
-  async groupMask(g: TaskGroup): Promise<Pixels> {
-    return modal("WavePlug 读取任务组遮罩", async () => {
+  async groupMask(g: FillGroup): Promise<Pixels> {
+    return modal("WavePlug 读取遮罩", async () => {
       const r = await ps().imaging.getLayerMask({ documentID: g.docId, layerID: g.layerId, sourceBounds: g.rect });
       return grayInto(r, g.rect, 0);
     });
   }
 
-  async capture(docId: number, rect: Rect, selection: "active" | Pixels): Promise<Capture> {
-    return modal("WavePlug 读取画面", async () => {
-      const doc = info(docById(docId));
-      const image = await readPixels({ documentID: docId, sourceBounds: rect });
-      if (image.width !== rectW(rect) || image.height !== rectH(rect)) throw new Error(`读取到的画面 ${image.width}×${image.height} 与范围不一致`);
-      let sel: Pixels;
-      if (selection === "active") {
-        const r = await ps().imaging.getSelection({ documentID: docId, sourceBounds: rect });
-        sel = await grayInto(r, rect, 0);
-      } else sel = selection;
-      return { doc, rect, image, selection: sel };
+  async capture(docId: number, rect: Rect, selection: "active" | Pixels, hide?: FillGroup): Promise<Capture> {
+    // reading happens with the fill group hidden, so variations are always made from the original
+    return step("WavePlug 读取画面", docId, async () => {
+      const doc = docById(docId);
+      const group = hide ? findLayer(doc.layers, hide.layerId) : null;
+      const wasVisible = group?.visible;
+      if (group) group.visible = false;
+      try {
+        const image = await readPixels({ documentID: docId, sourceBounds: rect });
+        if (image.width !== rectW(rect) || image.height !== rectH(rect)) throw new Error(`读取到的画面 ${image.width}×${image.height} 与范围不一致`);
+        let sel: Pixels;
+        if (selection === "active") sel = await grayInto(await ps().imaging.getSelection({ documentID: docId, sourceBounds: rect }), rect, 0);
+        else sel = selection;
+        return { doc: info(doc), rect, image, selection: sel };
+      } finally {
+        if (group) group.visible = wasVisible;
+      }
     });
   }
 
@@ -188,143 +189,97 @@ export class UxpHost implements PsHost {
     return modal("WavePlug 读取参考图层", () => readPixels({ documentID: docId, layerID: layerId }));
   }
 
-  async versions(g: TaskGroup) {
-    const desc = await layerDesc(g.docId, g.layerId);
-    const more = desc.smartObjectMore ?? {};
-    const list: any[] = more.compInfo?.compList ?? [];
-    const versions: Version[] = list
-      .filter(c => VERSION_NAME.test(c.name))
-      .map(c => ({ number: Number(c.name), label: c.name, compId: Number(c.ID ?? c.id), comment: c.comment ?? "" }))
-      .sort((a, b) => a.number - b.number);
-    const cur = Number(more.comp);
-    return { versions, currentCompId: Number.isFinite(cur) && cur >= 0 ? cur : null };
+  async variations(g: FillGroup): Promise<Variation[]> {
+    const group = findLayer(docById(g.docId).layers, g.layerId);
+    if (!group) return [];
+    return variationLayers(group).map(v => ({ layerId: v.layer.id, number: v.n, label: String(v.n), prompt: v.prompt, visible: !!v.layer.visible }));
   }
 
-  async switchVersion(g: TaskGroup, compId: number): Promise<void> {
-    await modal("WavePlug 切换版本", async () => {
-      await play([{ _obj: "setPlacedLayerComp", _target: [{ _ref: "layer", _id: g.layerId }, { _ref: "document", _id: g.docId }], compID: compId, _options: DONT }]);
+  async showVariation(g: FillGroup, layerId: number): Promise<void> {
+    await step("WavePlug 切换变体", g.docId, async () => {
+      const group = findLayer(docById(g.docId).layers, g.layerId);
+      if (!group) throw new Error("AI 填充图层组已不存在");
+      for (const v of variationLayers(group)) v.layer.visible = v.layer.id === layerId;
+      group.visible = true;
     });
   }
 
-  async createTaskGroup(docId: number, groupRect: Rect, base: Pixels, mask: Pixels, taskId: string): Promise<TaskGroup> {
-    return modal("WavePlug 新建任务组", async ctx => {
+  async deleteVariation(g: FillGroup, layerId: number): Promise<void> {
+    await step("WavePlug 删除变体", g.docId, async () => {
+      const doc = docById(g.docId);
+      const group = findLayer(doc.layers, g.layerId);
+      const layer = group && findLayer(group.layers, layerId);
+      if (!layer) return;
+      const wasVisible = layer.visible;
+      await layer.delete();
+      const rest = variationLayers(group);
+      if (wasVisible && rest.length) rest[rest.length - 1].layer.visible = true;
+    });
+  }
+
+  async createFillGroup(docId: number, rect: Rect, mask: Pixels, prompt: string): Promise<FillGroup> {
+    return step("WavePlug 新建 AI 填充", docId, async () => {
       const { app, imaging } = ps();
       const doc = docById(docId);
       app.activeDocument = doc;
-      const hc = ctx.hostControl;
-      const suspension = await hc.suspendHistory({ documentID: docId, name: "WavePlug 新建任务组" });
-      try {
-        const baseId = await this.baseLayer(doc, docId, groupRect, base, taskId);
-        await selectLayer(baseId);
-        await play([{ _obj: "newPlacedLayer", _options: DONT }]);
-        const so = doc.activeLayers[0];
-        so.name = "AI 结果 · " + taskId;
-        await play([{ _obj: "make", new: { _class: "channel" }, at: { _ref: "channel", _enum: "channel", _value: "mask" }, using: { _enum: "userMaskEnabled", _value: "revealAll" }, _options: DONT }]);
-        const m = await imaging.createImageDataFromBuffer(mask.data, { width: mask.width, height: mask.height, components: 1, colorSpace: "Grayscale", chunky: true });
-        try { await imaging.putLayerMask({ documentID: docId, layerID: so.id, imageData: m, targetBounds: { left: groupRect.left, top: groupRect.top } }); }
-        finally { m.dispose(); }
-        await hc.resumeHistory(suspension, true);
-        return this.groupFromLayer(docId, so.id);
-      } catch (e) {
-        await hc.resumeHistory(suspension, false);
-        throw e;
-      }
+      const group = await doc.createLayerGroup({ name: FILL_PREFIX + (prompt.trim().slice(0, 24) || "移除") });
+      await selectLayer(group.id);
+      await play([{ _obj: "make", new: { _class: "channel" }, at: { _ref: "channel", _enum: "channel", _value: "mask" }, using: { _enum: "userMaskEnabled", _value: "revealAll" }, _options: DONT }]);
+      const m = await imaging.createImageDataFromBuffer(mask.data, { width: mask.width, height: mask.height, components: 1, colorSpace: "Grayscale", chunky: true });
+      try { await imaging.putLayerMask({ documentID: docId, layerID: group.id, imageData: m, targetBounds: { left: rect.left, top: rect.top } }); }
+      finally { m.dispose(); }
+      return { docId, layerId: group.id, name: String(group.name).slice(FILL_PREFIX.length), rect };
     });
   }
 
-  /** Original pixels of the group area as a new layer. RGB data is converted by Photoshop when the
-   *  document is CMYK; if that fails, the layer is copied from a stamp of the visible document. */
-  private async baseLayer(doc: any, docId: number, r: Rect, base: Pixels, taskId: string): Promise<number> {
-    const { imaging } = ps();
-    const layer = await doc.createPixelLayer({ name: "WavePlug_" + taskId });
-    try {
-      const img = await imaging.createImageDataFromBuffer(base.data, { width: base.width, height: base.height, components: base.channels, colorSpace: "RGB", colorProfile: SRGB, chunky: true });
-      try { await imaging.putPixels({ documentID: docId, layerID: layer.id, imageData: img, targetBounds: { left: r.left, top: r.top } }); }
-      finally { img.dispose(); }
-      return layer.id;
-    } catch (e) {
-      log("warn", "putPixels failed, copying from visible pixels instead", String(doc.mode), e);
-      await play([{ _obj: "delete", _target: [{ _ref: "layer", _id: layer.id }], _options: DONT }]);
-    }
-    const px = (v: number) => ({ _unit: "pixelsUnit", _value: v });
-    let stampId: number | null = null;
-    if (doc.layers.length > 1) {
-      await play([{ _obj: "mergeVisible", duplicate: true, _options: DONT }]);
-      stampId = doc.activeLayers[0].id;
-    } else await selectLayer(doc.layers[0].id);
-    await play([{ _obj: "set", _target: [{ _ref: "channel", _property: "selection" }], to: { _obj: "rectangle", top: px(r.top), left: px(r.left), bottom: px(r.bottom), right: px(r.right) }, _options: DONT }]);
-    await play([{ _obj: "copyToLayer", _options: DONT }]);
-    const id = doc.activeLayers[0].id;
-    doc.activeLayers[0].name = "WavePlug_" + taskId;
-    if (stampId !== null) await play([{ _obj: "delete", _target: [{ _ref: "layer", _id: stampId }], _options: DONT }]);
-    await play([{ _obj: "set", _target: [{ _ref: "channel", _property: "selection" }], to: { _enum: "ordinal", _value: "none" }, _options: DONT }]);
-    return id;
-  }
-
-  async appendVersion(g: TaskGroup, png: Uint8Array, placement: Rect, comment: string): Promise<Version> {
+  async addVariation(g: FillGroup, png: Uint8Array, placement: Rect, prompt: string): Promise<Variation> {
     const token = await tempPng(png);
-    let newLabel = "";
-    await modal("WavePlug 写入新版本", async () => {
-      const { app, constants } = ps();
+    return step("WavePlug AI 填充", g.docId, async () => {
+      const { app, imaging, constants } = ps();
       const userDoc = app.activeDocument;
       const doc = docById(g.docId);
       app.activeDocument = doc;
-      await selectLayer(g.layerId);
-      await play([{ _obj: "placedLayerEditContents", _options: DONT }]);
-      const psb = app.activeDocument;
-      if ((psb.title ?? psb.name) !== g.fileName) {
-        throw new Error(`打开的内部文件 ${psb.title ?? psb.name} 与任务组 ${g.fileName} 不一致，已停止写入`);
-      }
-      let saved = false;
+      const group = findLayer(doc.layers, g.layerId);
+      if (!isFillGroup(group)) throw new Error("AI 填充图层组已不存在");
+      const n = Math.max(0, ...variationLayers(group).map(v => v.n)) + 1;
+      const name = `v${n} · ${prompt.trim().slice(0, 40) || "移除"}`;
+
+      await selectLayer(group.id);
+      await play([{
+        _obj: "placeEvent", null: { _path: token, _kind: "local" },
+        freeTransformCenterState: { _enum: "quadCenterState", _value: "QCSAverage" },
+        offset: { _obj: "offset", horizontal: { _unit: "pixelsUnit", _value: 0 }, vertical: { _unit: "pixelsUnit", _value: 0 } },
+        _options: DONT,
+      }]);
+      const placed = doc.activeLayers[0];
+      const b = boundsRect(placed);
+      await placed.scale(rectW(placement) / rectW(b) * 100, rectH(placement) / rectH(b) * 100, constants.AnchorPosition.TOPLEFT);
+      const nb = boundsRect(placed);
+      await placed.translate(placement.left - nb.left, placement.top - nb.top);
+      await placed.rasterize(constants.RasterizeType.ENTIRELAYER);
+
+      // keep only the fill area (a full-canvas layer per variation would bloat the PSD)
+      let layer = placed;
       try {
-        for (const l of psb.layers) if (/^WavePlug_/.test(l.name)) l.name = "原图";
-        const xmp = await getXmp(psb.id);
-        const highest = Math.max(readCounter(xmp), ...versionLayers(psb).map((l: any) => Number(l.name)), 0);
-        const label = pad(highest + 1);
-        newLabel = label;
-
-        await play([{
-          _obj: "placeEvent", null: { _path: token, _kind: "local" },
-          freeTransformCenterState: { _enum: "quadCenterState", _value: "QCSAverage" },
-          offset: { _obj: "offset", horizontal: { _unit: "pixelsUnit", _value: 0 }, vertical: { _unit: "pixelsUnit", _value: 0 } },
-          _options: DONT,
-        }]);
-        const layer = psb.activeLayers[0];
-        const b = layer.boundsNoEffects ?? layer.bounds;
-        const bw = b.right - b.left, bh = b.bottom - b.top;
-        await layer.scale(rectW(placement) / bw * 100, rectH(placement) / bh * 100, constants.AnchorPosition.TOPLEFT);
-        const nb = layer.boundsNoEffects ?? layer.bounds;
-        await layer.translate(placement.left - nb.left, placement.top - nb.top);
-        await layer.rasterize(constants.RasterizeType.ENTIRELAYER);
-        layer.name = label;
-        if (psb.layers[0] !== layer) layer.move(psb.layers[0], constants.ElementPlacement.PLACEBEFORE);
-
-        await rebuildComps(psb, { [label]: comment });
-        for (const l of versionLayers(psb)) l.visible = l.name === label;
-        await setXmp(psb.id, writeCounter(await getXmp(psb.id), highest + 1));
-        this.reconciling = true;
-        await psb.save();
-        saved = true;
-        await psb.close(constants.SaveOptions.DONOTSAVECHANGES);
-      } catch (e) {
-        if (!saved) await psb.close(constants.SaveOptions.DONOTSAVECHANGES).catch(() => undefined);
-        throw e;
-      } finally {
-        this.reconciling = false;
-      }
-      // leave the user on the document they were looking at
-      app.activeDocument = userDoc && this.docExists(userDoc.id) ? userDoc : doc;
+        const r = await imaging.getPixels({ documentID: doc.id, layerID: placed.id, sourceBounds: g.rect });
+        try {
+          const cropped = await doc.createPixelLayer({ name });
+          await imaging.putPixels({ documentID: doc.id, layerID: cropped.id, imageData: r.imageData, targetBounds: { left: g.rect.left, top: g.rect.top } });
+          await placed.delete();
+          layer = cropped;
+        } finally { r.imageData.dispose(); }
+      } catch (e) { log("warn", "crop variation failed, keeping full layer", e); }
+      layer.name = name;
+      if (layer.parent?.id !== group.id) await layer.move(group, constants.ElementPlacement.PLACEINSIDE);
+      for (const v of variationLayers(group)) v.layer.visible = v.layer.id === layer.id;
+      group.visible = true;
+      if (userDoc && userDoc.id !== doc.id && this.docExists(userDoc.id)) app.activeDocument = userDoc;
+      return { layerId: layer.id, number: n, label: String(n), prompt: prompt.trim(), visible: true };
     });
-    const { versions } = await this.versions(g);
-    const v = versions.find(x => x.label === newLabel);
-    if (!v) throw new Error(`版本 ${newLabel} 已写入内部文件，但主文档未读到对应的图层复合`);
-    await this.switchVersion(g, v.compId);
-    return v;
   }
 
-  async thumbnail(g: TaskGroup, size: number): Promise<string> {
-    const { encodePng } = await import("../core/image/png.ts");
-    const px = await modal("WavePlug 缩略图", () => readPixels({ documentID: g.docId, layerID: g.layerId, targetSize: { height: size } }));
+  async thumbnail(g: FillGroup, layerId: number, size: number): Promise<string> {
+    const px = await modal("WavePlug 缩略图", () => readPixels({ documentID: g.docId, layerID: layerId, sourceBounds: g.rect, targetSize: { height: size } }));
     const bytes = encodePng(px);
     let bin = "";
     for (let i = 0; i < bytes.length; i += 0x8000) bin += String.fromCharCode(...bytes.subarray(i, i + 0x8000));
@@ -334,25 +289,6 @@ export class UxpHost implements PsHost {
   onChange(cb: () => void): void {
     let timer: ReturnType<typeof setTimeout> | null = null;
     const fire = () => { if (timer) clearTimeout(timer); timer = setTimeout(cb, 150); };
-    const events = ["select", "set", "make", "delete", "open", "close", "move", "placedLayerEditContents", "setPlacedLayerComp", "historyStateChanged"];
-    ps().action.addNotificationListener(events, fire);
-    // The user saved a task-group PSB after editing it by hand: drop comps whose layer was deleted.
-    ps().action.addNotificationListener(["save"], async () => {
-      const d = ps().app.activeDocument;
-      if (this.reconciling || !d || !FILE_RE.test(d.title ?? d.name)) { fire(); return; }
-      const before = [...d.layerComps].map((c: any) => c.name).join();
-      const live = new Set(versionLayers(d).map((l: any) => l.name));
-      if ([...d.layerComps].every((c: any) => !VERSION_NAME.test(c.name) || live.has(c.name))) { fire(); return; }
-      this.reconciling = true;
-      try {
-        await modal("WavePlug 同步版本", async () => {
-          const visible = versionLayers(d).filter((l: any) => l.visible).map((l: any) => l.name);
-          await rebuildComps(d);
-          for (const l of versionLayers(d)) l.visible = visible.includes(l.name);
-          await d.save();
-        });
-      } catch (e) { console.warn("同步任务组版本失败", before, e); }
-      finally { this.reconciling = false; fire(); }
-    });
+    ps().action.addNotificationListener(["select", "set", "make", "delete", "open", "close", "move", "show", "hide", "historyStateChanged"], fire);
   }
 }
