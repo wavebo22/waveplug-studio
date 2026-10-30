@@ -4,6 +4,7 @@
 import type { Pixels } from "../core/image/png.ts";
 import { type Rect, rectH, rectW } from "../core/image/region.ts";
 import { readCounter, writeCounter } from "../core/xmp.ts";
+import { placeGray } from "../core/image/compose.ts";
 import type { Capture, DocInfo, LayerInfo, PsHost, TaskGroup, Version } from "./host.ts";
 
 declare const require: (m: string) => any;
@@ -57,6 +58,22 @@ async function readPixels(opts: object): Promise<Pixels> {
     const d = r.imageData;
     const data = new Uint8Array(await d.getData({ chunky: true }));
     return { width: d.width, height: d.height, channels: d.components, data };
+  } finally { r.imageData.dispose(); }
+}
+
+function boundsOf(b: any, fallback: Rect): Rect {
+  if (!b) return fallback;
+  const v = (x: any) => Math.round(typeof x === "number" ? x : x?._value ?? x);
+  return { left: v(b.left), top: v(b.top), right: v(b.right), bottom: v(b.bottom) };
+}
+
+/** Reads a 1-channel imaging result and places it into `want` (PS trims it to its own bounds). */
+async function grayInto(r: any, want: Rect, fill: number): Promise<Pixels> {
+  try {
+    const d = r.imageData;
+    const px: Pixels = { width: d.width, height: d.height, channels: 1, data: new Uint8Array(await d.getData({ chunky: true })) };
+    const got = boundsOf(r.sourceBounds, { left: want.left, top: want.top, right: want.left + d.width, bottom: want.top + d.height });
+    return placeGray(px, got, want, fill);
   } finally { r.imageData.dispose(); }
 }
 
@@ -141,10 +158,7 @@ export class UxpHost implements PsHost {
   async groupMask(g: TaskGroup): Promise<Pixels> {
     return modal("WavePlug 读取任务组遮罩", async () => {
       const r = await ps().imaging.getLayerMask({ documentID: g.docId, layerID: g.layerId, sourceBounds: g.rect });
-      try {
-        const d = r.imageData;
-        return { width: d.width, height: d.height, channels: 1 as const, data: new Uint8Array(await d.getData({ chunky: true })) };
-      } finally { r.imageData.dispose(); }
+      return grayInto(r, g.rect, 0);
     });
   }
 
@@ -156,10 +170,7 @@ export class UxpHost implements PsHost {
       let sel: Pixels;
       if (selection === "active") {
         const r = await ps().imaging.getSelection({ documentID: docId, sourceBounds: rect });
-        try {
-          const d = r.imageData;
-          sel = { width: d.width, height: d.height, channels: 1, data: new Uint8Array(await d.getData({ chunky: true })) };
-        } finally { r.imageData.dispose(); }
+        sel = await grayInto(r, rect, 0);
       } else sel = selection;
       return { doc, rect, image, selection: sel };
     });

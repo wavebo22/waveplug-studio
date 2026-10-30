@@ -92,3 +92,12 @@ test("multipart upload works without TextEncoder (UXP has none)", async () => {
     assert.match(text, /name="subfolder"\r\n\r\nwaveplug\r\n/);
   } finally { (globalThis as any).TextEncoder = saved; }
 });
+
+test("selection trimmed to its own bounds is placed back into the captured area", async () => {
+  const { placeGray } = await import("../src/core/image/compose.ts");
+  const sel = { width: 2, height: 1, channels: 1 as const, data: new Uint8Array([255, 128]) };
+  const out = placeGray(sel, { left: 3, top: 1, right: 5, bottom: 2 }, { left: 0, top: 0, right: 6, bottom: 3 });
+  assert.equal(out.width, 6); assert.equal(out.height, 3);
+  assert.deepEqual([...out.data.slice(6, 12)], [0, 0, 0, 255, 128, 0]);
+  assert.equal(out.data.reduce((a, b) => a + b, 0), 383);
+});

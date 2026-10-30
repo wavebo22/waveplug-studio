@@ -3,6 +3,7 @@
 
 import type { Encoding } from "../workflow/profile.ts";
 import type { Pixels } from "./png.ts";
+import { type Rect, rectH, rectW } from "./region.ts";
 
 function toRgb(src: Pixels): Uint8Array {
   if (src.channels === 3) return src.data;
@@ -62,4 +63,21 @@ export function fullSelection(width: number, height: number): Pixels {
 export function isEmptySelection(sel: Pixels): boolean {
   for (let i = 0; i < sel.data.length; i++) if (sel.data[i] > 0) return false;
   return true;
+}
+
+/**
+ * Photoshop returns selection / mask data only for the selection's own bounding box, not the
+ * requested area. Re-places a 1-channel buffer covering `src` into a buffer covering `dst`.
+ */
+export function placeGray(p: Pixels, src: Rect, dst: Rect, fill = 0): Pixels {
+  if (p.channels !== 1) throw new Error("只支持单通道");
+  if (p.width !== rectW(src) || p.height !== rectH(src)) throw new Error(`选区数据 ${p.width}×${p.height} 与其范围 ${rectW(src)}×${rectH(src)} 不符`);
+  const w = rectW(dst), h = rectH(dst), out = new Uint8Array(w * h).fill(fill);
+  const x0 = Math.max(src.left, dst.left), x1 = Math.min(src.right, dst.right);
+  const y0 = Math.max(src.top, dst.top), y1 = Math.min(src.bottom, dst.bottom);
+  for (let y = y0; y < y1; y++) {
+    const from = (y - src.top) * p.width + (x0 - src.left);
+    out.set(p.data.subarray(from, from + Math.max(0, x1 - x0)), (y - dst.top) * w + (x0 - dst.left));
+  }
+  return { width: w, height: h, channels: 1, data: out };
 }
