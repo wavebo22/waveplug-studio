@@ -130,3 +130,23 @@ test("'repaint only inside the selection' links the cropped mask into the encode
   p.options.localMask.enabled = false;
   assert.equal(prepareRun(p, { image: "a.png", prompt: "杯子", seed: 1 }).api["255"].inputs.mask, undefined);
 });
+
+test("reference images: free encoder inputs are found and wired only in the execution copy", async () => {
+  const { findReferenceSlots } = await import("../src/core/workflow/references.ts");
+  const g = api("guhai_inpaint_ps");
+  const images = Object.fromEntries(Array.from({ length: 10 }, (_, i) => [`image_${String(i + 1).padStart(2, "0")}`, ["IMAGE"]]));
+  const info = { TextEncodeQwenImage21GH: { input: { required: { clip: ["CLIP"] }, optional: { vae: ["VAE"], mask: ["MASK"], ...images } }, output: ["CONDITIONING", "CONDITIONING", "LATENT", "X"] } } as any;
+  const slots = findReferenceSlots(g, info)!;
+  assert.deepEqual(slots.nodes.map(n => `${n.nodeId}:${n.inputs[0]}`).sort(), ["118:image_02", "255:image_02"]);
+  const p = newProfile("x", g, recognize(g).suggestions.filter(s => s.confidence === "certain").map(s => s.binding));
+  p.options.refSlots = slots;
+  const without = prepareRun(p, { image: "a.png", prompt: "x", seed: 1 });
+  assert.equal(Object.keys(without.api).length, Object.keys(g).length, "no reference → nothing added");
+  const run = prepareRun(p, { image: "a.png", prompt: "换成图2中的饮料", seed: 1, references: { 1: "waveplug/ref.png" } });
+  const link = run.api["255"].inputs.image_02 as [string, number];
+  assert.ok(isLink(link));
+  assert.equal(run.api[link[0]].class_type, "LoadImage");
+  assert.equal(run.api[link[0]].inputs.image, "waveplug/ref.png");
+  assert.deepEqual(run.api["118"].inputs.image_02, link);
+  assert.equal(p.api["255"].inputs.image_02, undefined, "template untouched");
+});

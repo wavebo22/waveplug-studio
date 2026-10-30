@@ -43,6 +43,19 @@ export function maskFile(selection: Pixels, encoding: "mask-alpha" | "mask-gray"
   return { width: selection.width, height: selection.height, channels: 4, data: out };
 }
 
+/** RGBA → RGB composited over white (transparent layer areas would otherwise turn black in LoadImage). */
+export function onWhite(p: Pixels): Pixels {
+  if (p.channels !== 4) return { width: p.width, height: p.height, channels: 3, data: toRgb(p) };
+  const n = p.width * p.height, out = new Uint8Array(n * 3);
+  for (let i = 0, j = 0, k = 0; i < n; i++, j += 4, k += 3) {
+    const a = p.data[j + 3] / 255;
+    out[k] = Math.round(p.data[j] * a + 255 * (1 - a));
+    out[k + 1] = Math.round(p.data[j + 1] * a + 255 * (1 - a));
+    out[k + 2] = Math.round(p.data[j + 2] * a + 255 * (1 - a));
+  }
+  return { width: p.width, height: p.height, channels: 3, data: out };
+}
+
 export function imageFile(image: Pixels, encoding: Encoding, selection?: Pixels): Pixels {
   switch (encoding) {
     case "rgba-alpha-mask":

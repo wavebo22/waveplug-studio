@@ -63,6 +63,8 @@ export interface Profile {
     cropMargin: number;
     /** set once the crop default (introduced in 0.2.3) has been applied to an older profile */
     cropDefault?: boolean;
+    /** free encoder image inputs for reference images (execution copy only), see references.ts */
+    refSlots?: { nodes: { nodeId: string; inputs: string[] }[] };
     /** links that make the sampler respect the selection (execution copy only), see localMask.ts */
     localMask?: { enabled: boolean; links: { nodeId: string; input: string; from: [string, number] }[] };
   };

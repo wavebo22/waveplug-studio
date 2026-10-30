@@ -3,6 +3,7 @@
 import { type ApiGraph, cloneGraph } from "./api.ts";
 import { type Binding, type Profile, checkBinding, validateProfile } from "./profile.ts";
 import { applyMaskLinks } from "./localMask.ts";
+import { MAX_REFERENCES, applyReferences } from "./references.ts";
 
 export interface RunValues {
   /** uploaded file name (as returned by /upload/image, including subfolder) */
@@ -68,5 +69,10 @@ export function prepareRun(p: Profile, v: RunValues): Prepared {
     }
   }
   if (p.options.localMask?.enabled) applyMaskLinks(api, p.options.localMask.links);
+  // workflows without their own reference loaders: add the given references to the copy
+  if (!p.bindings.some(b => b.role === "reference") && p.options.refSlots && v.references) {
+    const files = Array.from({ length: MAX_REFERENCES }, (_, i) => v.references![i + 1]).filter((f): f is string => !!f);
+    if (files.length) applyReferences(api, p.options.refSlots, files);
+  }
   return { api, seed, outputs: p.bindings.filter(b => b.role === "output") };
 }

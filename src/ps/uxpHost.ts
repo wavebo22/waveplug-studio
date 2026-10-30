@@ -217,8 +217,21 @@ export class UxpHost implements PsHost {
     return out;
   }
 
-  async layerPixels(docId: number, layerId: number): Promise<Pixels> {
-    return modal("WavePlug 读取参考图层", () => readPixels({ documentID: docId, layerID: layerId }));
+  async layerPixels(docId: number, layerId: number, maxEdge = 0): Promise<Pixels> {
+    const layer = findLayer(docById(docId).layers, layerId);
+    if (!layer) throw new Error("参考图层已不存在");
+    const b = boundsRect(layer);
+    const opts: Record<string, unknown> = { documentID: docId, layerID: layerId };
+    if (maxEdge && Math.max(rectW(b), rectH(b)) > maxEdge) opts.targetSize = rectW(b) >= rectH(b) ? { width: maxEdge } : { height: maxEdge };
+    return modal("WavePlug 读取参考图层", () => readPixels(opts));
+  }
+
+  async layerThumbnail(docId: number, layerId: number, size: number): Promise<string> {
+    const px = await this.layerPixels(docId, layerId, size);
+    const bytes = encodePng(px);
+    let bin = "";
+    for (let i = 0; i < bytes.length; i += 0x8000) bin += String.fromCharCode(...bytes.subarray(i, i + 0x8000));
+    return "data:image/png;base64," + btoa(bin);
   }
 
   async variations(g: FillGroup): Promise<Variation[]> {

@@ -3,7 +3,8 @@
 // group is hidden while reading), and every write-back targets the document captured at the start.
 
 import { encodePng, type Pixels } from "../core/image/png.ts";
-import { imageFile, isEmptySelection, maskFile } from "../core/image/compose.ts";
+import { imageFile, isEmptySelection, maskFile, onWhite } from "../core/image/compose.ts";
+import { MAX_REFERENCES } from "../core/workflow/references.ts";
 import { type Rect, clampRect, expandBy, rectH, rectW } from "../core/image/region.ts";
 import { type Comfy, type JobEvent, outputImage, pngSize, utf8 } from "../core/comfy/client.ts";
 import { log } from "./log.ts";
@@ -121,12 +122,20 @@ export async function runInpaint(host: PsHost, comfy: Comfy, input: RunInput, ho
   };
   const maskB = profile.bindings.find(b => b.role === "mask");
   if (maskB) values.mask = await upload(maskFile(cap.selection, maskB.encoding === "mask-alpha" ? "mask-alpha" : "mask-gray"), "mask");
-  for (const b of profile.bindings.filter(x => x.role === "reference")) {
+  const uploadRef = async (slot: number, src: RefSource) => src.kind === "file"
+    ? comfy.uploadImage(src.bytes, `wp_${stamp}_ref${slot}_${src.name.replace(/[^\w.-]/g, "_")}`)
+    : upload(onWhite(await host.layerPixels(src.docId, src.layerId, 1536)), "ref" + slot);
+  const refBindings = profile.bindings.filter(x => x.role === "reference");
+  for (const b of refBindings) {
     const src = input.references[b.slot ?? 0];
     if (!src) throw new Error(`参考图 ${b.slot} 还没有选择素材`);
-    values.references[b.slot!] = src.kind === "file"
-      ? await comfy.uploadImage(src.bytes, `wp_${stamp}_ref${b.slot}_${src.name.replace(/[^\w.-]/g, "_")}`)
-      : await upload(imageFile(await host.layerPixels(src.docId, src.layerId), "rgb"), "ref" + b.slot);
+    values.references[b.slot!] = await uploadRef(b.slot!, src);
+  }
+  if (!refBindings.length && profile.options.refSlots) {
+    for (let slot = 1; slot <= MAX_REFERENCES; slot++) {
+      const src = input.references[slot];
+      if (src) { hooks.stage(`上传参考图 ${slot}…`); values.references[slot] = await uploadRef(slot, src); }
+    }
   }
   check();
 

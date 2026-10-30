@@ -9,6 +9,7 @@ import { type Binding, type Profile, carryOver, newProfile, validateProfile } fr
 import { recognize } from "../core/workflow/recognize.ts";
 import { uiToApi } from "../core/workflow/uiToApi.ts";
 import { findLocalMaskLinks } from "../core/workflow/localMask.ts";
+import { MAX_REFERENCES, findReferenceSlots } from "../core/workflow/references.ts";
 import { type RefSource, StashedResult, runInpaint } from "../app/generate.ts";
 import { type ProfileState, type Services, type Settings, store } from "../app/services.ts";
 import type { DocInfo, FillGroup, Variation } from "../ps/host.ts";
@@ -239,15 +240,29 @@ export function mountApp(root: HTMLElement, svc: Services) {
     promptHint.hidden = !!prompt.value;
   }
 
+  /** Reference slots: the workflow's own reference loaders, or free encoder inputs (auto-wired). */
+  function refSlotNumbers(): number[] {
+    const bound = profile?.bindings.filter(b => b.role === "reference").map(b => b.slot!) ?? [];
+    if (bound.length) return bound;
+    if (!profile?.options.refSlots) return [];
+    const max = Math.min(MAX_REFERENCES, ...profile.options.refSlots.nodes.map(n => n.inputs.length));
+    const used = Array.from({ length: max }, (_, i) => i + 1).filter(s => refs[s]);
+    // filled slots plus one empty "add" slot
+    return Array.from({ length: Math.min(max, used.length + 1) }, (_, i) => i + 1);
+  }
+
   function renderRefs() {
-    const slots = profile?.bindings.filter(b => b.role === "reference").map(b => b.slot!) ?? [];
+    const slots = refSlotNumbers();
+    const auto = !!profile && !profile.bindings.some(b => b.role === "reference");
     refsEl.hidden = !slots.length;
     replace(refsEl, ...slots.map(slot => {
       const r = refs[slot];
-      return h("button", { class: "ref" + (r ? " set" : ""), title: r ? `参考图 ${slot}：${r.name}` : `参考图 ${slot}：点击选择`, onClick: (e: Event) => refMenu(slot, e.currentTarget as HTMLElement) },
-        r?.thumb ? h("img", { src: r.thumb }) : icon("image", 16),
-        h("span", { class: "ref-num" }, String(slot)));
-    }));
+      // with auto-wired references the canvas is 图1, so reference n is 图(n+1)
+      const tag = auto ? `图${slot + 1}` : `参考 ${slot}`;
+      return h("button", { class: "ref" + (r ? " set" : " add"), title: r ? `${tag}：${r.name}（点击更换或清空）` : `添加参考图（${tag}）：PS 图层或图片文件`, onClick: (e: Event) => refMenu(slot, e.currentTarget as HTMLElement) },
+        r?.thumb ? h("img", { src: r.thumb }) : r ? icon("image", 16) : icon("plus", 14),
+        h("span", { class: "ref-num" }, r ? tag : "参考图"));
+    }), refs[1] && auto ? h("div", { class: "ref-hint" }, "提示词里用「图2」指代参考图，例如：把选区里的杯子换成图2中的饮料") : null);
   }
 
   function renderSelection() {
@@ -399,6 +414,7 @@ export function mountApp(root: HTMLElement, svc: Services) {
       setStatus(error, "error");
     }
     renderConn(); renderAction();
+    if (!error && profile) void quietSync(profile);
     return error;
   }
 
@@ -491,6 +507,17 @@ export function mountApp(root: HTMLElement, svc: Services) {
     settings.activeProfile = profile?.id ?? null; store.saveSettings(settings);
     for (const k of Object.keys(refs)) delete refs[Number(k)];
     renderFlows(); renderRefs(); renderAction(); renderAdvanced();
+    if (profile && conn.state === "ok") void quietSync(profile);
+  }
+
+  /** Background sync (workflow + reference/mask detection) without leaving a status message. */
+  async function quietSync(p: Profile) {
+    if (run) return;
+    const before = status;
+    const err = await syncProfile(p).catch(e => (e as Error).message);
+    if (err) log("warn", "background sync", err);
+    if (status.text === "同步 ComfyUI 工作流…") { status = before; renderStatus(); }
+    renderRefs();
   }
 
   function openWorkflows() {
@@ -673,7 +700,11 @@ export function mountApp(root: HTMLElement, svc: Services) {
       ...layers.map(l => h("option", { value: String(l.id) }, "  ".repeat(l.depth) + l.name)));
     layerSel.addEventListener("change", () => {
       const l = layers.find(x => String(x.id) === layerSel.value);
-      if (l && doc) refs[slot] = { kind: "layer", docId: doc.id, layerId: l.id, name: l.name };
+      if (l && doc) {
+        const ref: RefSlot = { kind: "layer", docId: doc.id, layerId: l.id, name: l.name };
+        refs[slot] = ref;
+        svc.host.layerThumbnail(doc.id, l.id, 96).then(t => { if (refs[slot] === ref) { ref.thumb = t; renderRefs(); } }, e => log("warn", "reference thumbnail", e));
+      }
       pop.remove(); renderRefs();
     });
     const pop: HTMLElement = h("div", { class: "pop", style: `top:${anchor.getBoundingClientRect().bottom + 4}px` },
@@ -683,7 +714,11 @@ export function mountApp(root: HTMLElement, svc: Services) {
         const img = await svc.pickImage();
         if (img) { refs[slot] = { kind: "file", name: img.name, bytes: img.bytes, thumb: img.url }; renderRefs(); }
       } }, icon("folder"), h("span", null, "选择图片文件…")),
-      refs[slot] ? h("button", { class: "menu-item small", onClick: () => { refs[slot] = undefined; pop.remove(); renderRefs(); } }, icon("close"), h("span", null, "清空")) : null);
+      refs[slot] ? h("button", { class: "menu-item small", onClick: () => {
+        for (let s = slot; s < MAX_REFERENCES; s++) refs[s] = refs[s + 1];
+        refs[MAX_REFERENCES] = undefined;
+        pop.remove(); renderRefs();
+      } }, icon("close"), h("span", null, "移除这张参考图")) : null);
     sheetHost.append(pop);
     setTimeout(() => document.addEventListener("click", function off(e) { if (!pop.contains(e.target as Node)) { pop.remove(); document.removeEventListener("click", off); } }), 0);
   }
@@ -728,6 +763,10 @@ export function mountApp(root: HTMLElement, svc: Services) {
   /** Detects the optional "repaint only inside the selection" links; on by default when found. */
   function refreshMaskLinks(p: Profile) {
     if (!objectInfo) return;
+    const slots = findReferenceSlots(p.api, objectInfo);
+    const had = !!p.options.refSlots;
+    p.options.refSlots = slots ?? undefined;
+    if (!!slots !== had) { log("info", "reference slots", JSON.stringify(slots)); renderRefs(); }
     const links = findLocalMaskLinks(p.api, objectInfo);
     const was = p.options.localMask;
     p.options.localMask = links.length ? { enabled: was ? was.enabled : true, links } : undefined;

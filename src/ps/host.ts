@@ -67,7 +67,9 @@ export interface PsHost {
   /** Reads composite pixels of `rect`; `hide` (a fill group) is hidden while reading. */
   capture(docId: number, rect: Rect, selection: "active" | Pixels, hide?: FillGroup): Promise<Capture>;
   listLayers(docId: number): LayerInfo[];
-  layerPixels(docId: number, layerId: number): Promise<Pixels>;
+  /** Pixels of a layer (RGBA when it has transparency), long edge capped at `maxEdge`. */
+  layerPixels(docId: number, layerId: number, maxEdge?: number): Promise<Pixels>;
+  layerThumbnail(docId: number, layerId: number, size: number): Promise<string>;
 
   variations(g: FillGroup): Promise<Variation[]>;
   showVariation(g: FillGroup, layerId: number): Promise<void>;

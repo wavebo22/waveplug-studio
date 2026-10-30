@@ -219,3 +219,12 @@ button, .ub { font: inherit; color: inherit; background: none; border: 0; paddin
 
 /* check rows are divs (UXP dims <label> text); keep their text at full contrast */
 .check-row, .check-row span, .check-row .param-label { color: var(--text); user-select: none; }
+
+/* reference slots */
+.refs { display: flex; flex-wrap: wrap; align-items: flex-start; margin-top: 8px; }
+.ref { width: 56px; height: 56px; margin: 0 6px 6px 0; border-radius: 5px; }
+.ref.add { color: var(--accent-hi); border-color: var(--accent); border-style: dashed; }
+.ref.add:hover { background: rgba(63, 181, 159, .14); }
+.ref-num { left: 0; right: 0; bottom: 0; padding: 1px 0; text-align: center; font-size: 10px; background: rgba(0, 0, 0, .55); color: #eee; }
+.ref.add .ref-num { background: none; color: var(--accent-hi); }
+.ref-hint { width: 100%; font-size: var(--fs-s); color: var(--muted); margin-top: 2px; }

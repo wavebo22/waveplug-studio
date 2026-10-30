@@ -50,6 +50,7 @@ class MockHost implements PsHost {
   }
   listLayers(): LayerInfo[] { return [{ id: 1, name: "标题文字", depth: 0, kind: "text" }, { id: 42, name: "AI填充 · 橘子汁", depth: 0, kind: "group" }, { id: 7, name: "产品参考", depth: 0, kind: "pixel" }, { id: 3, name: "背景", depth: 0, kind: "pixel" }]; }
   async layerPixels(): Promise<Pixels> { return { width: 8, height: 8, channels: 3, data: new Uint8Array(192) }; }
+  async layerThumbnail(_d: number, id: number) { return swatch(id, 64, 64); }
   async variations() { return this.list.map(v => ({ ...v })); }
   async setFillVisible() {}
   async showVariation(_g: FillGroup, layerId: number) { this.list.forEach(v => { v.visible = v.layerId === layerId; }); }
@@ -72,7 +73,14 @@ class MockComfy implements Comfy {
   readonly base = "http://127.0.0.1:8188";
   online = true;
   async systemStats() { if (!this.online) throw new Error("无法连接 ComfyUI（模拟离线）"); return { system: { comfyui_version: "0.37.0" }, devices: [] }; }
-  async objectInfo() { return {}; }
+  async objectInfo() {
+    // just enough for the preview to detect the "只重绘选区内" and reference slots
+    const images = Object.fromEntries(Array.from({ length: 10 }, (_, i) => [`image_${String(i + 1).padStart(2, "0")}`, ["IMAGE"]]));
+    return {
+      TextEncodeQwenImage21GH: { input: { required: { clip: ["CLIP"] }, optional: { vae: ["VAE"], mask: ["MASK"], ...images } }, output: ["CONDITIONING", "CONDITIONING", "LATENT", "INFO"] },
+      "图像缩放V2_孤海": { input: { required: { "图像": ["IMAGE"] }, optional: { "遮罩": ["MASK"] } }, output: ["IMAGE", "INT", "INT", "MASK"] },
+    } as any;
+  }
   async listWorkflows() { return ["孤海 Qwen2.1 Turbo PS专用/Qwen-2.1-移除、局部重绘_PS插件连接本地comfyui专用_本机适配.json"]; }
   async readWorkflow() { return fixtureUi; }
   last = { width: 16, height: 10 };
@@ -107,6 +115,7 @@ async function boot() {
     const rec = recognize(api);
     const p = newProfile("孤海 Qwen2.1 局部重绘", api, rec.suggestions.filter(s => s.confidence === "certain").map(s => s.binding));
     p.options.allowEmptyPrompt = true;
+    p.source = { kind: "comfy", path: (await comfy.listWorkflows())[0] };
     localStorage.setItem("wp.profiles", JSON.stringify([p]));
     localStorage.setItem("wp.state." + p.id, JSON.stringify({ prompt: "磨砂玻璃瓶，瓶身有细小水珠，柔和侧光", params: {}, seedMode: "random", seed: 0 }));
   }
