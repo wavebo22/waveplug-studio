@@ -4,7 +4,7 @@
 import { encodePng, type Pixels } from "../core/image/png.ts";
 import { imageFile, isEmptySelection, maskFile } from "../core/image/compose.ts";
 import { type Rect, clampRect, expand, placementInGroup, rectH, rectW } from "../core/image/region.ts";
-import { type ComfyClient, type JobEvent, outputImage } from "../core/comfy/client.ts";
+import { type Comfy, type JobEvent, outputImage } from "../core/comfy/client.ts";
 import { prepareRun } from "../core/workflow/inject.ts";
 import type { Profile } from "../core/workflow/profile.ts";
 import type { PsHost, TaskGroup, Version } from "../ps/host.ts";
@@ -60,7 +60,7 @@ function paste(mask: Pixels, into: Rect, at: Rect): Pixels {
 
 const newTaskId = () => (Date.now().toString(36).slice(-3) + Math.random().toString(36).slice(2, 4)).toUpperCase();
 
-export async function runInpaint(host: PsHost, comfy: ComfyClient, input: RunInput, hooks: RunHooks): Promise<RunResult> {
+export async function runInpaint(host: PsHost, comfy: Comfy, input: RunInput, hooks: RunHooks): Promise<RunResult> {
   const { profile } = input;
   const check = () => { if (hooks.signal.aborted) throw new Error("已取消"); };
 

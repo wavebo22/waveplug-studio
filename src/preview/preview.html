@@ -1,0 +1,25 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>WavePlug Studio Preview</title>
+  <link rel="stylesheet" href="styles.css">
+  <style>
+    html, body { height: auto; }
+    body.stage { background: #1d1d1d; display: flex; align-items: flex-start; justify-content: center; padding: 24px 16px; min-height: 100vh; }
+    .frame { width: 340px; height: 760px; border: 1px solid #111; box-shadow: 0 0 0 1px #3a3a3a; background: var(--bg); flex: none; }
+    #app { height: 100%; }
+    #controls { margin-left: 20px; color: #aaa; font-size: 12px; display: flex; flex-direction: column; width: 220px; }
+    #controls label, #controls button { margin-bottom: 10px; }
+    #controls button { border: 1px solid #555; padding: 4px 8px; text-align: left; }
+    #controls h4 { margin: 0 0 12px; color: #ddd; font-weight: 600; }
+    @media (max-width: 640px) { body.stage { flex-direction: column; align-items: center; } #controls { margin: 16px 0 0; } .frame { width: 100%; max-width: 340px; } }
+  </style>
+</head>
+<body class="stage">
+  <div class="frame"><div id="app"></div></div>
+  <div id="controls"><h4>预览控制（模拟 Photoshop / ComfyUI）</h4></div>
+  <script src="preview.js"></script>
+</body>
+</html>

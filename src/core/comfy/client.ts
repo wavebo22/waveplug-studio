@@ -63,12 +63,18 @@ export class ComfyClient {
   }
 
   async uploadImage(bytes: Uint8Array, name: string, subfolder = "waveplug"): Promise<string> {
-    const form = new FormData();
-    form.append("image", new Blob([bytes as BlobPart], { type: "image/png" }), name);
-    form.append("subfolder", subfolder);
-    form.append("type", "input");
-    form.append("overwrite", "true");
-    const r = await this.json<{ name: string; subfolder?: string }>("/upload/image", { method: "POST", body: form });
+    // multipart body built by hand: UXP's FormData/Blob support varies between host versions
+    const boundary = "----waveplug" + Math.random().toString(36).slice(2);
+    const enc = new TextEncoder();
+    const field = (k: string, v: string) => `--${boundary}\r\nContent-Disposition: form-data; name="${k}"\r\n\r\n${v}\r\n`;
+    const head = enc.encode(field("subfolder", subfolder) + field("type", "input") + field("overwrite", "true") +
+      `--${boundary}\r\nContent-Disposition: form-data; name="image"; filename="${name}"\r\nContent-Type: image/png\r\n\r\n`);
+    const tail = enc.encode(`\r\n--${boundary}--\r\n`);
+    const body = new Uint8Array(head.length + bytes.length + tail.length);
+    body.set(head, 0); body.set(bytes, head.length); body.set(tail, head.length + bytes.length);
+    const r = await this.json<{ name: string; subfolder?: string }>("/upload/image", {
+      method: "POST", headers: { "Content-Type": "multipart/form-data; boundary=" + boundary }, body,
+    });
     if (!r?.name) throw new ComfyError("上传图片后 ComfyUI 未返回文件名");
     return r.subfolder ? `${r.subfolder}/${r.name}` : r.name;
   }
@@ -164,6 +170,9 @@ export class ComfyClient {
 
   close() { this.ws?.close(); }
 }
+
+/** The surface the app uses — lets the browser preview swap in a fake backend. */
+export type Comfy = Pick<ComfyClient, "base" | "systemStats" | "objectInfo" | "listWorkflows" | "readWorkflow" | "uploadImage" | "queue" | "history" | "view" | "cancel" | "waitFor">;
 
 export interface HistoryEntry {
   outputs: Record<string, { images?: ImageRef[] }>;

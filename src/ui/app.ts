@@ -1,0 +1,434 @@
+// WavePlug Studio panel. Layout follows V1.4: versions on top → workflow row → prompt →
+// references → "参考当前画面" + selection → generate → collapsed advanced → status line.
+
+import { type Comfy, ComfyError } from "../core/comfy/client.ts";
+import type { Rect } from "../core/image/region.ts";
+import { asApiGraph } from "../core/workflow/api.ts";
+import { MAX_SEED, randomSeed } from "../core/workflow/inject.ts";
+import { type Profile, carryOver, newProfile, validateProfile } from "../core/workflow/profile.ts";
+import { recognize } from "../core/workflow/recognize.ts";
+import { uiToApi, widgetNamesFromObjectInfo } from "../core/workflow/uiToApi.ts";
+import { type RefSource, StashedResult, runInpaint } from "../app/generate.ts";
+import { type ProfileState, type Services, type Settings, store } from "../app/services.ts";
+import type { DocInfo, TaskGroup, Version } from "../ps/host.ts";
+import { openCalibration } from "./calibrate.ts";
+import { h, icon, replace } from "./dom.ts";
+
+type Conn = { state: "checking" | "ok" | "down"; text: string };
+type RefSlot = RefSource & { thumb?: string };
+
+export function mountApp(root: HTMLElement, svc: Services) {
+  let settings: Settings = store.settings();
+  let profiles: Profile[] = store.profiles();
+  let profile: Profile | null = profiles.find(p => p.id === settings.activeProfile) ?? profiles[0] ?? null;
+  let pstate: ProfileState | null = profile ? store.state(profile.id) : null;
+  let comfy: Comfy = svc.comfy(settings.comfyUrl);
+  let conn: Conn = { state: "checking", text: "连接中…" };
+  let doc: DocInfo | null = null, sel: Rect | null = null, group: TaskGroup | null = null;
+  let versions: Version[] = [], currentComp: number | null = null;
+  const refs: Record<number, RefSlot | undefined> = {};
+  let run: null | { stage: string; progress: number | null; detail: string; promptId?: string; signal: { aborted: boolean } } = null;
+  let status: { text: string; kind: "info" | "ok" | "error" } = { text: "就绪", kind: "info" };
+  let stash: Uint8Array | null = null;
+
+  // ── skeleton ──
+  const connEl = h("button", { class: "conn", title: "ComfyUI 连接设置", onClick: () => openSettings() });
+  const targetEl = h("span", { class: "target" });
+  const historyEl = h("div", { class: "history" });
+  const flowSel = h("select", { class: "field grow", title: "工作流" });
+  const prompt = h("textarea", { class: "prompt", rows: 4 }) as HTMLTextAreaElement;
+  const refsEl = h("div", { class: "refs" });
+  const selEl = h("span", { class: "sel-state" });
+  const genBtn = h("button", { class: "generate" });
+  const progEl = h("div", { class: "progress" });
+  const advHead = h("button", { class: "adv-head" });
+  const advBody = h("div", { class: "adv-body" });
+  const statusEl = h("div", { class: "status" });
+  const sheetHost = h("div", { class: "sheet-host" });
+
+  root.append(
+    h("header", { class: "top" },
+      h("div", { class: "brand" }, h("span", { class: "mark" }, "W"), h("span", null, "WavePlug Studio")),
+      connEl),
+    h("main", { class: "scroll" },
+      h("section", { class: "block" },
+        h("div", { class: "label-row" }, h("span", { class: "label" }, "版本"), targetEl),
+        historyEl),
+      h("section", { class: "block row" },
+        h("span", { class: "flow-icon", title: "工作流" }, icon("flow")),
+        flowSel,
+        h("button", { class: "icon-btn", title: "接口校准", onClick: () => calibrate() }, icon("sliders")),
+        h("button", { class: "icon-btn", title: "导入工作流", onClick: () => importMenu() }, icon("plus"))),
+      h("section", { class: "block tight" }, prompt, refsEl,
+        h("div", { class: "opt-row" },
+          h("label", { class: "check-row locked", title: "局部重绘始终以当前画面为底图" },
+            h("input", { type: "checkbox", checked: true, disabled: true }), h("span", null, "参考当前画面")),
+          selEl)),
+      h("section", { class: "block" }, genBtn, progEl),
+      h("section", { class: "block adv" }, advHead, advBody)),
+    h("footer", { class: "foot" }, statusEl, h("span", { class: "ver" }, svc.version)),
+    sheetHost);
+
+  prompt.addEventListener("input", () => { if (pstate && profile) { pstate.prompt = prompt.value; store.saveState(profile.id, pstate); } });
+  flowSel.addEventListener("change", () => selectProfile(flowSel.value));
+  genBtn.addEventListener("click", () => (run ? cancel() : generate()));
+  advHead.addEventListener("click", () => { settings.advancedOpen = !settings.advancedOpen; store.saveSettings(settings); renderAdvanced(); });
+
+  // ── rendering ──
+  function setStatus(text: string, kind: "info" | "ok" | "error" = "info") { status = { text, kind }; renderStatus(); }
+
+  function renderStatus() {
+    replace(statusEl, h("span", { class: "dot " + status.kind }), h("span", { class: "status-text", title: status.text }, status.text),
+      stash ? h("button", { class: "link", onClick: saveStash }, "保存未写入的结果") : null);
+  }
+
+  function renderConn() {
+    connEl.className = "conn " + conn.state;
+    replace(connEl, h("span", { class: "dot" }), h("span", null, conn.text));
+  }
+
+  function renderHistory() {
+    targetEl.textContent = group ? `续写 · ${group.layerName}` : "新任务";
+    targetEl.title = group
+      ? "已选中 WavePlug 任务组：新结果会追加为下一个版本"
+      : "未选中任务组：将用当前选区新建一个智能对象。选中已有的 AI 结果智能对象即可续写";
+    targetEl.className = "target " + (group ? "cont" : "new");
+    const tiles: HTMLElement[] = versions.map(v => {
+      const thumb = group ? store.thumb(group.taskId, v.label) : null;
+      return h("button", { class: "tile" + (v.compId === currentComp ? " on" : ""), title: v.comment || v.label, onClick: () => switchTo(v) },
+        thumb ? h("img", { src: thumb }) : h("span", { class: "tile-ph" }, icon("image", 16)),
+        h("span", { class: "tile-num" }, v.label));
+    });
+    if (run) tiles.push(h("div", { class: "tile pending" },
+      h("span", { class: "tile-fill", style: `height:${Math.round((run.progress ?? 0) * 100)}%` }),
+      h("span", { class: "tile-num" }, "…")));
+    if (!tiles.length) tiles.push(h("div", { class: "history-empty" }, group ? "该任务组还没有版本" : "生成后的每个版本都会出现在这里，点击即可切换"));
+    replace(historyEl, ...tiles);
+    const on = historyEl.querySelector(".tile.on, .tile.pending") as HTMLElement | null;
+    on?.scrollIntoView?.({ inline: "nearest", block: "nearest" });
+  }
+
+  function renderFlows() {
+    replace(flowSel, ...(profiles.length
+      ? profiles.map(p => h("option", { value: p.id }, p.name + (validateProfile(p).length ? "（需校准）" : "")))
+      : [h("option", { value: "" }, "尚未导入工作流")]));
+    flowSel.value = profile?.id ?? "";
+    flowSel.disabled = !profiles.length || !!run;
+    const allowEmpty = profile?.options.allowEmptyPrompt;
+    prompt.placeholder = allowEmpty ? "描述要画进选区的内容；留空 = 移除选区内的内容" : "描述要画进选区的内容";
+    prompt.value = pstate?.prompt ?? "";
+  }
+
+  function renderRefs() {
+    const slots = profile?.bindings.filter(b => b.role === "reference").map(b => b.slot!) ?? [];
+    refsEl.hidden = !slots.length;
+    replace(refsEl, ...slots.map(slot => {
+      const r = refs[slot];
+      return h("button", { class: "ref" + (r ? " set" : ""), title: r ? `参考图 ${slot}：${r.name}` : `参考图 ${slot}：点击选择`, onClick: (e: Event) => refMenu(slot, e.currentTarget as HTMLElement) },
+        r?.thumb ? h("img", { src: r.thumb }) : icon("image", 16),
+        h("span", { class: "ref-num" }, String(slot)));
+    }));
+  }
+
+  function renderSelection() {
+    if (!doc) { selEl.textContent = "未打开文档"; return; }
+    if (sel) selEl.textContent = `选区 ${sel.right - sel.left} × ${sel.bottom - sel.top}`;
+    else selEl.textContent = group ? "无选区 · 沿用任务组遮罩" : "无选区";
+    selEl.className = "sel-state" + (!sel && !group ? " warn" : "");
+  }
+
+  function blockedReason(): string | null {
+    if (!profile) return "请先导入工作流";
+    const problems = validateProfile(profile);
+    if (problems.length) return "工作流需要校准：" + problems[0];
+    if (conn.state !== "ok") return "未连接 ComfyUI";
+    if (!doc) return "请先打开 PSD";
+    if (!sel && !group) return "请先建立选区";
+    if (!profile.options.allowEmptyPrompt && profile.bindings.some(b => b.role === "prompt") && !prompt.value.trim()) return "请输入提示词";
+    return null;
+  }
+
+  function renderAction() {
+    if (run) {
+      genBtn.className = "generate running";
+      replace(genBtn, icon("stop"), h("span", null, "取消"));
+      genBtn.disabled = false;
+      replace(progEl, h("div", { class: "bar" }, h("span", { style: `width:${Math.round((run.progress ?? 0) * 100)}%` })),
+        h("div", { class: "stage" }, run.stage + (run.detail ? " · " + run.detail : "")));
+      progEl.hidden = false;
+      return;
+    }
+    const why = blockedReason();
+    genBtn.className = "generate";
+    genBtn.disabled = !!why;
+    genBtn.title = why ?? "";
+    replace(genBtn, icon("spark"), h("span", null, group ? `生成新版本` : "生成"));
+    progEl.hidden = !why;
+    replace(progEl, why ? h("div", { class: "stage muted" }, why) : null);
+  }
+
+  function renderAdvanced() {
+    const open = settings.advancedOpen;
+    replace(advHead, icon("sliders"), h("span", { class: "grow" }, "高级参数"), h("span", { class: "chev" + (open ? " open" : "") }, icon("chevron")));
+    advBody.hidden = !open;
+    if (!open) return;
+    if (!profile || !pstate) { replace(advBody, h("div", { class: "muted small" }, "导入工作流后显示")); return; }
+    const ps = pstate, p = profile;
+    const save = () => store.saveState(p.id, ps);
+    const rows: HTMLElement[] = [];
+    for (const b of p.bindings.filter(x => x.role === "param")) {
+      const k = b.nodeId + "." + b.input;
+      const base = p.api[b.nodeId]?.inputs[b.input];
+      const val = k in ps.params ? ps.params[k] : (base as number | boolean);
+      const label = h("span", { class: "param-label", title: `#${b.nodeId}.${b.input}` }, b.label ?? b.input);
+      if (typeof base === "boolean") {
+        rows.push(h("label", { class: "param check-row" }, h("input", { type: "checkbox", checked: !!val, onChange: (e: Event) => { ps.params[k] = (e.target as HTMLInputElement).checked; save(); } }), label));
+        continue;
+      }
+      const isInt = Number.isInteger(base) && !/strength|强度|cfg|denoise/i.test(b.label ?? b.input);
+      const lo = b.min ?? (isInt ? 0 : 0), hi = b.max ?? (isInt ? Math.max(Number(base) * 2, 10) : Math.max(2, Number(base) * 2));
+      const num = h("input", { class: "num", type: "number", value: String(val), step: isInt ? "1" : "0.01" }) as HTMLInputElement;
+      const range = h("input", { type: "range", min: String(lo), max: String(hi), step: isInt ? "1" : "0.01", value: String(val) }) as HTMLInputElement;
+      const set = (v: number) => { if (!Number.isFinite(v)) return; ps.params[k] = v; num.value = String(v); range.value = String(v); save(); };
+      range.addEventListener("input", () => set(Number(range.value)));
+      num.addEventListener("change", () => set(Number(num.value)));
+      rows.push(h("div", { class: "param" }, h("div", { class: "param-top" }, label,
+        k in ps.params && ps.params[k] !== base ? h("button", { class: "link small", title: "恢复工作流中的原始值", onClick: () => { delete ps.params[k]; save(); renderAdvanced(); } }, "复原") : null),
+        h("div", { class: "param-ctl" }, range, num)));
+    }
+    if (p.bindings.some(b => b.role === "seed")) {
+      const seedNum = h("input", { class: "num wide", type: "number", value: String(ps.seed), disabled: ps.seedMode === "random" }) as HTMLInputElement;
+      seedNum.addEventListener("change", () => { ps.seed = Math.max(0, Math.min(MAX_SEED, Math.floor(Number(seedNum.value) || 0))); save(); });
+      const mode = h("select", { class: "field" }, h("option", { value: "random" }, "每次随机"), h("option", { value: "fixed" }, "固定")) as HTMLSelectElement;
+      mode.value = ps.seedMode;
+      mode.addEventListener("change", () => { ps.seedMode = mode.value as "random" | "fixed"; save(); renderAdvanced(); });
+      rows.push(h("div", { class: "param" }, h("div", { class: "param-top" }, h("span", { class: "param-label" }, "随机种子")),
+        h("div", { class: "param-ctl" }, mode, seedNum,
+          h("button", { class: "icon-btn", title: "换一个种子", onClick: () => { ps.seed = randomSeed(); ps.seedMode = "fixed"; save(); renderAdvanced(); } }, icon("dice")))));
+    }
+    if (!rows.length) rows.push(h("div", { class: "muted small" }, "该工作流没有绑定可调参数。可在「接口校准」中添加已有 LoRA 强度、步数等字段。"));
+    replace(advBody, ...rows);
+  }
+
+  function renderAll() { renderConn(); renderHistory(); renderFlows(); renderRefs(); renderSelection(); renderAction(); renderAdvanced(); renderStatus(); }
+
+  // ── Photoshop state ──
+  let refreshing = false, again = false;
+  async function refresh() {
+    if (refreshing) { again = true; return; }
+    refreshing = true;
+    try {
+      doc = svc.host.activeDoc();
+      sel = doc ? await svc.host.selectionBounds(doc.id) : null;
+      group = doc ? await svc.host.activeTaskGroup() : null;
+      if (group) ({ versions, currentCompId: currentComp } = await svc.host.versions(group));
+      else { versions = []; currentComp = null; }
+    } catch (e) { console.warn("刷新 Photoshop 状态失败", e); }
+    finally { refreshing = false; }
+    renderHistory(); renderSelection(); renderAction();
+    if (again) { again = false; void refresh(); }
+  }
+
+  async function switchTo(v: Version) {
+    if (!group || run) return;
+    try { await svc.host.switchVersion(group, v.compId); currentComp = v.compId; renderHistory(); setStatus(`已切换到 ${v.label}`, "ok"); }
+    catch (e) { setStatus("切换失败：" + (e as Error).message, "error"); }
+  }
+
+  // ── connection ──
+  async function checkConn() {
+    conn = { state: "checking", text: "连接中…" }; renderConn();
+    try {
+      const s = await comfy.systemStats();
+      conn = { state: "ok", text: "ComfyUI " + (s.system?.comfyui_version ?? "") };
+    } catch (e) {
+      conn = { state: "down", text: "未连接" };
+      setStatus((e as Error).message, "error");
+    }
+    renderConn(); renderAction();
+  }
+
+  function openSettings() {
+    const url = h("input", { class: "field", value: settings.comfyUrl }) as HTMLInputElement;
+    const sheet = h("div", { class: "sheet" },
+      h("div", { class: "sheet-head" }, h("span", { class: "sheet-title" }, "ComfyUI 连接"),
+        h("button", { class: "icon-btn", onClick: () => sheet.remove() }, icon("close"))),
+      h("div", { class: "sheet-body" },
+        h("div", { class: "group-label" }, "地址"), url,
+        h("div", { class: "muted small" }, "插件只调用 ComfyUI 自带的接口，不需要安装节点或修改启动参数。")),
+      h("div", { class: "sheet-foot" },
+        h("button", { class: "btn", onClick: () => sheet.remove() }, "取消"),
+        h("button", { class: "btn primary", onClick: () => {
+          settings.comfyUrl = url.value.trim().replace(/\/$/, "") || "http://127.0.0.1:8188";
+          store.saveSettings(settings); comfy = svc.comfy(settings.comfyUrl); sheet.remove(); void checkConn();
+        } }, "保存并连接")));
+    sheetHost.append(sheet);
+  }
+
+  // ── workflows ──
+  function selectProfile(id: string) {
+    profile = profiles.find(p => p.id === id) ?? null;
+    pstate = profile ? store.state(profile.id) : null;
+    settings.activeProfile = profile?.id ?? null; store.saveSettings(settings);
+    for (const k of Object.keys(refs)) delete refs[Number(k)];
+    renderFlows(); renderRefs(); renderAction(); renderAdvanced();
+  }
+
+  function importMenu() {
+    const menu = h("div", { class: "sheet" },
+      h("div", { class: "sheet-head" }, h("span", { class: "sheet-title" }, "导入工作流"),
+        h("button", { class: "icon-btn", onClick: () => menu.remove() }, icon("close"))),
+      h("div", { class: "sheet-body" },
+        h("button", { class: "menu-item", onClick: async () => { menu.remove(); await importFromFile(); } },
+          icon("folder"), h("span", null, h("b", null, "API 格式 JSON 文件"), h("span", { class: "muted small block" }, "ComfyUI 菜单 → 导出 (API)"))),
+        h("button", { class: "menu-item", onClick: async () => { menu.remove(); await importFromComfy(); } },
+          icon("flow"), h("span", null, h("b", null, "ComfyUI 中已保存的工作流"), h("span", { class: "muted small block" }, "需要已连接 ComfyUI，自动转换为 API 格式")))));
+    sheetHost.append(menu);
+  }
+
+  async function importFromFile() {
+    try {
+      const f = await svc.pickJson();
+      if (!f) return;
+      await adopt(f.name.replace(/\.json$/i, ""), asApiGraph(JSON.parse(f.text)), []);
+    } catch (e) { setStatus("导入失败：" + (e as Error).message, "error"); }
+  }
+
+  async function importFromComfy() {
+    try {
+      setStatus("读取 ComfyUI 工作流列表…");
+      const list = await comfy.listWorkflows();
+      const pickSel = h("select", { class: "field" }, ...list.map(p => h("option", { value: p }, p.replace(/\.json$/, ""))));
+      const sheet = h("div", { class: "sheet" },
+        h("div", { class: "sheet-head" }, h("span", { class: "sheet-title" }, "选择 ComfyUI 工作流"),
+          h("button", { class: "icon-btn", onClick: () => sheet.remove() }, icon("close"))),
+        h("div", { class: "sheet-body" }, list.length ? pickSel : h("div", { class: "muted" }, "ComfyUI 中没有已保存的工作流")),
+        h("div", { class: "sheet-foot" }, h("button", { class: "btn", onClick: () => sheet.remove() }, "取消"),
+          h("button", { class: "btn primary", disabled: !list.length, onClick: async () => {
+            sheet.remove();
+            try {
+              setStatus("转换为 API 格式…");
+              const [ui, info] = await Promise.all([comfy.readWorkflow(pickSel.value), comfy.objectInfo()]);
+              const { api, warnings } = uiToApi(ui, widgetNamesFromObjectInfo(info));
+              await adopt(pickSel.value.split("/").pop()!.replace(/\.json$/, ""), api, warnings);
+            } catch (e) { setStatus("导入失败：" + (e as Error).message, "error"); }
+          } }, "导入")));
+      sheetHost.append(sheet);
+      setStatus("就绪");
+    } catch (e) { setStatus((e instanceof ComfyError ? "" : "读取失败：") + (e as Error).message, "error"); }
+  }
+
+  /** New import, or re-import of a workflow with the same name: carry valid bindings over. */
+  async function adopt(name: string, api: ReturnType<typeof asApiGraph>, warnings: string[]) {
+    const rec = recognize(api);
+    if (warnings.length) rec.notes.push(...warnings);
+    const old = profiles.find(p => p.name === name);
+    if (old) {
+      const c = carryOver(old, api);
+      const result = await openCalibration(sheetHost, api, rec, { name, bindings: c.profile.bindings, options: c.profile.options }, false);
+      if (!result) return;
+      Object.assign(old, { ...c.profile, name: result.name, bindings: result.bindings, options: result.options, updatedAt: Date.now() });
+      saveProfiles(old.id);
+      setStatus(`已更新「${old.name}」：保留 ${c.kept.length} 项，自动迁移 ${c.remapped.length} 项` + (c.broken.length ? `，${c.broken.length} 项需重新绑定` : ""), c.broken.length ? "error" : "ok");
+      return;
+    }
+    const result = await openCalibration(sheetHost, api, rec, { name, bindings: [], options: newProfile(name, api, []).options }, true);
+    if (!result) return;
+    const p = newProfile(result.name, api, result.bindings);
+    p.options = result.options;
+    profiles.push(p);
+    saveProfiles(p.id);
+    setStatus(`已导入「${p.name}」`, "ok");
+  }
+
+  async function calibrate() {
+    if (!profile) return importMenu();
+    const p = profile;
+    const result = await openCalibration(sheetHost, p.api, recognize(p.api), { name: p.name, bindings: p.bindings, options: p.options }, false);
+    if (!result) return;
+    Object.assign(p, { name: result.name, bindings: result.bindings, options: result.options, updatedAt: Date.now() });
+    saveProfiles(p.id);
+    setStatus("校准已保存", "ok");
+  }
+
+  function saveProfiles(activeId: string) {
+    store.saveProfiles(profiles);
+    selectProfile(activeId);
+  }
+
+  // ── references ──
+  function refMenu(slot: number, anchor: HTMLElement) {
+    sheetHost.querySelector(".pop")?.remove();
+    const layers = doc ? svc.host.listLayers(doc.id) : [];
+    const layerSel = h("select", { class: "field" }, h("option", { value: "" }, "从 PS 图层…"),
+      ...layers.map(l => h("option", { value: String(l.id) }, "  ".repeat(l.depth) + l.name)));
+    layerSel.addEventListener("change", () => {
+      const l = layers.find(x => String(x.id) === layerSel.value);
+      if (l && doc) refs[slot] = { kind: "layer", docId: doc.id, layerId: l.id, name: l.name };
+      pop.remove(); renderRefs();
+    });
+    const pop: HTMLElement = h("div", { class: "pop", style: `top:${anchor.getBoundingClientRect().bottom + 4}px` },
+      layerSel,
+      h("button", { class: "menu-item small", onClick: async () => {
+        pop.remove();
+        const img = await svc.pickImage();
+        if (img) { refs[slot] = { kind: "file", name: img.name, bytes: img.bytes, thumb: img.url }; renderRefs(); }
+      } }, icon("folder"), h("span", null, "选择图片文件…")),
+      refs[slot] ? h("button", { class: "menu-item small", onClick: () => { refs[slot] = undefined; pop.remove(); renderRefs(); } }, icon("close"), h("span", null, "清空")) : null);
+    sheetHost.append(pop);
+    setTimeout(() => document.addEventListener("click", function off(e) { if (!pop.contains(e.target as Node)) { pop.remove(); document.removeEventListener("click", off); } }), 0);
+  }
+
+  // ── generate ──
+  async function generate() {
+    if (!profile || !pstate || run) return;
+    await checkConn();
+    await refresh();
+    const why = blockedReason();
+    if (why) { setStatus(why, "error"); return; }
+    const p = profile, ps = pstate;
+    run = { stage: "准备中…", progress: null, detail: "", signal: { aborted: false } };
+    const current = run;
+    stash = null;
+    renderAll();
+    try {
+      const res = await runInpaint(svc.host, comfy, {
+        profile: p, prompt: prompt.value, seed: ps.seedMode === "fixed" ? ps.seed : null, params: ps.params,
+        references: Object.fromEntries(Object.entries(refs).map(([k, v]) => [k, v])),
+      }, {
+        signal: current.signal,
+        stage: t => { current.stage = t; current.detail = ""; renderAction(); },
+        progress: (f, t) => { current.progress = f; current.detail = t ?? ""; renderAction(); renderHistory(); },
+        promptQueued: id => { current.promptId = id; },
+      });
+      try { store.saveThumb(res.group.taskId, res.version.label, await svc.host.thumbnail(res.group, 96)); } catch (e) { console.warn("缩略图失败", e); }
+      if (ps.seedMode === "random") { ps.seed = res.seed; store.saveState(p.id, ps); }
+      setStatus(`${res.continued ? "已追加" : "已新建任务组并写入"}版本 ${res.version.label} · seed ${res.seed}`, "ok");
+    } catch (e) {
+      if (e instanceof StashedResult) { stash = e.png; setStatus(e.message, "error"); }
+      else setStatus(current.signal.aborted ? "已取消" : (e as Error).message, current.signal.aborted ? "info" : "error");
+    } finally {
+      run = null;
+      renderAll();
+      await refresh();
+    }
+  }
+
+  async function cancel() {
+    if (!run) return;
+    run.signal.aborted = true;
+    run.stage = "正在取消…"; renderAction();
+    if (run.promptId) await comfy.cancel(run.promptId).catch(e => console.warn("取消失败", e));
+  }
+
+  async function saveStash() {
+    if (!stash) return;
+    if (await svc.saveImage(stash, `waveplug_${Date.now()}.png`)) { stash = null; setStatus("结果已另存", "ok"); }
+  }
+
+  // ── start ──
+  renderAll();
+  svc.host.onChange(() => void refresh());
+  void refresh();
+  void checkConn();
+}
