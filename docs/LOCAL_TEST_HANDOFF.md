@@ -35,6 +35,37 @@ npm run build                 :: 产物：dist\plugin（UXP 插件目录）、di
 
 记录：Photoshop 版本、Node 版本、ComfyUI 版本（`/system_stats`）、显卡与显存。
 
+### 2.1 WavePlug Studio 0.1.1 的实机安装方法（2026-10-31 已验证）
+
+**安装必须从用户配置文件所在的 C: 盘作为当前工作驱动器运行 UPIA。** 这一点与 CCX 存放在哪个盘、UPIA EXE 存放在哪个盘是两回事；项目和安装器依然分别保留在 F:、J:，**不需要迁移安装包或安装新软件**。
+
+先请用户**亲自保存所有 PSD 并完全退出 Photoshop**；检查任务管理器无 `Photoshop.exe`。不能自行保存或结束 Photoshop。
+
+命令行安装（以下命令已在 mainpc 实际执行、成功）：
+
+```bat
+cd /d C:\Users\WAVE
+"J:\AI things\OpenLayer\Adobe-UPIA-Extract\UPI64-unpacked\UnifiedPluginInstallerAgent\UnifiedPluginInstallerAgent.exe" /install "F:\waveplug\studio\releases\WavePlug_Studio_0.1.1_local.ccx"
+"J:\AI things\OpenLayer\Adobe-UPIA-Extract\UPI64-unpacked\UnifiedPluginInstallerAgent\UnifiedPluginInstallerAgent.exe" /list all
+```
+
+也可以双击 `F:\waveplug\studio\scripts\install_ccx.cmd`，它已在运行安装器前执行 `cd /d "%USERPROFILE%"`，并记录 `WORKDIR`、环境变量、安装原文和 `/list all` 到 `reports\install_*.log`。**本次成功验证的是上述命令行方法；修改后的双击脚本尚未单独双击回归，不要将其写成已通过。**
+
+**验收唯一标准**：控制台确实显示 `Installation Successful`，并且 `/list all` 的 Photoshop 行含 `Enabled  WavePlug Studio  0.1.1`，同时保留 `OpenLayer` 和 `WavePlug - PS AI Studio`。UPIA 失败时也会返回进程退出码 0，不能只依靠 `%ERRORLEVEL%`。成功后请用户**自行启动 Photoshop**，重新测试 A1（面板底部 0.1.1）→ A3（地址 `127.0.0.1`，「保存并连接」）→ 不论结果均读取 `C:\Users\WAVE\AppData\Roaming\Adobe\UXP\PluginsStorage\PHSP\27\External\com.waveplug.studio\PluginData\waveplug.log` **全文**。失败止步 A4，成功继续 B–E。
+
+**-198 根因和取证**：2026-10-31 在 `F:\waveplug\studio` 工作目录用同一安装器/CCX/管理员令牌运行，UPIA 输出 `Failed to install, status = -198!`。Adobe 自带的 `C:\ProgramData\Adobe\UPI\Log\EMCL.log` 记录：
+
+```text
+utils::CFileUtils::createDirectoriesWithOwnership: Adobe folder neither exist, nor have the permission to create "\Users\WAVE\AppData\Roaming\Adobe", status = -198
+CExtensionManager::initAllUserFileSystem, createDirectoriesWithOwnership failed for path C:\Users\WAVE\AppData\Roaming\Adobe\UPI with status -198
+```
+
+`HOMEPATH=\Users\WAVE`；日志中第一条路径**缺少盘符**。在 F: 工作目录，根相对路径 `\Users\WAVE\AppData\Roaming\Adobe` 不存在；绝对路径 `C:\Users\WAVE\AppData\Roaming\Adobe` 实际存在。**仅将 UPIA 工作目录改到 `C:\Users\WAVE`，保留管理员令牌和 AgentDock TEMP 不变，就安装成功了。**因此，已经验证的必要修复是“改变工作驱动器”，并非重启 Photoshop、删除旧插件、编辑 Adobe 数据库或系统注册表。UPIA 内部确切 Win32 路径解析调用没有 ProcMon 捕获；日志与单变量对照实验高度支持其将缺盘符的路径在当前驱动器上解析这一机制。
+
+官方日志位置：`C:\ProgramData\Adobe\UPI\Log\EMCL.log` 和 `Upia.log`；远程高权限环境是 WAVE 用户（HKCU 和用户配置文件一致）、`TEMP=C:\Users\WAVE\.agentdock\tmp`、`Integrity=High`，桌面 Explorer 为非提升令牌。在成功实验中这些权限/环境均没有改变，故**不能将 -198 简单归因于“必须使用非管理员桌面会话”**。
+
+**安全**：只在 `local-test` 更新测试脚本和文档；不要删除/覆盖 `com.waveplug.psai`、OpenLayer、sd-ppp，不要修改 ComfyUI、`UPI.db` 或 `UPISys.db`。如需手动更改 Adobe 目录/注册表，请先取得用户授权。本次修复没有此类手动更改。
+
 ## 3. 测试清单
 
 每项都要写结果：**通过 / 失败 / 未测 / 部分通过**，加上证据（报错原文、截图路径、日志片段、耗时）。
