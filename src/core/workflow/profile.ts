@@ -63,6 +63,8 @@ export interface Profile {
     cropMargin: number;
     /** red tint (0–1) painted over the selection in the sent image; 0 = off */
     markSelection?: number;
+    /** links that make the sampler respect the selection (execution copy only), see localMask.ts */
+    localMask?: { enabled: boolean; links: { nodeId: string; input: string; from: [string, number] }[] };
   };
 }
 

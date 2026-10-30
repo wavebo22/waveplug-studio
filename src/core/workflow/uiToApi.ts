@@ -22,6 +22,7 @@ const MODE_MUTED = 2, MODE_BYPASS = 4;
 export interface ObjectInfo {
   [classType: string]: {
     input: { required?: Record<string, [unknown, Record<string, unknown>?]>; optional?: Record<string, [unknown, Record<string, unknown>?]> };
+    output?: string[];
     output_node?: boolean;
   };
 }

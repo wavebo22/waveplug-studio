@@ -110,3 +110,23 @@ test("object_info marks control_after_generate even when the node lists its own 
   const { api } = uiToApi(wf, info);
   assert.deepEqual(api["1"].inputs, { seed: 5, steps: 20 });
 });
+
+test("'repaint only inside the selection' links the cropped mask into the encoder, execution copy only", async () => {
+  const { findLocalMaskLinks } = await import("../src/core/workflow/localMask.ts");
+  const g = api("guhai_inpaint_ps");
+  const info = {
+    TextEncodeQwenImage21GH: { input: { required: { clip: ["CLIP"], vae: ["VAE"] }, optional: { mask: ["MASK"], image_01: ["IMAGE"], image_02: ["IMAGE"] } }, output: ["CONDITIONING", "CONDITIONING", "LATENT", "QWEN_IMAGE_21_GH_RESTORE_INFO"] },
+    "图像缩放V2_孤海": { input: { required: { "图像": ["IMAGE"] }, optional: { "遮罩": ["MASK"] } }, output: ["IMAGE", "INT", "INT", "MASK"] },
+    "图像缩放范围孤海": { input: { required: { "图像": ["IMAGE"] }, optional: { "遮罩": ["MASK"] } }, output: ["IMAGE", "MASK"] },
+    GH_MaskCropV2: { input: { required: { "图像": ["IMAGE"], "遮罩": ["MASK"] } }, output: ["SEAM", "IMAGE", "MASK"] },
+  } as any;
+  const links = findLocalMaskLinks(g, info);
+  assert.deepEqual(links.map(l => `${l.nodeId}.${l.input}<-${l.from.join(":")}`).sort(), ["118.mask<-209:3", "255.mask<-250:3"]);
+  const p = newProfile("x", g, recognize(g).suggestions.filter(s => s.confidence === "certain").map(s => s.binding));
+  p.options.localMask = { enabled: true, links };
+  const run = prepareRun(p, { image: "a.png", prompt: "杯子", seed: 1 });
+  assert.deepEqual(run.api["255"].inputs.mask, ["250", 3]);
+  assert.equal(p.api["255"].inputs.mask, undefined, "template untouched");
+  p.options.localMask.enabled = false;
+  assert.equal(prepareRun(p, { image: "a.png", prompt: "杯子", seed: 1 }).api["255"].inputs.mask, undefined);
+});

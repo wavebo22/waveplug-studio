@@ -8,6 +8,7 @@ import { MAX_SEED, randomSeed } from "../core/workflow/inject.ts";
 import { type Binding, type Profile, carryOver, newProfile, validateProfile } from "../core/workflow/profile.ts";
 import { recognize } from "../core/workflow/recognize.ts";
 import { uiToApi } from "../core/workflow/uiToApi.ts";
+import { findLocalMaskLinks } from "../core/workflow/localMask.ts";
 import { type RefSource, StashedResult, runInpaint } from "../app/generate.ts";
 import { type ProfileState, type Services, type Settings, store } from "../app/services.ts";
 import type { DocInfo, TaskGroup, Version } from "../ps/host.ts";
@@ -235,6 +236,12 @@ export function mountApp(root: HTMLElement, svc: Services) {
       rows.push(h("div", { class: "param" }, h("div", { class: "param-top" }, h("span", { class: "param-label" }, "随机种子")),
         h("div", { class: "param-ctl" }, mode, seedNum,
           h("button", { class: "icon-btn", title: "换一个种子", onClick: () => { ps.seed = randomSeed(); ps.seedMode = "fixed"; save(); renderAdvanced(); } }, icon("dice")))));
+    }
+    if (p.options.localMask?.links.length) {
+      const lm = p.options.localMask;
+      rows.push(h("label", { class: "param check-row", title: "把遮罩接到 " + lm.links.map(l => `#${l.nodeId}.${l.input}`).join("、") + "，让模型只在选区内生成。只改本次提交的副本，不修改 ComfyUI 中的工作流" },
+        h("input", { type: "checkbox", checked: lm.enabled, onChange: (e: Event) => { lm.enabled = (e.target as HTMLInputElement).checked; store.saveProfiles(profiles); } }),
+        h("span", { class: "param-label" }, "只重绘选区内")));
     }
     if (p.bindings.some(b => b.role === "image" && b.encoding === "rgba-alpha-mask")) {
       rows.push(h("label", { class: "param check-row", title: "在发送给 ComfyUI 的图片上，把选区染成 50% 红色。部分编辑类工作流靠颜色找到要改的区域" },
@@ -539,6 +546,7 @@ export function mountApp(root: HTMLElement, svc: Services) {
       const c = carryOver(p, api);
       if (c.broken.length) return `ComfyUI 中的工作流已修改，${c.broken.length} 项绑定失效（${c.broken[0].reason}），请点「接口校准」重新确认`;
       Object.assign(p, { api: c.profile.api, bindings: c.profile.bindings, source: { kind: "comfy", path }, updatedAt: Date.now() });
+      refreshMaskLinks(p);
       store.saveProfiles(profiles);
       log("info", "workflow synced", path, c.remapped.length ? `remapped ${c.remapped.length}` : "");
       return null;
@@ -546,6 +554,16 @@ export function mountApp(root: HTMLElement, svc: Services) {
       log("warn", "workflow sync failed", path, e);
       return "读取 ComfyUI 工作流失败：" + (e as Error).message;
     }
+  }
+
+  /** Detects the optional "repaint only inside the selection" links; on by default when found. */
+  function refreshMaskLinks(p: Profile) {
+    if (!objectInfo) return;
+    const links = findLocalMaskLinks(p.api, objectInfo);
+    const was = p.options.localMask;
+    p.options.localMask = links.length ? { enabled: was ? was.enabled : true, links } : undefined;
+    store.saveProfiles(profiles);
+    if (links.length && !was) { log("info", "local mask links", JSON.stringify(links)); renderAdvanced(); }
   }
 
   async function generate() {

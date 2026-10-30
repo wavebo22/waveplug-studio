@@ -2,6 +2,7 @@
 
 import { type ApiGraph, cloneGraph } from "./api.ts";
 import { type Binding, type Profile, checkBinding, validateProfile } from "./profile.ts";
+import { applyMaskLinks } from "./localMask.ts";
 
 export interface RunValues {
   /** uploaded file name (as returned by /upload/image, including subfolder) */
@@ -66,5 +67,6 @@ export function prepareRun(p: Profile, v: RunValues): Prepared {
       case "output": break;
     }
   }
+  if (p.options.localMask?.enabled) applyMaskLinks(api, p.options.localMask.links);
   return { api, seed, outputs: p.bindings.filter(b => b.role === "output") };
 }
