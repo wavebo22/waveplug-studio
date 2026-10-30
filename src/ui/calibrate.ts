@@ -3,7 +3,7 @@
 import { type ApiGraph, isLink, title } from "../core/workflow/api.ts";
 import { type Binding, type Profile, ROLE_LABEL, type Role, checkBinding } from "../core/workflow/profile.ts";
 import type { Recognition, Suggestion } from "../core/workflow/recognize.ts";
-import { h, icon } from "./dom.ts";
+import { h, icon, mountSheet } from "./dom.ts";
 
 export interface CalibrationResult { name: string; bindings: Binding[]; options: Profile["options"] }
 
@@ -104,7 +104,7 @@ export function openCalibration(host: HTMLElement, g: ApiGraph, rec: Recognition
     scope.value = options.sendScope;
     scope.addEventListener("change", () => { options.sendScope = scope.value as "canvas" | "crop"; });
 
-    const close = (v: CalibrationResult | null) => { sheet.remove(); resolve(v); };
+    const close = (v: CalibrationResult | null) => { closeSheet(); resolve(v); };
     const save = () => {
       const bindings: Binding[] = [];
       for (const r of rows) {
@@ -138,6 +138,6 @@ export function openCalibration(host: HTMLElement, g: ApiGraph, rec: Recognition
       h("div", { class: "sheet-foot" }, msg,
         h("button", { class: "btn", onClick: () => close(null) }, "取消"),
         h("button", { class: "btn primary", onClick: save }, "保存")));
-    host.append(sheet);
+    const closeSheet = mountSheet(host, sheet);
   });
 }

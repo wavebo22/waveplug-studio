@@ -17,6 +17,17 @@ export function h<K extends keyof HTMLElementTagNameMap>(tag: K, attrs: Attrs | 
   return el;
 }
 
+/** UXP native editors ignore z-index; hide the covered work area until the sheet closes. */
+export function mountSheet(host: HTMLElement, sheet: HTMLElement): () => void {
+  const root = host.parentElement;
+  root?.classList.add("sheet-open");
+  host.append(sheet);
+  return () => {
+    sheet.remove();
+    if (!host.querySelector(".sheet")) root?.classList.remove("sheet-open");
+  };
+}
+
 const PATHS: Record<string, string> = {
   sliders: "M3 5h6M13 5h4M3 10h2M9 10h8M3 15h8M15 15h2M11 3v4M7 8v4M13 13v4",
   plus: "M10 4v12M4 10h12",

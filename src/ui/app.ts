@@ -13,7 +13,7 @@ import { type ProfileState, type Services, type Settings, store } from "../app/s
 import type { DocInfo, TaskGroup, Version } from "../ps/host.ts";
 import { log, withTimeout } from "../app/log.ts";
 import { openCalibration } from "./calibrate.ts";
-import { h, icon, replace } from "./dom.ts";
+import { h, icon, mountSheet, replace } from "./dom.ts";
 
 type Conn = { state: "checking" | "ok" | "down"; text: string };
 
@@ -278,11 +278,11 @@ export function mountApp(root: HTMLElement, svc: Services) {
       show("info", "正在连接 " + settings.comfyUrl + " …");
       const error = await checkConn();
       if (error) show("error", error);
-      else { show("ok", conn.text + " · 已连接"); setStatus("已连接 " + settings.comfyUrl, "ok"); setTimeout(() => sheet.remove(), 700); }
+      else { show("ok", conn.text + " · 已连接"); setStatus("已连接 " + settings.comfyUrl, "ok"); setTimeout(() => closeSheet(), 700); }
     };
     const sheet = h("div", { class: "sheet" },
       h("div", { class: "sheet-head" }, h("span", { class: "sheet-title" }, "ComfyUI 连接"),
-        h("button", { class: "icon-btn", onClick: () => sheet.remove() }, icon("close"))),
+        h("button", { class: "icon-btn", onClick: () => closeSheet() }, icon("close"))),
       h("div", { class: "sheet-body" },
         h("div", { class: "group-label" }, "地址"), url,
         h("div", { class: "muted small" }, "可以只填 IP 和端口，例如 127.0.0.1:8188。插件只调用 ComfyUI 自带的接口，不需要安装节点或修改启动参数。"),
@@ -294,9 +294,9 @@ export function mountApp(root: HTMLElement, svc: Services) {
           const lines = await svc.diagnose!(settings.comfyUrl).catch(e => ["诊断失败：" + (e as Error).message]);
           replace(result, h("pre", { class: "diag" }, lines.join("\n")));
         } }, "诊断") : null,
-        h("button", { class: "btn", onClick: () => sheet.remove() }, "关闭"),
+        h("button", { class: "btn", onClick: () => closeSheet() }, "关闭"),
         h("button", { class: "btn primary", onClick: () => void connect() }, "保存并连接")));
-    sheetHost.append(sheet);
+    const closeSheet = mountSheet(sheetHost, sheet);
     if (conn.state === "down" && status.kind === "error") show("error", status.text);
   }
 
@@ -312,13 +312,13 @@ export function mountApp(root: HTMLElement, svc: Services) {
   function importMenu() {
     const menu = h("div", { class: "sheet" },
       h("div", { class: "sheet-head" }, h("span", { class: "sheet-title" }, "导入工作流"),
-        h("button", { class: "icon-btn", onClick: () => menu.remove() }, icon("close"))),
+        h("button", { class: "icon-btn", onClick: () => closeSheet() }, icon("close"))),
       h("div", { class: "sheet-body" },
-        h("button", { class: "menu-item", onClick: async () => { menu.remove(); await importFromFile(); } },
+        h("button", { class: "menu-item", onClick: async () => { closeSheet(); await importFromFile(); } },
           icon("folder"), h("span", null, h("b", null, "API 格式 JSON 文件"), h("span", { class: "muted small block" }, "ComfyUI 菜单 → 导出 (API)"))),
-        h("button", { class: "menu-item", onClick: async () => { menu.remove(); await importFromComfy(); } },
+        h("button", { class: "menu-item", onClick: async () => { closeSheet(); await importFromComfy(); } },
           icon("flow"), h("span", null, h("b", null, "ComfyUI 中已保存的工作流"), h("span", { class: "muted small block" }, "需要已连接 ComfyUI，自动转换为 API 格式")))));
-    sheetHost.append(menu);
+    const closeSheet = mountSheet(sheetHost, menu);
   }
 
   async function importFromFile() {
@@ -336,11 +336,11 @@ export function mountApp(root: HTMLElement, svc: Services) {
       const pickSel = h("select", { class: "field" }, ...list.map(p => h("option", { value: p }, p.replace(/\.json$/, ""))));
       const sheet = h("div", { class: "sheet" },
         h("div", { class: "sheet-head" }, h("span", { class: "sheet-title" }, "选择 ComfyUI 工作流"),
-          h("button", { class: "icon-btn", onClick: () => sheet.remove() }, icon("close"))),
+          h("button", { class: "icon-btn", onClick: () => closeSheet() }, icon("close"))),
         h("div", { class: "sheet-body" }, list.length ? pickSel : h("div", { class: "muted" }, "ComfyUI 中没有已保存的工作流")),
-        h("div", { class: "sheet-foot" }, h("button", { class: "btn", onClick: () => sheet.remove() }, "取消"),
+        h("div", { class: "sheet-foot" }, h("button", { class: "btn", onClick: () => closeSheet() }, "取消"),
           h("button", { class: "btn primary", disabled: !list.length, onClick: async () => {
-            sheet.remove();
+            closeSheet();
             try {
               setStatus("转换为 API 格式…");
               const [ui, info] = await Promise.all([comfy.readWorkflow(pickSel.value), comfy.objectInfo()]);
@@ -348,7 +348,7 @@ export function mountApp(root: HTMLElement, svc: Services) {
               await adopt(pickSel.value.split("/").pop()!.replace(/\.json$/, ""), api, warnings);
             } catch (e) { setStatus("导入失败：" + (e as Error).message, "error"); }
           } }, "导入")));
-      sheetHost.append(sheet);
+      const closeSheet = mountSheet(sheetHost, sheet);
       setStatus("就绪");
     } catch (e) { setStatus((e instanceof ComfyError ? "" : "读取失败：") + (e as Error).message, "error"); }
   }
