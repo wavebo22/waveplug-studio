@@ -122,9 +122,16 @@ export async function runInpaint(host: PsHost, comfy: Comfy, input: RunInput, ho
   };
   const maskB = profile.bindings.find(b => b.role === "mask");
   if (maskB) values.mask = await upload(maskFile(cap.selection, maskB.encoding === "mask-alpha" ? "mask-alpha" : "mask-gray"), "mask");
-  const uploadRef = async (slot: number, src: RefSource) => src.kind === "file"
-    ? comfy.uploadImage(src.bytes, `wp_${stamp}_ref${slot}_${src.name.replace(/[^\w.-]/g, "_")}`)
-    : upload(onWhite(await host.layerPixels(src.docId, src.layerId, 1536)), "ref" + slot);
+  // reference bytes are kept so every variation can upload its own copy (see below)
+  const refBytes: Record<number, { bytes: Uint8Array; ext: string }> = {};
+  const uploadRef = async (slot: number, src: RefSource, k = 0) => {
+    refBytes[slot] ??= src.kind === "file"
+      ? { bytes: src.bytes, ext: (/\.(png|jpe?g|webp)$/i.exec(src.name)?.[1] ?? "png").toLowerCase() }
+      : { bytes: encodePng(onWhite(await host.layerPixels(src.docId, src.layerId, 1536))), ext: "png" };
+    const { bytes, ext } = refBytes[slot];
+    if (k === 0) hooks.debug?.(`${stamp}_ref${slot}.${ext}`, bytes);
+    return comfy.uploadImage(bytes, `wp_${stamp}_ref${slot}_v${k}.${ext}`);
+  };
   const refBindings = profile.bindings.filter(x => x.role === "reference");
   for (const b of refBindings) {
     const src = input.references[b.slot ?? 0];
@@ -145,7 +152,14 @@ export async function runInpaint(host: PsHost, comfy: Comfy, input: RunInput, ho
   const count = Math.max(1, Math.min(4, Math.floor(input.count) || 1));
   for (let k = 0; k < count; k++) {
     const tag = count > 1 ? `（${k + 1}/${count}）` : "";
-    const run = prepareRun(profile, { ...values, prompt: input.prompt, negative: input.negative, seed: input.seed === null ? null : input.seed + k, params: input.params });
+    // ComfyUI caches by input contents: with the same reference file the conditioning of the first
+    // variation was reused and only that one followed the reference. A per-variation file name
+    // makes the reference loader and the encoder run again for every variation.
+    if (k > 0) for (const slot of Object.keys(values.references).map(Number)) {
+      const src = input.references[slot];
+      if (src) values.references[slot] = await uploadRef(slot, src, k);
+    }
+    const run = prepareRun(profile, { ...values, prompt: input.prompt, negative: input.negative, seed: input.seed === null ? null : input.seed + k, params: input.params, variant: k });
     log("info", "run", JSON.stringify({ prompt: input.prompt, seed: run.seed, profile: profile.name, localMask: !!profile.options.localMask?.enabled, continued: !!target }));
     if (input.fullRun) { hooks.stage("清空 ComfyUI 缓存" + tag); await comfy.freeCache(); }
     // the exact execution copy — can be dragged into ComfyUI to inspect or re-run it there
@@ -153,7 +167,7 @@ export async function runInpaint(host: PsHost, comfy: Comfy, input: RunInput, ho
     const job = await comfy.queue(run.api);
     hooks.promptQueued?.(job.promptId);
     hooks.stage("排队中" + tag);
-    const tQueued = Date.now();
+    const tQueued = Date.now(), tUpload = k === 0 ? tQueued - t0 : 0;
     const history = await comfy.waitFor(job.promptId, (e: JobEvent) => {
       if (e.type === "cached") log("info", "comfy cached nodes", e.nodes.join(","));
       if (e.type === "running") { hooks.stage((e.node ? `执行中 · #${e.node} ${run.api[e.node]?._meta?.title ?? run.api[e.node]?.class_type ?? ""}` : "执行中") + tag); log("info", "comfy executing", e.node, run.api[e.node ?? ""]?.class_type ?? "", `+${((Date.now() - tQueued) / 1000).toFixed(1)}s`); }
@@ -164,7 +178,7 @@ export async function runInpaint(host: PsHost, comfy: Comfy, input: RunInput, ho
     const png = await comfy.view(outputImage(history, out.nodeId, out.imageIndex ?? 0));
     hooks.debug?.(`${stamp}_output${k ? "_" + k : ""}.png`, png);
     const outSize = pngSize(png);
-    log("info", "run timing", `upload ${((tQueued - t0) / 1000).toFixed(1)}s`, `comfy ${((Date.now() - tQueued) / 1000).toFixed(1)}s`,
+    log("info", "run timing", `upload ${(tUpload / 1000).toFixed(1)}s`, `comfy ${((Date.now() - tQueued) / 1000).toFixed(1)}s`,
       "sent", `${rectW(sendRect)}x${rectH(sendRect)}`, "output", outSize ? `${outSize.width}x${outSize.height}` : "?");
     // A workflow that returns only its crop (not the full sent image) can't be placed by stretching.
     if (outSize) {

@@ -70,6 +70,8 @@ export interface PsHost {
   /** Pixels of a layer (RGBA when it has transparency), long edge capped at `maxEdge`. */
   layerPixels(docId: number, layerId: number, maxEdge?: number): Promise<Pixels>;
   layerThumbnail(docId: number, layerId: number, size: number): Promise<string>;
+  /** Image currently on the clipboard (pasted through Photoshop), or null if there is none. */
+  clipboardImage(maxEdge: number): Promise<Pixels | null>;
 
   variations(g: FillGroup): Promise<Variation[]>;
   showVariation(g: FillGroup, layerId: number): Promise<void>;

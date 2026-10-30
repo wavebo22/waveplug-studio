@@ -31,9 +31,13 @@ export function findReferenceSlots(api: ApiGraph, info: ObjectInfo): ReferenceSl
   return nodes.length ? { nodes } : null;
 }
 
-/** Adds one LoadImage per uploaded reference and links it into every detected encoder. */
-export function applyReferences(api: ApiGraph, slots: ReferenceSlots, files: string[]) {
-  let next = Math.max(0, ...Object.keys(api).map(Number).filter(Number.isFinite)) + 1000;
+/**
+ * Adds one LoadImage per uploaded reference and links it into every detected encoder.
+ * `variant` changes the added node ids, so each variation gets its own (uncached) reference
+ * encoding — with cached conditioning only the first of several variations followed the reference.
+ */
+export function applyReferences(api: ApiGraph, slots: ReferenceSlots, files: string[], variant = 0) {
+  let next = Math.max(0, ...Object.keys(api).map(Number).filter(Number.isFinite)) + 1000 + variant * 10;
   files.forEach((file, i) => {
     const id = String(next++);
     api[id] = { class_type: "LoadImage", inputs: { image: file, upload: "image" }, _meta: { title: `WavePlug 参考图 ${i + 1}` } };

@@ -51,6 +51,7 @@ class MockHost implements PsHost {
   listLayers(): LayerInfo[] { return [{ id: 1, name: "标题文字", depth: 0, kind: "text" }, { id: 42, name: "AI填充 · 橘子汁", depth: 0, kind: "group" }, { id: 7, name: "产品参考", depth: 0, kind: "pixel" }, { id: 3, name: "背景", depth: 0, kind: "pixel" }]; }
   async layerPixels(): Promise<Pixels> { return { width: 8, height: 8, channels: 3, data: new Uint8Array(192) }; }
   async layerThumbnail(_d: number, id: number) { return swatch(id, 64, 64); }
+  async clipboardImage(): Promise<Pixels | null> { const w = 40, h = 30; return { width: w, height: h, channels: 3, data: new Uint8Array(w * h * 3).map((_, i) => (i * 37) & 255) }; }
   async variations() { return this.list.map(v => ({ ...v })); }
   async setFillVisible() {}
   async showVariation(_g: FillGroup, layerId: number) { this.list.forEach(v => { v.visible = v.layerId === layerId; }); }

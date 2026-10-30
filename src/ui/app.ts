@@ -16,8 +16,17 @@ import type { DocInfo, FillGroup, Variation } from "../ps/host.ts";
 import { log, withTimeout } from "../app/log.ts";
 import { openCalibration } from "./calibrate.ts";
 import { h, icon, replace } from "./dom.ts";
+import { encodePng } from "../core/image/png.ts";
+import { onWhite } from "../core/image/compose.ts";
+import { FILL_PREFIX } from "../ps/host.ts";
 
 type Conn = { state: "checking" | "ok" | "down"; text: string };
+
+function bytesToDataUrl(bytes: Uint8Array, mime: string): string {
+  let bin = "";
+  for (let i = 0; i < bytes.length; i += 0x8000) bin += String.fromCharCode(...bytes.subarray(i, i + 0x8000));
+  return `data:${mime};base64,${btoa(bin)}`;
+}
 
 /** Prompt optimisers (an LLM rewriting the prompt) are slow and off unless the user turns them on. */
 const OPTIMIZER = /提示词优化|prompt\s*optimi[sz]/i;
@@ -259,8 +268,9 @@ export function mountApp(root: HTMLElement, svc: Services) {
       const r = refs[slot];
       // with auto-wired references the canvas is 图1, so reference n is 图(n+1)
       const tag = auto ? `图${slot + 1}` : `参考 ${slot}`;
-      return h("button", { class: "ref" + (r ? " set" : " add"), title: r ? `${tag}：${r.name}（点击更换或清空）` : `添加参考图（${tag}）：PS 图层或图片文件`, onClick: (e: Event) => refMenu(slot, e.currentTarget as HTMLElement) },
-        r?.thumb ? h("img", { src: r.thumb }) : r ? icon("image", 16) : icon("plus", 14),
+      return h("button", { class: "ref" + (r ? " set" : " add"), title: r ? `${tag}：${r.name}（点击更换或移除）` : `添加参考图（${tag}）：PS 图层、图片文件或剪贴板（Ctrl+V）`, onClick: (e: Event) => refMenu(slot, e.currentTarget as HTMLElement) },
+        r?.thumb ? h("img", { src: r.thumb, onError: (e: Event) => { const el = e.currentTarget as HTMLElement; el.replaceWith(h("span", { class: "ref-ext" }, (/\.(\w+)$/.exec(r.name)?.[1] ?? "图片").toUpperCase())); } })
+          : r ? icon("image", 16) : icon("plus", 14),
         h("span", { class: "ref-num" }, r ? tag : "参考图"));
     }), refs[1] && auto ? h("div", { class: "ref-hint" }, "提示词里用「图2」指代参考图，例如：把选区里的杯子换成图2中的饮料") : null);
   }
@@ -693,35 +703,62 @@ export function mountApp(root: HTMLElement, svc: Services) {
   }
 
   // ── references ──
-  function refMenu(slot: number, anchor: HTMLElement) {
-    sheetHost.querySelector(".pop")?.remove();
-    const layers = doc ? svc.host.listLayers(doc.id) : [];
-    const layerSel = h("select", { class: "field" }, h("option", { value: "" }, "从 PS 图层…"),
-      ...layers.map(l => h("option", { value: String(l.id) }, "  ".repeat(l.depth) + l.name)));
-    layerSel.addEventListener("change", () => {
-      const l = layers.find(x => String(x.id) === layerSel.value);
-      if (l && doc) {
-        const ref: RefSlot = { kind: "layer", docId: doc.id, layerId: l.id, name: l.name };
-        refs[slot] = ref;
-        svc.host.layerThumbnail(doc.id, l.id, 96).then(t => { if (refs[slot] === ref) { ref.thumb = t; renderRefs(); } }, e => log("warn", "reference thumbnail", e));
-      }
-      pop.remove(); renderRefs();
-    });
-    const pop: HTMLElement = h("div", { class: "pop", style: `top:${anchor.getBoundingClientRect().bottom + 4}px` },
-      layerSel,
-      h("button", { class: "menu-item small", onClick: async () => {
-        pop.remove();
-        const img = await svc.pickImage();
-        if (img) { refs[slot] = { kind: "file", name: img.name, bytes: img.bytes, thumb: img.url }; renderRefs(); }
-      } }, icon("folder"), h("span", null, "选择图片文件…")),
-      refs[slot] ? h("button", { class: "menu-item small", onClick: () => {
-        for (let s = slot; s < MAX_REFERENCES; s++) refs[s] = refs[s + 1];
-        refs[MAX_REFERENCES] = undefined;
-        pop.remove(); renderRefs();
-      } }, icon("close"), h("span", null, "移除这张参考图")) : null);
-    sheetHost.append(pop);
-    setTimeout(() => document.addEventListener("click", function off(e) { if (!pop.contains(e.target as Node)) { pop.remove(); document.removeEventListener("click", off); } }), 0);
+  /** Reference picker: clipboard, image file, or any layer of the document (with previews). */
+  function refMenu(slot: number, _anchor?: HTMLElement) {
+    const auto = !!profile && !profile.bindings.some(b => b.role === "reference");
+    const tag = auto ? `图${slot + 1}` : `参考 ${slot}`;
+    const set = (r: RefSlot) => { refs[slot] = r; sheet.remove(); renderRefs(); };
+    const layers = doc ? svc.host.listLayers(doc.id).filter(l => l.kind !== "group" && !l.name.startsWith(FILL_PREFIX)) : [];
+    const list = h("div", { class: "layer-list" }, ...layers.map(l => {
+      const img = h("div", { class: "layer-thumb" }, icon("image", 14));
+      const row = h("button", { class: "layer-row", title: l.name, onClick: () => {
+        if (!doc) return;
+        const thumb = img.querySelector("img")?.getAttribute("src") ?? undefined;
+        set({ kind: "layer", docId: doc.id, layerId: l.id, name: l.name, thumb });
+      } }, img, h("span", { class: "layer-name", style: `padding-left:${l.depth * 10}px` }, l.name));
+      (row as any)._load = () => svc.host.layerThumbnail(doc!.id, l.id, 64).then(t => replace(img, h("img", { src: t })), () => undefined);
+      return row;
+    }));
+    const sheet: HTMLElement = h("div", { class: "sheet" },
+      h("div", { class: "sheet-head" }, h("span", { class: "sheet-title" }, `添加参考图（${tag}）`),
+        h("button", { class: "icon-btn", title: "关闭", onClick: () => sheet.remove() }, icon("close"))),
+      h("div", { class: "sheet-body" },
+        h("div", { class: "row ref-actions" },
+          h("button", { class: "btn grow", title: "也可以在面板上直接按 Ctrl+V", onClick: async () => { sheet.remove(); await pasteReference(slot); } }, icon("paste", 14), h("span", null, "粘贴剪贴板")),
+          h("button", { class: "btn grow", onClick: async () => {
+            const f = await svc.pickImage();
+            if (f) set({ kind: "file", name: f.name, bytes: f.bytes, thumb: f.url });
+          } }, icon("folder", 14), h("span", null, "选择图片文件"))),
+        h("div", { class: "group-label" }, "文档中的图层"),
+        layers.length ? list : h("div", { class: "muted small" }, "当前文档没有可用的图层")),
+      refs[slot] ? h("div", { class: "sheet-foot" },
+        h("button", { class: "btn", onClick: () => {
+          for (let s2 = slot; s2 < MAX_REFERENCES; s2++) refs[s2] = refs[s2 + 1];
+          refs[MAX_REFERENCES] = undefined;
+          sheet.remove(); renderRefs();
+        } }, "移除这张参考图")) : null);
+    sheetHost.append(sheet);
+    // thumbnails one by one so a long layer list stays responsive
+    void (async () => { for (const row of Array.from(list.children)) { if (!sheet.parentNode) break; await (row as any)._load?.(); } })();
   }
+
+  /** Clipboard → reference slot (button in the picker, or Ctrl+V on the panel). */
+  async function pasteReference(slot?: number) {
+    const slots = refSlotNumbers();
+    if (!slots.length) { setStatus("当前工作流不支持参考图", "error"); return; }
+    const target = slot ?? (slots.find(s => !refs[s]) ?? slots[slots.length - 1]);
+    setStatus("读取剪贴板…");
+    try {
+      const px = await svc.host.clipboardImage(1536);
+      if (!px) { setStatus("剪贴板里没有图片", "error"); return; }
+      const bytes = encodePng(onWhite(px));
+      refs[target] = { kind: "file", name: "剪贴板.png", bytes, thumb: bytesToDataUrl(bytes, "image/png") };
+      renderRefs();
+      const auto = !!profile && !profile.bindings.some(b => b.role === "reference");
+      setStatus(`已从剪贴板添加参考图（${auto ? "图" + (target + 1) : "参考 " + target}）`, "ok");
+    } catch (e) { log("warn", "paste reference", e); setStatus("读取剪贴板失败：" + (e as Error).message, "error"); }
+  }
+
 
   // ── generate ──
   let objectInfo: Awaited<ReturnType<Comfy["objectInfo"]>> | null = null;
@@ -838,6 +875,16 @@ export function mountApp(root: HTMLElement, svc: Services) {
     if (!stash) return;
     if (await svc.saveImage(stash, `waveplug_${Date.now()}.png`)) { stash = null; setStatus("结果已另存", "ok"); }
   }
+
+  document.addEventListener("keydown", e => {
+    const k = e as KeyboardEvent;
+    if (!(k.ctrlKey || k.metaKey) || k.key.toLowerCase() !== "v") return;
+    const t = k.target as HTMLElement | null;
+    if (t && /^(TEXTAREA|INPUT|SELECT)$/.test(t.tagName)) return; // normal paste into fields
+    if (sheetHost.querySelector(".sheet") || run) return;
+    k.preventDefault();
+    void pasteReference();
+  });
 
   // ── start ──
   window.addEventListener("error", e => { log("error", "uncaught", (e as ErrorEvent).error ?? (e as ErrorEvent).message); setStatus("插件内部错误：" + ((e as ErrorEvent).message ?? ""), "error"); });

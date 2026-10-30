@@ -17,6 +17,8 @@ export interface RunValues {
   params?: Record<string, number | boolean>;
   /** null = random per run */
   seed: number | null;
+  /** index of the variation within one run (keeps per-variation reference encodings separate) */
+  variant?: number;
 }
 
 export const MAX_SEED = 2 ** 50;
@@ -72,7 +74,7 @@ export function prepareRun(p: Profile, v: RunValues): Prepared {
   // workflows without their own reference loaders: add the given references to the copy
   if (!p.bindings.some(b => b.role === "reference") && p.options.refSlots && v.references) {
     const files = Array.from({ length: MAX_REFERENCES }, (_, i) => v.references![i + 1]).filter((f): f is string => !!f);
-    if (files.length) applyReferences(api, p.options.refSlots, files);
+    if (files.length) applyReferences(api, p.options.refSlots, files, v.variant ?? 0);
   }
   return { api, seed, outputs: p.bindings.filter(b => b.role === "output") };
 }

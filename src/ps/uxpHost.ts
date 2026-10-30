@@ -226,6 +226,31 @@ export class UxpHost implements PsHost {
     return modal("WavePlug 读取参考图层", () => readPixels(opts));
   }
 
+  async clipboardImage(maxEdge: number): Promise<Pixels | null> {
+    // Photoshop's own paste reads every clipboard format it understands (browser images,
+    // screenshots, copied layers): paste into a throw-away document and read the layer.
+    return modal("WavePlug 读取剪贴板", async () => {
+      const { app, constants } = ps();
+      const userDoc = app.activeDocument;
+      const tmp = await app.documents.add({ width: 64, height: 64, resolution: 72, mode: "RGBColorMode", fill: constants.DocumentFill.TRANSPARENT, name: "WavePlug 剪贴板" });
+      try {
+        try { await play([{ _obj: "paste", antiAlias: { _enum: "antiAliasType", _value: "antiAliasNone" }, as: { _class: "pixel" }, _options: DONT }]); }
+        catch (e) { log("info", "clipboard has no image", e); return null; }
+        await play([{ _obj: "revealAll", _options: DONT }]);
+        const layer = tmp.activeLayers[0];
+        if (!layer) return null;
+        const b = boundsRect(layer);
+        if (rectW(b) <= 1 || rectH(b) <= 1) return null;
+        const opts: Record<string, unknown> = { documentID: tmp.id, layerID: layer.id };
+        if (Math.max(rectW(b), rectH(b)) > maxEdge) opts.targetSize = rectW(b) >= rectH(b) ? { width: maxEdge } : { height: maxEdge };
+        return await readPixels(opts);
+      } finally {
+        await tmp.closeWithoutSaving();
+        if (userDoc && this.docExists(userDoc.id)) app.activeDocument = userDoc;
+      }
+    });
+  }
+
   async layerThumbnail(docId: number, layerId: number, size: number): Promise<string> {
     const px = await this.layerPixels(docId, layerId, size);
     const bytes = encodePng(px);

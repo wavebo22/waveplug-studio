@@ -150,3 +150,11 @@ test("reference images: free encoder inputs are found and wired only in the exec
   assert.deepEqual(run.api["118"].inputs.image_02, link);
   assert.equal(p.api["255"].inputs.image_02, undefined, "template untouched");
 });
+
+test("each variation gets its own reference loader node (no shared cached encoding)", async () => {
+  const { applyReferences } = await import("../src/core/workflow/references.ts");
+  const slots = { nodes: [{ nodeId: "255", inputs: ["image_02"] }] };
+  const a = api("guhai_inpaint_ps"), b = api("guhai_inpaint_ps");
+  applyReferences(a, slots, ["r.png"], 0); applyReferences(b, slots, ["r.png"], 1);
+  assert.notDeepEqual(a["255"].inputs.image_02, b["255"].inputs.image_02);
+});

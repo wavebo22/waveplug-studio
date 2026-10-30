@@ -12,7 +12,7 @@ declare const require: (m: string) => any;
 const uxp = require("uxp");
 const { localFileSystem: fs, formats } = uxp.storage;
 declare const __BUILT_AT__: string;
-const VERSION = "1.5.0";
+const VERSION = "1.6.0";
 const DEV = typeof (globalThis as any).__waveplugDevReload === "function";
 
 // Diagnostic log: plugin data folder, mirrored into the project's reports folder on F: when that
