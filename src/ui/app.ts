@@ -56,6 +56,7 @@ export function mountApp(root: HTMLElement, svc: Services) {
   const targetEl = h("span", { class: "target" });
   const historyEl = h("div", { class: "history vars" });
   const varPromptEl = h("div", { class: "var-prompt" });
+  const varCountEl = h("span", { class: "hint" });
   const flowSel = h("select", { class: "field grow", title: "工作流" });
   const prompt = h("textarea", { class: "prompt", rows: 4 }) as HTMLTextAreaElement;
   const refsEl = h("div", { class: "refs" });
@@ -95,19 +96,19 @@ export function mountApp(root: HTMLElement, svc: Services) {
       connEl),
     (mainEl.append(
       h("section", { class: "block" },
-        h("div", { class: "label-row" }, h("span", { class: "label" }, "变体"), targetEl),
-        historyEl, varPromptEl),
-      h("section", { class: "block row" },
-        h("span", { class: "flow-icon", title: "工作流" }, icon("flow")),
-        flowSel,
-        h("button", { class: "icon-btn", title: "接口校准", onClick: () => calibrate() }, icon("sliders")),
-        h("button", { class: "icon-btn", title: "导入工作流", onClick: () => importMenu() }, icon("plus"))),
-      h("section", { class: "block tight" }, prompt, promptHint, refsEl,
-        h("div", { class: "opt-row" },
-          h("label", { class: "check-row locked", title: "局部重绘始终以当前画面为底图" },
-            h("input", { type: "checkbox", checked: true, disabled: true }), h("span", null, "参考当前画面")),
-          selEl)),
+        h("div", { class: "label-row" }, h("span", { class: "label" }, "工作流"),
+          h("div", { class: "row tools" },
+            h("button", { class: "icon-btn sm", title: "接口校准", onClick: () => calibrate() }, icon("sliders", 12)),
+            h("button", { class: "icon-btn sm", title: "导入工作流", onClick: () => importMenu() }, icon("plus", 12)))),
+        flowSel),
+      h("section", { class: "block tight" },
+        h("div", { class: "label-row" }, h("span", { class: "label" }, "提示词")),
+        prompt, promptHint, refsEl,
+        h("div", { class: "ctx-row" }, targetEl, selEl)),
       h("section", { class: "block" }, genBtn, progEl),
+      h("section", { class: "block" },
+        h("div", { class: "label-row" }, h("span", { class: "label" }, "变体"), varCountEl),
+        historyEl, varPromptEl),
       h("section", { class: "block adv" }, advHead, advBody)), mainEl),
     (footEl.append(statusEl, h("span", { class: "ver" }, svc.version)), footEl),
     sheetHost);
@@ -132,7 +133,7 @@ export function mountApp(root: HTMLElement, svc: Services) {
   }
 
   function renderHistory() {
-    targetEl.textContent = group ? `继续 · ${group.name}` : "新建填充";
+    targetEl.textContent = group ? `添加到「${group.name}」` : "新建填充";
     targetEl.title = group
       ? "已选中 AI 填充图层组：新的变体基于原图生成，并加入这个图层组"
       : "未选中 AI 填充图层组：将用当前选区新建一个。选中已有的 AI 填充图层组即可继续生成变体";
@@ -144,14 +145,15 @@ export function mountApp(root: HTMLElement, svc: Services) {
       return h("div", { class: "var" + (v.visible ? " on" : ""), title: v.prompt || "（无提示词）" },
         h("button", { class: "var-img", style: `height:${h0}px`, onClick: () => showVariation(v) },
           thumb ? h("img", { src: thumb }) : h("span", { class: "tile-ph" }, icon("image", 16))),
-        h("div", { class: "var-foot" },
-          h("span", { class: "var-num" }, String(v.number)),
-          h("button", { class: "var-del", title: "删除这个变体", onClick: () => deleteVariation(v) }, icon("close", 10))));
+        h("span", { class: "var-badge" }, String(v.number)),
+        h("button", { class: "var-del", title: "删除这个变体", onClick: () => deleteVariation(v) }, icon("close", 10)));
     });
     if (run) tiles.push(h("div", { class: "var pending" },
-      h("div", { class: "var-img", style: `height:${h0}px` }, h("span", { class: "var-fill", style: `width:${Math.round((run.progress ?? 0) * 100)}%` })),
-      h("div", { class: "var-foot" }, h("span", { class: "var-num" }, "生成中"))));
-    if (!tiles.length) tiles.push(h("div", { class: "history-empty" }, group ? "这个填充还没有变体" : "框选区域并生成后，变体会出现在这里，点击即可切换"));
+      h("div", { class: "var-img", style: `height:${h0}px` },
+        h("span", { class: "var-fill", style: `width:${Math.round((run.progress ?? 0) * 100)}%` }),
+        h("span", { class: "var-wait" }, `${Math.round((run.progress ?? 0) * 100)}%`))));
+    if (!tiles.length) tiles.push(h("div", { class: "history-empty" }, group ? "这个填充还没有变体" : "生成的结果会以变体出现在这里，点击即可切换"));
+    varCountEl.textContent = variations.length ? `${variations.length} 个` : "";
     replace(historyEl, ...tiles);
     const active = variations.find(v => v.visible);
     replace(varPromptEl, active ? h("span", null, h("span", { class: "muted" }, `变体 ${active.number}：`), active.prompt || "（无提示词）",

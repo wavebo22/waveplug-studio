@@ -208,3 +208,38 @@ select.field { padding-right: 2px; }
 .var-prompt .link { margin-left: 4px; }
 .prompt-hint { font-size: 10px; color: var(--muted); margin: 3px 0 0 2px; }
 .dev-reload { margin-left: 8px; width: 20px; height: 20px; border-color: var(--warn); color: var(--warn); }
+
+/* ── 1.0 polish ── */
+.scroll { padding: 12px 12px 4px; }
+.block { margin-bottom: 14px; }
+.label-row { margin-bottom: 5px; min-height: 18px; }
+.label-row .hint, .hint { font-size: 10px; color: var(--muted); }
+.row.tools > * + * { margin-left: 4px; }
+.icon-btn.sm { width: 20px; height: 20px; border-color: transparent; }
+.icon-btn.sm:hover { border-color: var(--field-line); }
+.prompt { min-height: 72px; font-size: 12px; line-height: 1.45; }
+
+.ctx-row { display: flex; align-items: center; justify-content: space-between; margin-top: 7px; }
+.ctx-row .target { max-width: 64%; }
+.target.new { border-color: var(--line); color: var(--muted); }
+
+.generate { height: 34px; font-size: 12px; }
+.progress { margin-top: 7px; }
+
+/* variation tiles: number and delete float on the thumbnail */
+.var { position: relative; }
+.var-img { border-radius: 3px; }
+.var.on .var-img { border: 2px solid var(--accent); }
+.var-badge { position: absolute; left: 4px; top: 4px; min-width: 16px; height: 16px; padding: 0 4px; border-radius: 8px; background: rgba(0, 0, 0, .55); color: #ddd; font-size: 10px; line-height: 16px; text-align: center; font-variant-numeric: tabular-nums; }
+.var.on .var-badge { background: var(--accent); color: var(--accent-ink); font-weight: 700; }
+.var-del { position: absolute; right: 4px; top: 4px; width: 18px; height: 18px; border-radius: 9px; background: rgba(0, 0, 0, .55); color: #ccc; display: none; }
+.var:hover .var-del { display: flex; }
+.var-del:hover { background: var(--err); color: #fff; }
+.var-wait { position: relative; font-size: 11px; color: var(--accent-hi); margin: 0 auto; font-variant-numeric: tabular-nums; }
+.var.pending .var-img { justify-content: center; }
+.var-prompt { margin-top: 0; color: var(--text); line-height: 1.45; }
+.history-empty { height: 54px; justify-content: center; text-align: center; }
+
+.adv { padding-top: 6px; }
+.adv-head { height: 28px; }
+.foot { padding: 6px 12px; }
