@@ -262,7 +262,8 @@ export class UxpHost implements PsHost {
       if (nb.left !== placement.left || nb.top !== placement.top) await layer.translate(placement.left - nb.left, placement.top - nb.top);
       await trace("rasterize");
       await layer.rasterize(constants.RasterizeType.ENTIRELAYER);
-      layer.name = `v${n} · ${prompt.trim().slice(0, 40) || "移除"}`;
+      // the full prompt lives in the layer name (PS allows 255 chars) so 再生成 can reuse it
+      layer.name = `v${n} · ${prompt.trim().replace(/\s+/g, " ").slice(0, 200) || "移除"}`;
       await trace("move into group");
       if (layer.parent?.id !== group.id) await layer.move(group, constants.ElementPlacement.PLACEINSIDE);
 

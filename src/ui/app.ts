@@ -57,6 +57,7 @@ export function mountApp(root: HTMLElement, svc: Services) {
   const historyEl = h("div", { class: "history vars" });
   const varPromptEl = h("div", { class: "var-prompt" });
   const varCountEl = h("span", { class: "hint" });
+  const regenBtn = h("button", { class: "regen", onClick: () => void regenerate() }, icon("refresh", 12), h("span", null, "再生成"));
   const flowSel = h("select", { class: "field grow", title: "工作流" });
   const prompt = h("textarea", { class: "prompt", rows: 4 }) as HTMLTextAreaElement;
   const refsEl = h("div", { class: "refs" });
@@ -107,7 +108,7 @@ export function mountApp(root: HTMLElement, svc: Services) {
         h("div", { class: "ctx-row" }, targetEl, selEl)),
       h("section", { class: "block" }, genBtn, progEl),
       h("section", { class: "block" },
-        h("div", { class: "label-row" }, h("span", { class: "label" }, "变体"), varCountEl),
+        h("div", { class: "label-row" }, h("span", { class: "label" }, "变体"), h("div", { class: "row tools" }, varCountEl, regenBtn)),
         historyEl, varPromptEl),
       h("section", { class: "block adv" }, advHead, advBody)), mainEl),
     (footEl.append(statusEl, h("span", { class: "ver" }, svc.version)), footEl),
@@ -154,6 +155,10 @@ export function mountApp(root: HTMLElement, svc: Services) {
         h("span", { class: "var-wait" }, `${Math.round((run.progress ?? 0) * 100)}%`))));
     if (!tiles.length) tiles.push(h("div", { class: "history-empty" }, group ? "这个填充还没有变体" : "生成的结果会以变体出现在这里，点击即可切换"));
     varCountEl.textContent = variations.length ? `${variations.length} 个` : "";
+    const shown = variations.find(x => x.visible) ?? variations[variations.length - 1];
+    regenBtn.hidden = !group || !shown;
+    regenBtn.disabled = !!run;
+    regenBtn.title = shown ? `用变体 ${shown.number} 的提示词「${shown.prompt || "移除"}」和原来的遮罩，再生成新的变体（不读取当前选区和输入框）` : "";
     replace(historyEl, ...tiles);
     const active = variations.find(v => v.visible);
     replace(varPromptEl, active ? h("span", null, h("span", { class: "muted" }, `变体 ${active.number}：`), active.prompt || "（无提示词）",
@@ -207,14 +212,14 @@ export function mountApp(root: HTMLElement, svc: Services) {
     selEl.className = "sel-state" + (!sel && !group ? " warn" : "");
   }
 
-  function blockedReason(): string | null {
+  function blockedReason(text = prompt.value, regenerating = false): string | null {
     if (!profile) return "请先导入工作流";
     const problems = validateProfile(profile);
     if (problems.length) return "工作流需要校准：" + problems[0];
     if (conn.state !== "ok") return "未连接 ComfyUI";
     if (!doc) return "请先打开 PSD";
-    if (!sel && !group) return "请先建立选区";
-    if (!profile.options.allowEmptyPrompt && profile.bindings.some(b => b.role === "prompt") && !prompt.value.trim()) return "请输入提示词（留空移除可在「接口校准」里开启）";
+    if (!regenerating && !sel && !group) return "请先建立选区";
+    if (!profile.options.allowEmptyPrompt && profile.bindings.some(b => b.role === "prompt") && !text.trim()) return "请输入提示词（留空移除可在「接口校准」里开启）";
     return null;
   }
 
@@ -616,11 +621,18 @@ export function mountApp(root: HTMLElement, svc: Services) {
     if (links.length && !was) { log("info", "local mask links", JSON.stringify(links)); renderAdvanced(); }
   }
 
-  async function generate() {
+  /** 再生成: same fill area (the group's mask) and the shown variation's prompt, one more variation set. */
+  async function regenerate() {
+    const v = variations.find(x => x.visible) ?? variations[variations.length - 1];
+    if (!group || !v || run) return;
+    await generate({ group, prompt: v.prompt === "移除" ? "" : v.prompt });
+  }
+
+  async function generate(again?: { group: FillGroup; prompt: string }) {
     if (!profile || !pstate || run) return;
     await checkConn();
     await refresh();
-    const why = blockedReason();
+    const why = again ? blockedReason(again.prompt, true) : blockedReason();
     if (why) { setStatus(why, "error"); return; }
     const syncError = await syncProfile(profile);
     if (syncError) { setStatus(syncError, "error"); return; }
@@ -632,7 +644,8 @@ export function mountApp(root: HTMLElement, svc: Services) {
     renderAll();
     try {
       const res = await runInpaint(svc.host, comfy, {
-        profile: p, prompt: cleanPrompt(prompt.value), seed: ps.seedMode === "fixed" ? ps.seed : null, params: ps.params,
+        profile: p, prompt: again ? again.prompt : cleanPrompt(prompt.value), seed: ps.seedMode === "fixed" ? ps.seed : null, params: ps.params,
+        regenerate: again?.group,
         references: Object.fromEntries(Object.entries(refs).map(([k, v]) => [k, v])),
         count: ps.count ?? 1,
         fullRun: !!ps.fullRun,

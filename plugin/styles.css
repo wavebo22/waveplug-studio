@@ -243,3 +243,8 @@ select.field { padding-right: 2px; }
 .adv { padding-top: 6px; }
 .adv-head { height: 28px; }
 .foot { padding: 6px 12px; }
+.regen { height: 20px; padding: 0 7px; border: 1px solid var(--field-line); border-radius: 10px; font-size: 10px; color: var(--accent-hi); }
+.regen .icon { margin-right: 4px; }
+.regen:hover { background: var(--hover); border-color: var(--accent); }
+.regen.is-disabled { opacity: .4; }
+.row.tools { display: flex; align-items: center; }

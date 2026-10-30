@@ -26,6 +26,8 @@ export interface RunInput {
   count: number;
   /** clear ComfyUI's cache before each variation so every node runs (slower: models reload) */
   fullRun?: boolean;
+  /** "再生成": add variations to this group using its own mask, ignoring the current selection */
+  regenerate?: FillGroup;
 }
 
 export interface RunHooks {
@@ -77,8 +79,8 @@ export async function runInpaint(host: PsHost, comfy: Comfy, input: RunInput, ho
   const doc = host.activeDoc();
   if (!doc) throw new Error("请先打开一个 PSD");
   if (!/RGB|CMYK/i.test(doc.mode) || doc.bits !== 8) throw new Error(`目前支持 RGB / CMYK 8 位文档（当前：${doc.mode} ${doc.bits} 位）`);
-  const target = await host.activeFillGroup();
-  const selBounds = await host.selectionBounds(doc.id);
+  const target = input.regenerate ? await host.refreshFillGroup(input.regenerate) : await host.activeFillGroup();
+  const selBounds = input.regenerate ? null : await host.selectionBounds(doc.id);
   if (!target && !selBounds) throw new Error("请先用选区框出要重绘的区域（或选中已有的 AI 填充图层组）");
 
   const groupRect = target ? target.rect : clampRect(selBounds!, doc.width, doc.height);
