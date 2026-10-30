@@ -272,6 +272,9 @@ export function mountApp(root: HTMLElement, svc: Services) {
       count.value = String(ps.count ?? 1);
       count.addEventListener("change", () => { ps.count = Number(count.value); save(); });
       rows.push(h("div", { class: "param" }, h("div", { class: "param-top" }, h("span", { class: "param-label" }, "每次生成变体数")), h("div", { class: "param-ctl" }, count)));
+      rows.push(h("label", { class: "param check-row", title: "生成前调用 ComfyUI 自带的「释放」接口，清空节点缓存并卸载模型，让工作流每个节点都重新执行。结果与使用缓存时相同，但每次都要重新加载模型，明显更慢" },
+        h("input", { type: "checkbox", checked: !!ps.fullRun, onChange: (e: Event) => { ps.fullRun = (e.target as HTMLInputElement).checked; save(); } }),
+        h("span", { class: "param-label" }, "每次完整运行（不使用 ComfyUI 缓存，较慢）")));
     }
     if (!rows.length) rows.push(h("div", { class: "muted small" }, "该工作流没有绑定可调参数。可在「接口校准」中添加已有 LoRA 强度、步数等字段。"));
     replace(advBody, ...rows);
@@ -612,6 +615,7 @@ export function mountApp(root: HTMLElement, svc: Services) {
         profile: p, prompt: prompt.value, seed: ps.seedMode === "fixed" ? ps.seed : null, params: ps.params,
         references: Object.fromEntries(Object.entries(refs).map(([k, v]) => [k, v])),
         count: ps.count ?? 1,
+        fullRun: !!ps.fullRun,
       }, {
         signal: current.signal,
         stage: t => { current.stage = t; current.detail = ""; renderAction(); },

@@ -24,6 +24,8 @@ export interface RunInput {
   references: Record<number, RefSource | undefined>;
   /** variations to generate in this run (each with its own seed) */
   count: number;
+  /** clear ComfyUI's cache before each variation so every node runs (slower: models reload) */
+  fullRun?: boolean;
 }
 
 export interface RunHooks {
@@ -129,6 +131,7 @@ export async function runInpaint(host: PsHost, comfy: Comfy, input: RunInput, ho
     const tag = count > 1 ? `（${k + 1}/${count}）` : "";
     const run = prepareRun(profile, { ...values, prompt: input.prompt, negative: input.negative, seed: input.seed === null ? null : input.seed + k, params: input.params });
     log("info", "run", JSON.stringify({ prompt: input.prompt, seed: run.seed, profile: profile.name, localMask: !!profile.options.localMask?.enabled, continued: !!target }));
+    if (input.fullRun) { hooks.stage("清空 ComfyUI 缓存" + tag); await comfy.freeCache(); }
     const job = await comfy.queue(run.api);
     hooks.promptQueued?.(job.promptId);
     hooks.stage("排队中" + tag);

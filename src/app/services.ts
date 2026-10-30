@@ -23,7 +23,7 @@ export interface Services {
 // ── persistent settings / profiles (UXP localStorage is per-plugin and survives restarts) ──
 
 export interface Settings { comfyUrl: string; activeProfile: string | null; advancedOpen: boolean }
-export interface ProfileState { prompt: string; params: Record<string, number | boolean>; seedMode: "random" | "fixed"; seed: number; count?: number }
+export interface ProfileState { prompt: string; params: Record<string, number | boolean>; seedMode: "random" | "fixed"; seed: number; count?: number; fullRun?: boolean }
 
 const KEY = { settings: "wp.settings", profiles: "wp.profiles", state: "wp.state.", thumb: "wp.thumb." };
 

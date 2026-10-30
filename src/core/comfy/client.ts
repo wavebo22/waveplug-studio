@@ -114,6 +114,11 @@ export class ComfyClient {
   }
 
   /** Cancels only our own job: running → targeted interrupt, queued → delete from queue. */
+  /** Native /free: unloads models and clears ComfyUI's node cache, so the next job runs every node. */
+  async freeCache(): Promise<void> {
+    await this.json("/free", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ unload_models: true, free_memory: true }) });
+  }
+
   async cancel(promptId: string): Promise<void> {
     const q = await this.json<{ queue_running: unknown[][]; queue_pending: unknown[][] }>("/queue");
     if (q.queue_pending.some(item => item[1] === promptId)) {
@@ -188,7 +193,7 @@ export class ComfyClient {
 }
 
 /** The surface the app uses — lets the browser preview swap in a fake backend. */
-export type Comfy = Pick<ComfyClient, "base" | "systemStats" | "objectInfo" | "listWorkflows" | "readWorkflow" | "uploadImage" | "queue" | "history" | "view" | "cancel" | "waitFor">;
+export type Comfy = Pick<ComfyClient, "base" | "systemStats" | "objectInfo" | "listWorkflows" | "readWorkflow" | "uploadImage" | "queue" | "history" | "view" | "cancel" | "waitFor" | "freeCache">;
 
 export interface HistoryEntry {
   outputs: Record<string, { images?: ImageRef[] }>;

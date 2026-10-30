@@ -77,6 +77,7 @@ class MockComfy implements Comfy {
   async history(): Promise<HistoryEntry | null> { return null; }
   async view() { return encodePng({ width: 16, height: 10, channels: 3, data: new Uint8Array(480).fill(90) }); } // 1920×1200 aspect
   async cancel() {}
+  async freeCache() {}
   async waitFor(promptId: string, onEvent: (e: JobEvent) => void, opts: { signal?: { aborted: boolean } } = {}): Promise<HistoryEntry> {
     onEvent({ type: "running", promptId, node: "255" });
     for (let i = 1; i <= 9; i++) {
