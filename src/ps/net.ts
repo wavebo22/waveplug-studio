@@ -15,8 +15,9 @@ function xhrFetch(url: string, init: RequestInit = {}): Promise<Response> {
       resolve({
         ok: x.status >= 200 && x.status < 300,
         status: x.status,
-        text: async () => new TextDecoder().decode(buf),
-        json: async () => JSON.parse(new TextDecoder().decode(buf)),
+        // UXP exposes Response but not TextDecoder. Keep the original binary body intact.
+        text: async () => new Response(buf).text(),
+        json: async () => new Response(buf).json(),
         arrayBuffer: async () => buf,
       } as unknown as Response);
     };
@@ -54,7 +55,7 @@ export async function diagnose(base: string): Promise<string[]> {
   const out: string[] = [];
   const add = (s: string) => { out.push(s); log("info", "diagnose", s); };
   add(`地址 ${base}`);
-  add(`可用：fetch=${typeof fetch} XHR=${typeof XMLHttpRequest} WebSocket=${typeof WebSocket}`);
+  add(`可用：fetch=${typeof fetch} XHR=${typeof XMLHttpRequest} WebSocket=${typeof WebSocket} Response=${typeof Response} TextEncoder=${typeof TextEncoder} TextDecoder=${typeof TextDecoder}`);
   const url = base.replace(/\/$/, "") + "/system_stats";
   try {
     const r = await withTimeout(fetch(url), 5000, "fetch ");
