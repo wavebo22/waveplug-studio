@@ -1,0 +1,5 @@
+node_modules/
+dist/
+poc/tmp/
+*.ccx
+.DS_Store
