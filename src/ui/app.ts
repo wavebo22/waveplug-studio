@@ -7,7 +7,7 @@ import { asApiGraph } from "../core/workflow/api.ts";
 import { MAX_SEED, randomSeed } from "../core/workflow/inject.ts";
 import { type Binding, type Profile, carryOver, newProfile, validateProfile } from "../core/workflow/profile.ts";
 import { recognize } from "../core/workflow/recognize.ts";
-import { uiToApi, widgetNamesFromObjectInfo } from "../core/workflow/uiToApi.ts";
+import { uiToApi } from "../core/workflow/uiToApi.ts";
 import { type RefSource, StashedResult, runInpaint } from "../app/generate.ts";
 import { type ProfileState, type Services, type Settings, store } from "../app/services.ts";
 import type { DocInfo, TaskGroup, Version } from "../ps/host.ts";
@@ -364,8 +364,9 @@ export function mountApp(root: HTMLElement, svc: Services) {
             try {
               setStatus("转换为 API 格式…");
               const [ui, info] = await Promise.all([comfy.readWorkflow(pickSel.value), comfy.objectInfo()]);
-              const { api, warnings } = uiToApi(ui, widgetNamesFromObjectInfo(info));
+              const { api, warnings } = uiToApi(ui, info);
               await adopt(pickSel.value.split("/").pop()!.replace(/\.json$/, ""), api, warnings);
+              if (warnings.length) { log("warn", "conversion", warnings); setStatus("转换提示：" + warnings[0] + (warnings.length > 1 ? ` 等 ${warnings.length} 条` : ""), "error"); }
             } catch (e) { setStatus("导入失败：" + (e as Error).message, "error"); }
           } }, "导入")));
       sheetHost.append(sheet);

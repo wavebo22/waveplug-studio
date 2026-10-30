@@ -2,9 +2,9 @@
 // into API format. Frontend-only nodes (Reroute, Set/Get, notes, primitives) are resolved,
 // bypassed nodes are passed through, muted nodes are dropped.
 //
-// Widget names come from a provider. In production the provider is built from /object_info
-// (see widgetNamesFromObjectInfo); without it we fall back to the widget list stored in the
-// UI node itself, which recent ComfyUI frontends write for every node.
+// Widget order: the node's own widget list (written by every recent ComfyUI frontend, and the
+// only source that knows custom widget types such as colour pickers) is used first; /object_info
+// adds the hidden "control after generate" values; a small built-in table covers old core nodes.
 
 import type { ApiGraph, InputValue, Link } from "./api.ts";
 
@@ -15,9 +15,6 @@ interface UiNode {
   inputs?: UiInput[]; outputs?: UiOutput[]; widgets_values?: unknown[] | Record<string, unknown>;
 }
 interface UiWorkflow { nodes: UiNode[]; links: [number, number, number, number, number, string][]; definitions?: { subgraphs?: unknown[] } }
-
-/** Returns the ordered widget names for a node (including "$control" / "upload" placeholders). */
-export type WidgetNames = (node: UiNode) => string[] | null;
 
 const FRONTEND_ONLY = new Set(["Reroute", "SetNode", "GetNode", "Note", "MarkdownNote", "PrimitiveNode"]);
 const MODE_MUTED = 2, MODE_BYPASS = 4;
@@ -31,15 +28,41 @@ export interface ObjectInfo {
 
 const WIDGET_TYPES = new Set(["INT", "FLOAT", "STRING", "BOOLEAN", "COMBO"]);
 
-export function widgetNamesFromObjectInfo(info: ObjectInfo): WidgetNames {
-  return node => {
-    const def = info[node.type];
-    if (!def) return null;
+type Spec = [unknown, Record<string, unknown>?];
+const CONTROL_VALUE = /^(fixed|increment|decrement|randomize)$/;
+
+function specOf(info: ObjectInfo | undefined, type: string, name: string): Spec | undefined {
+  const d = info?.[type]?.input;
+  return (d?.required?.[name] ?? d?.optional?.[name]) as Spec | undefined;
+}
+
+/** Ordered widget names for a node, with "$control" / "upload" placeholders for value-only slots. */
+function widgetOrder(node: UiNode, info?: ObjectInfo): string[] | null {
+  const values = Array.isArray(node.widgets_values) ? node.widgets_values : [];
+  const own = node.inputs?.filter(i => i.widget).map(i => i.widget!.name) ?? [];
+  // Older saves list only widgets that were converted to inputs, so the node's own list is
+  // trusted only when it accounts for every stored value.
+  const ownComplete = own.length > 0 && own.length + own.filter(n => /seed/i.test(n)).length >= values.length;
+  if (own.length && (ownComplete || (!info?.[node.type] && !KNOWN[node.type]))) {
+    const names: string[] = [];
+    for (const name of own) {
+      names.push(name);
+      const spec = specOf(info, node.type, name);
+      const control = spec
+        ? !!spec[1]?.control_after_generate
+        : typeof values[names.length] === "string" && CONTROL_VALUE.test(values[names.length] as string) && /seed/i.test(name);
+      if (control) names.push("$control");
+    }
+    return names;
+  }
+  const def = info?.[node.type];
+  if (def) {
     const names: string[] = [];
     for (const group of [def.input.required ?? {}, def.input.optional ?? {}]) {
       for (const [name, spec] of Object.entries(group)) {
         const [type, opts = {}] = spec;
-        const isWidget = Array.isArray(type) || (typeof type === "string" && WIDGET_TYPES.has(type));
+        // combos, primitives, and custom widget types (they declare a default; link types don't)
+        const isWidget = Array.isArray(type) || (typeof type === "string" && (WIDGET_TYPES.has(type) || "default" in opts));
         if (!isWidget) continue;
         names.push(name);
         if (opts.control_after_generate) names.push("$control");
@@ -47,24 +70,8 @@ export function widgetNamesFromObjectInfo(info: ObjectInfo): WidgetNames {
       }
     }
     return names;
-  };
-}
-
-/** Fallback: widget names recorded on the node's own inputs list. */
-function widgetNamesFromNode(node: UiNode): string[] | null {
-  const ins = node.inputs?.filter(i => i.widget) ?? [];
-  if (!ins.length) return null;
-  const names: string[] = [];
-  const values = Array.isArray(node.widgets_values) ? node.widgets_values : [];
-  for (const i of ins) {
-    names.push(i.widget!.name);
-    const idx = names.length - 1;
-    // seed widgets carry an extra "randomize"/"fixed" value right after them
-    if (/seed/i.test(i.widget!.name) && typeof values[idx + 1] === "string" && /^(fixed|increment|decrement|randomize)$/.test(values[idx + 1] as string)) {
-      names.push("$control");
-    }
   }
-  return names;
+  return KNOWN[node.type] ?? null;
 }
 
 const KNOWN: Record<string, string[]> = {
@@ -80,7 +87,7 @@ const KNOWN: Record<string, string[]> = {
   EmptyLatentImage: ["width", "height", "batch_size"],
 };
 
-export function uiToApi(ui: unknown, widgetNames?: WidgetNames): { api: ApiGraph; warnings: string[] } {
+export function uiToApi(ui: unknown, info?: ObjectInfo): { api: ApiGraph; warnings: string[] } {
   const wf = ui as UiWorkflow;
   if (!wf || !Array.isArray(wf.nodes) || !Array.isArray(wf.links)) throw new Error("不是 ComfyUI 界面格式的工作流");
   if (wf.definitions?.subgraphs?.length) throw new Error("工作流包含子图，当前版本请在 ComfyUI 中导出 API 格式后再导入");
@@ -118,12 +125,14 @@ export function uiToApi(ui: unknown, widgetNames?: WidgetNames): { api: ApiGraph
   const api: ApiGraph = {};
   for (const n of wf.nodes) {
     if (FRONTEND_ONLY.has(n.type) || n.mode === MODE_MUTED || n.mode === MODE_BYPASS) continue;
-    // object_info (when connected) is authoritative; the built-in table covers core nodes offline
-    const names = widgetNames?.(n) ?? KNOWN[n.type] ?? widgetNamesFromNode(n);
+    const names = widgetOrder(n, info);
     const hasLinks = n.inputs?.some(i => i.link != null) || n.outputs?.some(o => o.links?.length);
     if (!names && !hasLinks) continue; // isolated decoration (comments etc.)
     const inputs: Record<string, InputValue> = {};
     const values = n.widgets_values;
+    if (names && Array.isArray(values) && values.length > names.length) {
+      warnings.push(`#${n.id} ${n.type}: 参数个数（${values.length}）多于已知参数名（${names.length}），转换结果可能错位`);
+    }
     if (names && Array.isArray(values)) {
       names.forEach((name, i) => { if (name !== "$control" && i < values.length) inputs[name] = values[i] as InputValue; });
     } else if (values && !Array.isArray(values)) {

@@ -89,3 +89,24 @@ test("re-import keeps valid bindings, remaps renumbered nodes, flags broken ones
   assert.ok(c.broken.some(b => b.binding.nodeId === "304"));
   assert.ok(!c.profile.bindings.some(b => b.nodeId === "304"));
 });
+
+test("custom widget types (colour picker) keep the following values aligned", () => {
+  const { api, warnings } = uiToApi(ui("guhai_inpaint_ps"));
+  const n = api["209"].inputs;
+  assert.equal(n["填充颜色"], "#364254");
+  assert.equal(n["整除数"], 0);
+  assert.equal(n["缩放方法"], "自定义宽高");
+  assert.ok(isLink(n["宽度"]), "linked widget keeps its link");
+  assert.equal(api["267"].inputs.noise_seed, 73987074229914);
+  assert.ok(!("$control" in api["267"].inputs));
+  assert.equal(api["258"].inputs.lora_name, "Qwen\\Qwen2.1 一致性无偏移_GH_V1.0.safetensors");
+  // GH_CropRestore has a widget unknown offline; it must be flagged, not silently shifted
+  assert.deepEqual(warnings.filter(w => /错位/.test(w)).map(w => w.split(" ")[0]), ["#212", "#252"]);
+});
+
+test("object_info marks control_after_generate even when the node lists its own widgets", () => {
+  const wf = { nodes: [{ id: 1, type: "KS", inputs: [{ name: "seed", type: "INT", link: null, widget: { name: "seed" } }, { name: "steps", type: "INT", link: null, widget: { name: "steps" } }], outputs: [{ name: "o", type: "X", links: [1] }], widgets_values: [5, "fixed", 20] }], links: [] };
+  const info = { KS: { input: { required: { seed: ["INT", { control_after_generate: true }], steps: ["INT", {}] } } } } as any;
+  const { api } = uiToApi(wf, info);
+  assert.deepEqual(api["1"].inputs, { seed: 5, steps: 20 });
+});
