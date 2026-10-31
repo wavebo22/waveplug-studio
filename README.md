@@ -1,4 +1,4 @@
-# WavePlug Studio
+# WavePlug Studio 1.0
 
 Photoshop UXP 面板，三个功能：**局部重绘**（框选区域 → ComfyUI 局部重绘工作流）、**扩图**（在面板里拖出扩展范围 → ComfyUI 扩图工作流）和**文生图**（提示词 → 放进选区 / 画布 / 新文档）。结果像 Photoshop「创成式填充」一样，以变体的形式回到文档里。
 ComfyUI 端零改动，只调用它自带的接口。插件 ID `com.waveplug.studio`，开发版 `com.waveplug.studio.dev`。

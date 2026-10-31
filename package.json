@@ -1,6 +1,6 @@
 {
   "name": "waveplug-studio",
-  "version": "2.1.0",
+  "version": "1.0.0",
   "private": true,
   "type": "module",
   "description": "WavePlug Studio — Photoshop UXP panel for ComfyUI inpainting workflows",
