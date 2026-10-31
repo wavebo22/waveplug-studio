@@ -3,7 +3,7 @@
 // confidence, "certain" ones are pre-filled, everything else waits for the user.
 
 import { type ApiGraph, consumers, downstream, isLink, literalSource, title } from "./api.ts";
-import type { Binding, OutpaintCanvas, Role, Side, TaskType } from "./profile.ts";
+import type { Binding, OutpaintCanvas, Role, Side, TaskType, Txt2ImgSize } from "./profile.ts";
 
 export type Confidence = "certain" | "likely" | "ambiguous";
 
@@ -22,6 +22,7 @@ export interface Recognition {
   notes: string[];
   taskType: TaskType;
   outpaint?: OutpaintCanvas;
+  txt2img?: Txt2ImgSize;
 }
 
 const PAD_INPUTS: Record<Side, RegExp> = { left: /^(左|left)$/i, right: /^(右|right)$/i, top: /^(上|top)$/i, bottom: /^(下|bottom)$/i };
@@ -39,6 +40,32 @@ function findOutpaintCanvas(g: ApiGraph): { id: string; pads: Record<Side, strin
     if (Object.keys(pads).length !== 4) continue;
     const imageInput = keys.find(k => isLink(n.inputs[k]) && LOAD_IMAGE.test(g[(n.inputs[k] as [string, number])[0]]?.class_type ?? ""));
     if (imageInput) return { id, pads, image: (n.inputs[imageInput] as [string, number])[0] };
+  }
+  return null;
+}
+
+/**
+ * Where a generated image's size is set: a resolution node with custom width/height (孤海比例与分辨率:
+ * 自定宽度/自定高度, its 比例 fixed to 自定义宽高) or an empty-latent node's width/height.
+ */
+function findSizeSource(g: ApiGraph): { w: { nodeId: string; input: string }; h: { nodeId: string; input: string }; size: Txt2ImgSize } | null {
+  for (const [id, n] of Object.entries(g)) {
+    const keys = Object.keys(n.inputs);
+    const cw = keys.find(k => /^(自定宽度|custom_width)$/i.test(k)), ch = keys.find(k => /^(自定高度|custom_height)$/i.test(k));
+    if (!cw || !ch) continue;
+    const w = literalSource(g, id, cw, "number"), h = literalSource(g, id, ch, "number");
+    if (!w || !h) continue;
+    const forced: Txt2ImgSize["forced"] = [];
+    const ratio = keys.find(k => /^(比例|ratio)$/i.test(k));
+    if (ratio && typeof n.inputs[ratio] === "string") forced.push({ nodeId: id, input: ratio, value: /^[a-z]/i.test(String(n.inputs[ratio])) ? "custom" : "自定义宽高" });
+    const mult = keys.find(k => /^(倍数取整|multiple|divisible_by)$/i.test(k));
+    const m = mult && typeof n.inputs[mult] === "number" ? Number(n.inputs[mult]) : 16;
+    return { w, h, size: { forced, multiple: m > 0 ? m : 1, max: 10240 } };
+  }
+  for (const [id, n] of Object.entries(g)) {
+    if (!/^Empty.*Latent/i.test(n.class_type) || !("width" in n.inputs) || !("height" in n.inputs)) continue;
+    const w = literalSource(g, id, "width", "number"), h = literalSource(g, id, "height", "number");
+    if (w && h) return { w, h, size: { forced: [], multiple: 16, max: 16384 } };
   }
   return null;
 }
@@ -107,6 +134,18 @@ export function recognize(g: ApiGraph): Recognition {
     };
   }
 
+  // ── text-to-image: the output size comes from a size node, not from an input image ──
+  const sz = op ? null : findSizeSource(g);
+  let txt2img: Txt2ImgSize | undefined;
+  if (sz) {
+    taskType = "txt2img";
+    txt2img = sz.size;
+    for (const axis of ["w", "h"] as const) {
+      const s = sz[axis];
+      suggestions.push({ binding: bindingFor(g, "size", s.nodeId, s.input, { axis, label: axis === "w" ? "宽度" : "高度" }), confidence: "certain", reason: "输出尺寸的来源" });
+    }
+  }
+
   // ── image + mask ──
   const loaders = ids.filter(id => LOAD_IMAGE.test(g[id].class_type) && typeof g[id].inputs.image === "string");
   const maskLoaders = ids.filter(id => LOAD_MASK.test(g[id].class_type));
@@ -120,6 +159,8 @@ export function recognize(g: ApiGraph): Recognition {
 
   if (op) {
     mainImage = op.image;
+  } else if (sz) {
+    // every loader is an (optional) reference image
   } else if (alphaMasked.length) {
     const sorted = [...alphaMasked].sort((a, b) => rankImage(b) - rankImage(a));
     mainImage = sorted[0];
@@ -160,8 +201,11 @@ export function recognize(g: ApiGraph): Recognition {
   const refs = loaders.filter(id => id !== mainImage)
     .sort((a, b) => (numberedTitle(title(g, a)) ?? 1e6 + Number(a)) - (numberedTitle(title(g, b)) ?? 1e6 + Number(b)));
   refs.forEach((id, i) => {
-    const b = bindingFor(g, "reference", id, "image", { slot: i + 1, encoding: "rgb" });
-    suggestions.push({ binding: b, confidence: "likely", reason: `其余的加载图像节点，按顺序作为参考图 ${i + 1}` });
+    // loaders with a 「无」 choice (孤海加载图像) may run empty
+    const b = bindingFor(g, "reference", id, "image", { slot: i + 1, encoding: "rgb", ...(/goohai/i.test(g[id].class_type) ? { emptyValue: "无" } : {}) });
+    suggestions.push(sz && b.emptyValue
+      ? { binding: b, confidence: "certain", reason: "可选的参考图（不放图时为「无」）" }
+      : { binding: b, confidence: "likely", reason: `其余的加载图像节点，按顺序作为参考图 ${i + 1}` });
     take(b);
   });
 
@@ -242,5 +286,5 @@ export function recognize(g: ApiGraph): Recognition {
     }
   }
 
-  return { suggestions, blockers, notes, taskType, outpaint };
+  return { suggestions, blockers, notes, taskType, outpaint, txt2img };
 }

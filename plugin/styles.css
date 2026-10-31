@@ -279,3 +279,10 @@ button, .ub { font: inherit; color: inherit; background: none; border: 0; paddin
 .xp-size b { color: var(--accent-hi); }
 .xp-to { color: var(--muted); }
 .xp-pic { display: block; width: 100%; height: 100%; pointer-events: none; }
+
+/* ── text-to-image size ── */
+.t2i-row { display: flex; align-items: center; }
+.t2i-k { color: var(--muted); margin-right: 6px; flex: none; }
+.t2i-ratio { flex: 1 1 auto; min-width: 0; width: auto; margin-right: 10px; }
+.t2i-long { width: 72px; }
+.t2i-info { margin-top: 6px; font-size: var(--fs-s); color: var(--text); }

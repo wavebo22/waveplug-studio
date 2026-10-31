@@ -5,7 +5,7 @@ import { encodePng, type Pixels, withPlacementHints } from "../core/image/png.ts
 import { type Rect, nonZeroBounds, rectH, rectW } from "../core/image/region.ts";
 import { placeGray } from "../core/image/compose.ts";
 import { flushLog, log } from "../app/log.ts";
-import { type Capture, type DocInfo, EXPAND_PREFIX, FILL_PREFIX, type FillGroup, type LayerInfo, type Pads, type PsHost, type Variation, type VariationMask, padsLabel, parsePads } from "./host.ts";
+import { type Capture, type DocInfo, EXPAND_PREFIX, FILL_PREFIX, GENERATE_PREFIX, type FillGroup, type LayerInfo, type Pads, type PsHost, type Variation, type VariationMask, padsLabel, parsePads } from "./host.ts";
 
 declare const require: (m: string) => any;
 
@@ -51,9 +51,12 @@ function findLayer(layers: any[], id: number): any | null {
   return null;
 }
 
-const isFillGroup = (l: any) => !!l && String(l.kind) === "group" && (String(l.name).startsWith(FILL_PREFIX) || String(l.name).startsWith(EXPAND_PREFIX));
+const PREFIXES = [FILL_PREFIX, EXPAND_PREFIX, GENERATE_PREFIX];
+const isFillGroup = (l: any) => !!l && String(l.kind) === "group" && PREFIXES.some(p => String(l.name).startsWith(p));
 const isExpandGroup = (l: any) => String(l?.name ?? "").startsWith(EXPAND_PREFIX);
-const groupName = (l: any) => String(l.name).slice((isExpandGroup(l) ? EXPAND_PREFIX : FILL_PREFIX).length);
+const isGenerateGroup = (l: any) => String(l?.name ?? "").startsWith(GENERATE_PREFIX);
+const groupKind = (l: any) => isExpandGroup(l) ? "outpaint" as const : isGenerateGroup(l) ? "txt2img" as const : "inpaint" as const;
+const groupName = (l: any) => String(l.name).slice((PREFIXES.find(p => String(l.name).startsWith(p)) ?? "").length);
 
 async function selectLayer(layerId: number) {
   await play([{ _obj: "select", _target: [{ _ref: "layer", _id: layerId }], makeVisible: false, _options: DONT }]);
@@ -162,12 +165,12 @@ export class UxpHost implements PsHost {
         rect = lb;
       }
     }
-    return { kind: "inpaint", docId: doc.id, layerId: group.id, name: groupName(group), rect };
+    return { kind: groupKind(group), docId: doc.id, layerId: group.id, name: groupName(group), rect };
   }
 
-  listFillGroups(docId: number): { layerId: number; name: string; kind: "inpaint" | "outpaint" }[] {
-    const out: { layerId: number; name: string; kind: "inpaint" | "outpaint" }[] = [];
-    const walk = (ls: any[]) => { for (const l of ls) { if (isFillGroup(l)) out.push({ layerId: l.id, name: groupName(l), kind: isExpandGroup(l) ? "outpaint" : "inpaint" }); else if (l.layers?.length) walk(l.layers); } };
+  listFillGroups(docId: number): { layerId: number; name: string; kind: FillGroup["kind"] }[] {
+    const out: { layerId: number; name: string; kind: FillGroup["kind"] }[] = [];
+    const walk = (ls: any[]) => { for (const l of ls) { if (isFillGroup(l)) out.push({ layerId: l.id, name: groupName(l), kind: groupKind(l) }); else if (l.layers?.length) walk(l.layers); } };
     if (this.docExists(docId)) walk(docById(docId).layers);
     return out;
   }
@@ -302,15 +305,25 @@ export class UxpHost implements PsHost {
     });
   }
 
-  async createFillGroup(docId: number, rect: Rect, prompt: string, pads?: Pads): Promise<FillGroup> {
-    return step(pads ? "WavePlug 新建 AI 扩图" : "WavePlug 新建 AI 填充", docId, async () => {
+  async createFillGroup(docId: number, rect: Rect, prompt: string, pads?: Pads, kind?: FillGroup["kind"]): Promise<FillGroup> {
+    const gen = kind === "txt2img";
+    return step(pads ? "WavePlug 新建 AI 扩图" : gen ? "WavePlug 新建 AI 生成" : "WavePlug 新建 AI 填充", docId, async () => {
       const doc = docById(docId);
       ps().app.activeDocument = doc;
-      const name = pads ? EXPAND_PREFIX + padsLabel(pads) : FILL_PREFIX + (prompt.trim().slice(0, 24) || "移除");
+      const name = pads ? EXPAND_PREFIX + padsLabel(pads) : (gen ? GENERATE_PREFIX : FILL_PREFIX) + (prompt.trim().slice(0, 24) || (gen ? "无提示词" : "移除"));
       const group = await doc.createLayerGroup({ name });
       if (pads) { await group.move(doc.layers[0], ps().constants.ElementPlacement.PLACEBEFORE); return { kind: "outpaint" as const, pads, docId, layerId: group.id, name: groupName(group), rect }; }
       this.rects.set(`${docId}:${group.id}`, rect);
-      return { kind: "inpaint" as const, docId, layerId: group.id, name: groupName(group), rect };
+      return { kind: gen ? "txt2img" as const : "inpaint" as const, docId, layerId: group.id, name: groupName(group), rect };
+    });
+  }
+
+  async createDocument(width: number, height: number, name: string): Promise<DocInfo> {
+    return modal("WavePlug 新建文档", async () => {
+      const { app, constants } = ps();
+      const doc = await app.documents.add({ width, height, resolution: 72, mode: "RGBColorMode", fill: constants.DocumentFill.WHITE, name });
+      log("info", "document created", doc.id, width, height);
+      return info(doc);
     });
   }
 

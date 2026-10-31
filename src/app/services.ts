@@ -37,6 +37,9 @@ export interface Settings {
   /** panel mode and the workflow last used in each mode */
   mode?: TaskType;
   activeByMode?: Partial<Record<TaskType, string>>;
+  /** text-to-image size: "跟随" (selection / canvas aspect) or "w:h", and the long side in px */
+  t2iRatio?: string;
+  t2iLong?: number;
 }
 export interface ProfileState { prompt: string; params: Record<string, number | boolean>; seedMode: "random" | "fixed"; seed: number; count?: number; fullRun?: boolean }
 

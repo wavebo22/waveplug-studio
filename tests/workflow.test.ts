@@ -183,3 +183,25 @@ test("outpaint workflow: image + four pads recognised, pads injected as exact pi
   assert.equal(run.api["308"].inputs.image, "src.png");
   assert.throws(() => prepareRun(p, { image: "a", prompt: "", seed: 1, pads: { left: 3500, right: 0, top: 0, bottom: 0 } }), /3000/);
 });
+
+test("text-to-image: size node, optional reference, forced custom ratio", () => {
+  const g = api("qwen_txt2img");
+  const r = recognize(g);
+  assert.equal(r.taskType, "txt2img");
+  assert.deepEqual(r.blockers, []);
+  assert.deepEqual(find(r, "size").map(s => `${s.binding.axis}:${s.binding.nodeId}.${s.binding.input}`), ["w:39.自定宽度", "h:39.自定高度"]);
+  const ref = find(r, "reference")[0];
+  assert.equal(ref.binding.emptyValue, "无");
+  assert.equal(r.txt2img?.multiple, 32);
+  const p = newProfile("t2i", g, r.suggestions.filter(s => s.confidence === "certain").map(s => s.binding));
+  p.taskType = "txt2img"; p.options.txt2img = r.txt2img; p.options.allowEmptyPrompt = false;
+  assert.deepEqual(validateProfile(p), []);
+  const run = prepareRun(p, { prompt: "猫", seed: 7, size: { width: 1536, height: 864 } });
+  assert.equal(run.api["39"].inputs["自定宽度"], 1536);
+  assert.equal(run.api["39"].inputs["自定高度"], 864);
+  assert.equal(run.api["39"].inputs["比例"], "自定义宽高");
+  assert.equal(run.api["193"].inputs.image, "无");
+  const withRef = prepareRun(p, { prompt: "猫", seed: 7, size: { width: 1024, height: 1024 }, references: { 1: "waveplug/r.png" } });
+  assert.equal(withRef.api["193"].inputs.image, "waveplug/r.png");
+  assert.throws(() => prepareRun(p, { prompt: "猫", seed: 7, size: { width: 20000, height: 10 } }), /最多/);
+});

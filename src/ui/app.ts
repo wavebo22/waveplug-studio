@@ -18,8 +18,8 @@ import { openCalibration } from "./calibrate.ts";
 import { h, icon, replace } from "./dom.ts";
 import { encodePng } from "../core/image/png.ts";
 import { onWhite } from "../core/image/compose.ts";
-import { EXPAND_PREFIX, FILL_PREFIX } from "../ps/host.ts";
-import { createExpandEditor } from "./expandEditor.ts";
+import { EXPAND_PREFIX, FILL_PREFIX, GENERATE_PREFIX } from "../ps/host.ts";
+import { RATIOS, createExpandEditor } from "./expandEditor.ts";
 
 type Conn = { state: "checking" | "ok" | "down"; text: string };
 
@@ -90,8 +90,14 @@ export function mountApp(root: HTMLElement, svc: Services) {
     if (!group || group.kind !== mode) return false;
     // 扩图: with no extension set, 生成 adds variations to the current expansion
     if (mode === "outpaint") return !padTotal();
-    if (!sel) return true;
     if (choice && choice.sel === selKey(sel)) return choice.add;
+    if (!sel) return true;
+    if (mode === "txt2img") {
+      // a generated image is fitted inside its selection: same area = inside it, spanning its width or height
+      const r = group.rect, d = 2;
+      const inside = r.left >= sel.left - d && r.top >= sel.top - d && r.right <= sel.right + d && r.bottom <= sel.bottom + d;
+      return inside && (Math.abs((r.right - r.left) - (sel.right - sel.left)) <= d || Math.abs((r.bottom - r.top) - (sel.bottom - sel.top)) <= d);
+    }
     return near(sel, group.rect);
   };
   let variations: Variation[] = [];
@@ -108,9 +114,10 @@ export function mountApp(root: HTMLElement, svc: Services) {
   const connEl = h("button", { class: "conn", title: "ComfyUI 连接设置", onClick: () => openSettings() });
   const targetEl = h("span", { class: "target" });
   targetEl.addEventListener("click", () => {
-    if (!group || !sel || mode !== "inpaint") return;
+    // inpaint: only with a selection (without one there is nothing new to fill); 文生图: always
+    if (!group || group.kind !== mode || mode === "outpaint" || (mode === "inpaint" && !sel)) return;
     choice = { sel: selKey(sel), add: !willAdd() };
-    renderHistory(); renderAction();
+    renderHistory(); renderSelection(); renderAction();
   });
   const historyEl = h("div", { class: "history vars" });
   const varPromptEl = h("div", { class: "var-prompt" });
@@ -134,12 +141,26 @@ export function mountApp(root: HTMLElement, svc: Services) {
   const statusEl = h("div", { class: "status" });
   const sheetHost = h("div", { class: "sheet-host" });
 
-  const modeBtns = (["inpaint", "outpaint"] as const).map(m =>
-    h("button", { class: "seg-btn", onClick: () => setMode(m) }, m === "inpaint" ? "局部重绘" : "扩图"));
+  const MODES = [["inpaint", "局部重绘"], ["outpaint", "扩图"], ["txt2img", "文生图"]] as const;
+  const modeBtns = MODES.map(([m, label]) => h("button", { class: "seg-btn", onClick: () => setMode(m) }, label));
   const modeEl = h("div", { class: "seg" }, ...modeBtns);
   const expander = createExpandEditor({ maxPad: 3000, onChange: p => { pads = p; renderHistory(); renderSelection(); renderAction(); } });
   const expandCard = h("section", { class: "card xp-card" }, expander.el);
   let thumbKey = "";
+  // 文生图: aspect (follow the selection / canvas, or a preset) and long side
+  const T2I_FOLLOW = "跟随选区/画布";
+  const t2iRatio = h("select", { class: "field t2i-ratio", title: "生成图片的比例" },
+    ...[T2I_FOLLOW, ...RATIOS.slice(1)].map(r => h("option", { value: r }, r))) as HTMLSelectElement;
+  const t2iLong = h("input", { class: "num t2i-long", type: "number", min: "256", max: "4096", step: "64", title: "生成图片的长边（像素）" }) as HTMLInputElement;
+  const t2iInfo = h("div", { class: "t2i-info" });
+  t2iRatio.addEventListener("change", () => { settings.t2iRatio = t2iRatio.value; store.saveSettings(settings); renderSelection(); });
+  t2iLong.addEventListener("change", () => {
+    const v = Math.max(256, Math.min(4096, Math.round(Number(t2iLong.value) || 1536)));
+    t2iLong.value = String(v); settings.t2iLong = v; store.saveSettings(settings); renderSelection();
+  });
+  const t2iCard = h("section", { class: "card t2i-card" },
+    h("div", { class: "t2i-row" }, h("span", { class: "t2i-k" }, "比例"), t2iRatio, h("span", { class: "t2i-k" }, "长边"), t2iLong),
+    t2iInfo);
 
   const mainEl = h("main", { class: "scroll" });
   const footEl = h("footer", { class: "foot" });
@@ -169,6 +190,7 @@ export function mountApp(root: HTMLElement, svc: Services) {
     (mainEl.append(
       modeEl,
       expandCard,
+      t2iCard,
       h("section", { class: "card" },
         prompt, promptHint, refsEl,
         h("div", { class: "ctx-row" }, targetEl, selEl),
@@ -182,7 +204,8 @@ export function mountApp(root: HTMLElement, svc: Services) {
     (footEl.append(statusEl, h("span", { class: "ver" }, svc.version)), footEl),
     sheetHost);
 
-  prompt.addEventListener("input", () => { promptHint.hidden = !!prompt.value; });
+  // re-check the 生成 button as the user types (a required prompt enables it)
+  prompt.addEventListener("input", () => { promptHint.hidden = !!prompt.value; if (!run) renderAction(); });
   prompt.addEventListener("input", () => { if (pstate && profile) { pstate.prompt = prompt.value; store.saveState(profile.id, pstate); } });
   // compare: hold to see the original (the fill group hidden), release to restore
   const showOriginal = (hide: boolean) => { if (group && !run) void svc.host.setFillVisible(group, !hide).catch(e => log("warn", "compare", e)); compareBtn.classList.toggle("on", hide); };
@@ -208,13 +231,15 @@ export function mountApp(root: HTMLElement, svc: Services) {
 
   function renderHistory() {
     const add = willAdd();
-    targetEl.textContent = add ? `添加到「${group!.name}」` : mode === "outpaint" ? "新建扩图" : "新建填充";
-    targetEl.title = mode === "outpaint"
+    targetEl.textContent = add ? `添加到「${group!.name}」` : mode === "outpaint" ? "新建扩图" : mode === "txt2img" ? "新建生成" : "新建填充";
+    targetEl.title = mode === "txt2img"
+      ? (add ? `新变体加入「${group!.name}」，放在它原来的位置。点击改为新建` : group?.kind === "txt2img" ? `新建一组生成结果。点击改为添加到「${group.name}」` : "生成结果放进选区；没有选区时铺满画布；没有打开文档时新建文档")
+      : mode === "outpaint"
       ? (add ? `新变体加入「${group!.name}」，使用它原来的扩展尺寸。拖动上面的画布边缘可改为新建扩图` : "按上面设定的尺寸扩展画布，并生成扩展部分")
       : !group ? "用当前选区新建一个 AI 填充"
       : add ? `新变体加入「${group.name}」，使用它原来的遮罩${sel ? "。点击改为用当前选区新建填充" : ""}`
       : `当前选区和「${group.name}」不同，将新建填充。点击改为添加到「${group.name}」`;
-    targetEl.className = "target " + (add ? "cont" : "new") + (group && sel && mode === "inpaint" ? " switchable" : "");
+    targetEl.className = "target " + (add ? "cont" : "new") + (group && group.kind === mode && (mode === "txt2img" || (sel && mode === "inpaint")) ? " switchable" : "");
     replace(fillSel, ...fills.map(f => h("option", { value: String(f.layerId) }, f.name)));
     fillSel.hidden = fills.length < 1;
     fillSel.value = group ? String(group.layerId) : "";
@@ -262,15 +287,19 @@ export function mountApp(root: HTMLElement, svc: Services) {
   }
 
   function renderFlows() {
-    modeBtns.forEach((b, i) => b.classList.toggle("on", (i ? "outpaint" : "inpaint") === mode));
+    modeBtns.forEach((b, i) => b.classList.toggle("on", MODES[i][0] === mode));
     expandCard.hidden = mode !== "outpaint";
-    flowName.textContent = profile ? profile.name : mode === "outpaint" ? "导入扩图工作流" : "导入工作流";
+    t2iCard.hidden = mode !== "txt2img";
+    t2iRatio.value = settings.t2iRatio ?? T2I_FOLLOW;
+    t2iLong.value = String(settings.t2iLong ?? 1536);
+    flowName.textContent = profile ? profile.name : mode === "outpaint" ? "导入扩图工作流" : mode === "txt2img" ? "导入文生图工作流" : "导入工作流";
     flowBtn.title = profile ? `工作流：${profile.name}（点击切换、导入或校准）` : "导入 ComfyUI 工作流";
     flowBtn.classList.toggle("warn", !!profile && validateProfile(profile).length > 0);
     countSel.value = String(pstate?.count ?? 1);
     const allowEmpty = profile?.options.allowEmptyPrompt;
     // UXP's native textarea can merge its placeholder into the typed text, so the hint lives outside it
-    promptHint.textContent = mode === "outpaint" ? "描述扩展出来的内容（可留空，自动延续画面）"
+    promptHint.textContent = mode === "txt2img" ? "描述想要生成的画面"
+      : mode === "outpaint" ? "描述扩展出来的内容（可留空，自动延续画面）"
       : allowEmpty ? "描述要画进选区的内容；留空 = 移除选区内的内容" : "描述要画进选区的内容";
     prompt.title = promptHint.textContent;
     prompt.value = pstate?.prompt ?? "";
@@ -300,10 +329,40 @@ export function mountApp(root: HTMLElement, svc: Services) {
         r?.thumb ? h("img", { src: r.thumb, onError: (e: Event) => { const el = e.currentTarget as HTMLElement; el.replaceWith(h("span", { class: "ref-ext" }, (/\.(\w+)$/.exec(r.name)?.[1] ?? "图片").toUpperCase())); } })
           : r ? icon("image", 16) : icon("plus", 14),
         h("span", { class: "ref-num" }, r ? tag : "参考图"));
-    }), refs[1] && auto ? h("div", { class: "ref-hint" }, "提示词里用「图2」指代参考图，例如：把选区里的杯子换成图2中的饮料") : null);
+    }), refs[1] && auto ? h("div", { class: "ref-hint" }, "提示词里用「图2」指代参考图，例如：把选区里的杯子换成图2中的饮料")
+      : mode === "txt2img" && slots.length && !refs[1] ? h("div", { class: "ref-hint" }, "可选：放一张参考图，工作流会按它来生成") : null);
+  }
+
+  /** 文生图: where the result goes and the aspect it should have. */
+  function t2iTarget(): { aspect: number; where: string; fixed: boolean } {
+    const r = (x: Rect) => (x.right - x.left) / Math.max(1, x.bottom - x.top);
+    const dim = (x: Rect) => `${x.right - x.left} × ${x.bottom - x.top}`;
+    if (group && willAdd()) return { aspect: r(group.rect), where: `「${group.name}」原来的位置 ${dim(group.rect)}`, fixed: true };
+    if (doc && sel) return { aspect: r(sel), where: `选区 ${dim(sel)}`, fixed: false };
+    if (doc) return { aspect: doc.width / Math.max(1, doc.height), where: `整个画布 ${doc.width} × ${doc.height}`, fixed: false };
+    return { aspect: 1, where: "新文档（未打开文档）", fixed: false };
+  }
+
+  /** 文生图 output size: the chosen aspect at the chosen long side, on the workflow's grid. */
+  function t2iSize(): { width: number; height: number } {
+    const t = t2iTarget();
+    const m = /^(\d+):(\d+)$/.exec(settings.t2iRatio ?? "");
+    // adding to an existing result keeps its shape, whatever preset is chosen
+    const aspect = !t.fixed && m ? Number(m[1]) / Number(m[2]) : t.aspect;
+    const long = settings.t2iLong ?? 1536;
+    const grid = profile?.options.txt2img?.multiple ?? 16;
+    const snap = (v: number) => Math.max(grid, Math.round(v / grid) * grid);
+    return aspect >= 1 ? { width: snap(long), height: snap(long / aspect) } : { width: snap(long * aspect), height: snap(long) };
   }
 
   function renderSelection() {
+    if (mode === "txt2img") {
+      const t = t2iTarget(), s = t2iSize();
+      selEl.textContent = `输出 ${s.width} × ${s.height}`;
+      selEl.className = "sel-state";
+      replace(t2iInfo, h("span", { class: "muted" }, "放入："), t.where);
+      return;
+    }
     if (!doc) { selEl.textContent = "未打开文档"; return; }
     if (mode === "outpaint") {
       selEl.textContent = willAdd() && group?.pads ? `扩展 ${group.pads.left + group.pads.right} × ${group.pads.top + group.pads.bottom}`
@@ -317,10 +376,14 @@ export function mountApp(root: HTMLElement, svc: Services) {
   }
 
   function blockedReason(text = prompt.value, regenerating = false): string | null {
-    if (!profile) return mode === "outpaint" ? "请先导入扩图工作流（含「外补画板」节点）" : "请先导入工作流";
+    if (!profile) return mode === "outpaint" ? "请先导入扩图工作流（含「外补画板」节点）" : mode === "txt2img" ? "请先导入文生图工作流" : "请先导入工作流";
     const problems = validateProfile(profile);
     if (problems.length) return "工作流需要校准：" + problems[0];
     if (conn.state !== "ok") return "未连接 ComfyUI";
+    if (mode === "txt2img") {
+      if (!profile.options.allowEmptyPrompt && profile.bindings.some(b => b.role === "prompt") && !text.trim()) return "请输入提示词";
+      return null;
+    }
     if (!doc) return "请先打开 PSD";
     if (mode === "outpaint" && !regenerating && !willAdd() && !padTotal()) return "拖动上面画布的边缘，设定要扩展的尺寸";
     if (mode === "inpaint" && !regenerating && !sel && !willAdd()) return "请先建立选区";
@@ -614,7 +677,7 @@ export function mountApp(root: HTMLElement, svc: Services) {
           return h("button", { class: "menu-item flow-item" + (p.id === profile?.id ? " on" : ""), onClick: () => { selectProfile(p.id); sheet.remove(); } },
             icon(p.id === profile?.id ? "check" : "flow"),
             h("span", { class: "grow" }, h("b", null, p.name), h("span", { class: "muted small block" },
-              (modeOf(p) === "outpaint" ? "扩图 · " : "局部重绘 · ") + (p.source?.kind === "comfy" ? "ComfyUI 已保存的工作流" : "API JSON") + (bad ? " · 需要校准" : ""))));
+              (modeOf(p) === "outpaint" ? "扩图 · " : modeOf(p) === "txt2img" ? "文生图 · " : "局部重绘 · ") + (p.source?.kind === "comfy" ? "ComfyUI 已保存的工作流" : "API JSON") + (bad ? " · 需要校准" : ""))));
         })),
       h("div", { class: "sheet-foot" },
         profile ? h("button", { class: "btn", onClick: () => { sheet.remove(); void calibrate(); } }, "校准当前") : null,
@@ -673,7 +736,7 @@ export function mountApp(root: HTMLElement, svc: Services) {
     if (rec.blockers.length) return null;
     const one = (role: string) => rec.suggestions.filter(s => s.binding.role === role);
     const image = one("image"), output = one("output"), prompt = one("prompt"), mask = one("mask");
-    if (image.length !== 1 || image[0].confidence !== "certain") return null;
+    if (rec.taskType !== "txt2img" && (image.length !== 1 || image[0].confidence !== "certain")) return null;
     if (output.length !== 1 || output[0].confidence !== "certain") return null;
     if (prompt.length && prompt[0].confidence !== "certain") return null;
     if (mask.length && mask[0].confidence !== "certain") return null;
@@ -702,12 +765,15 @@ export function mountApp(root: HTMLElement, svc: Services) {
           h("div", { class: "sum" },
             line(bindings.some(b => b.role === "pad") ? "原图" : "画面 + 选区", img, img?.encoding === "rgba-alpha-mask" ? "（选区写入透明通道）" : ""),
             line("选区遮罩", bindings.find(b => b.role === "mask")),
+            bindings.some(b => b.role === "size") ? h("div", { class: "sum-row" }, h("span", { class: "sum-k" }, ROLE_LABEL.size),
+              h("span", { class: "sum-v" }, bindings.filter(b => b.role === "size").map(b => `#${b.nodeId}.${b.input}`).join("、") + "（由面板上的比例和长边控制）")) : null,
+            ...bindings.filter(b => b.role === "reference").map(b => line(`参考图 ${b.slot}`, b, b.emptyValue ? "（可选）" : "")),
             bindings.some(b => b.role === "pad") ? h("div", { class: "sum-row" }, h("span", { class: "sum-k" }, ROLE_LABEL.pad),
               h("span", { class: "sum-v" }, bindings.filter(b => b.role === "pad").map(b => `#${b.nodeId}.${b.input}`).join("、") + "（由面板上的画布控制）")) : null,
             line("提示词", bindings.find(b => b.role === "prompt")),
             line("输出", bindings.find(b => b.role === "output")),
             params.length ? h("div", { class: "sum-row" }, h("span", { class: "sum-k" }, "高级参数"), h("span", { class: "sum-v" }, params.join("、"))) : null),
-          bindings.some(b => b.role === "prompt") && !bindings.some(b => b.role === "pad")
+          bindings.some(b => b.role === "prompt") && !bindings.some(b => b.role === "pad" || b.role === "size")
             ? h("label", { class: "check-row sum-opt" }, empty, h("span", null, "提示词留空时执行「移除选区内容」")) : null),
         h("div", { class: "sheet-foot" },
           h("button", { class: "btn", onClick: () => done("adjust") }, "手动调整"),
@@ -725,6 +791,8 @@ export function mountApp(root: HTMLElement, svc: Services) {
       p.taskType = rec.taskType;
       if (rec.taskType === "outpaint") { p.options.outpaint = rec.outpaint; p.options.allowEmptyPrompt = true; }
       else delete p.options.outpaint;
+      if (rec.taskType === "txt2img") { p.options.txt2img = rec.txt2img; p.options.allowEmptyPrompt = false; }
+      else delete p.options.txt2img;
       return p;
     };
     const old = profiles.find(p => p.name === name);
@@ -746,7 +814,7 @@ export function mountApp(root: HTMLElement, svc: Services) {
     const options = newProfile(name, api, []).options;
     const auto = autoBindings(rec);
     if (auto) {
-      options.allowEmptyPrompt = rec.taskType === "outpaint" || looksLikeRemoval(name, auto);
+      options.allowEmptyPrompt = rec.taskType === "outpaint" || (rec.taskType === "inpaint" && looksLikeRemoval(name, auto));
       const choice = await openSummary(name, auto, options);
       if (!choice) return;
       if (choice === "ok") {
@@ -790,7 +858,7 @@ export function mountApp(root: HTMLElement, svc: Services) {
     const auto = !!profile && !profile.bindings.some(b => b.role === "reference");
     const tag = auto ? `图${slot + 1}` : `参考 ${slot}`;
     const set = (r: RefSlot) => { refs[slot] = r; sheet.remove(); renderRefs(); };
-    const layers = doc ? svc.host.listLayers(doc.id).filter(l => l.kind !== "group" && !l.name.startsWith(FILL_PREFIX) && !l.name.startsWith(EXPAND_PREFIX)) : [];
+    const layers = doc ? svc.host.listLayers(doc.id).filter(l => l.kind !== "group" && !l.name.startsWith(FILL_PREFIX) && !l.name.startsWith(EXPAND_PREFIX) && !l.name.startsWith(GENERATE_PREFIX)) : [];
     const list = h("div", { class: "layer-list" }, ...layers.map(l => {
       const img = h("div", { class: "layer-thumb" }, icon("image", 14));
       const row = h("button", { class: "layer-row", title: l.name, onClick: () => {
@@ -873,6 +941,11 @@ export function mountApp(root: HTMLElement, svc: Services) {
         if (!op) return "ComfyUI 中的工作流里找不到「外补画板」节点了。如果它和局部重绘共用一个工作流，请在 ComfyUI 里切回扩图模式后保存";
         p.options.outpaint = op;
       }
+      if (modeOf(p) === "txt2img") {
+        const t = recognize(api).txt2img;
+        if (!t) return "ComfyUI 中的工作流里找不到设置输出尺寸的节点了，请点「接口校准」重新确认";
+        p.options.txt2img = t;
+      }
       if (!p.options.cropDefault) Object.assign(p.options, { sendScope: "crop", cropMargin: 1, cropDefault: true });
       refreshMaskLinks(p);
       store.saveProfiles(profiles);
@@ -904,7 +977,7 @@ export function mountApp(root: HTMLElement, svc: Services) {
     if (!group || !v || run) return;
     // a fill is regenerated with a workflow of its own kind
     if (group.kind !== mode) setMode(group.kind);
-    if (!profile) { setStatus(group.kind === "outpaint" ? "请先导入扩图工作流" : "请先导入局部重绘工作流", "error"); return; }
+    if (!profile) { setStatus(group.kind === "outpaint" ? "请先导入扩图工作流" : group.kind === "txt2img" ? "请先导入文生图工作流" : "请先导入局部重绘工作流", "error"); return; }
     await generate({ addTo: group, prompt: v.prompt === "移除" ? "" : v.prompt });
   }
 
@@ -927,6 +1000,7 @@ export function mountApp(root: HTMLElement, svc: Services) {
         profile: p, prompt: again ? again.prompt : cleanPrompt(prompt.value), seed: ps.seedMode === "fixed" ? ps.seed : null, params: effectiveParams(p, ps),
         addTo: again ? again.addTo : willAdd() ? group ?? undefined : undefined,
         pads: modeOf(p) === "outpaint" ? { ...pads } : undefined,
+        size: modeOf(p) === "txt2img" ? t2iSize() : undefined,
         references: Object.fromEntries(Object.entries(refs).map(([k, v]) => [k, v])),
         count: ps.count ?? 1,
         fullRun: !!ps.fullRun,
@@ -945,7 +1019,7 @@ export function mountApp(root: HTMLElement, svc: Services) {
       if (ps.seedMode === "random") { ps.seed = res.seeds[res.seeds.length - 1]; store.saveState(p.id, ps); }
       // the canvas is now expanded; the next 生成 adds variations unless a new extension is drawn
       if (modeOf(p) === "outpaint" && !res.continued) { pads = { left: 0, right: 0, top: 0, bottom: 0 }; expander.setPads(pads); }
-      setStatus(`${res.continued ? "已加入" : modeOf(p) === "outpaint" ? "已扩展画布，" : "已新建 AI 填充，"}变体 ${res.variations.map(v => v.number).join("、")} · seed ${res.seeds.join("、")}`, "ok");
+      setStatus(`${res.continued ? "已加入" : modeOf(p) === "outpaint" ? "已扩展画布，" : modeOf(p) === "txt2img" ? "已生成，" : "已新建 AI 填充，"}变体 ${res.variations.map(v => v.number).join("、")} · seed ${res.seeds.join("、")}`, "ok");
     } catch (e) {
       log("error", "generate failed", e);
       if (e instanceof StashedResult) { stash = e.png; setStatus(e.message, "error"); }

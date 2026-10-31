@@ -33,7 +33,9 @@ class MockHost implements PsHost {
   private cbs: (() => void)[] = [];
 
   changed() { this.cbs.forEach(c => c()); }
-  activeDoc() { return this.doc; }
+  docOpen = true;
+  activeDoc() { return this.docOpen ? this.doc : null; }
+  async createDocument(width: number, height: number, name: string) { this.doc = { id: this.doc.id + 1, name, width, height, mode: "RGBColorMode", bits: 8 }; this.docOpen = true; this.sel = null; this.list = []; this.groupSelected = false; return this.doc; }
   docExists() { return true; }
   async selectionBounds() { return this.sel; }
   async activeFillGroup() { return this.groupSelected ? this.group : null; }
@@ -58,7 +60,7 @@ class MockHost implements PsHost {
   async setFillVisible() {}
   async showVariation(_g: FillGroup, layerId: number) { this.list.forEach(v => { v.visible = v.layerId === layerId; }); }
   async deleteVariation(_g: FillGroup, layerId: number) { this.list = this.list.filter(v => v.layerId !== layerId); if (!this.list.some(v => v.visible) && this.list.length) this.list[this.list.length - 1].visible = true; }
-  async createFillGroup(_d: number, rect: Rect, prompt: string, pads?: Pads): Promise<FillGroup> { this.groupSelected = true; this.list = []; this.group = { ...this.group, kind: pads ? "outpaint" : "inpaint", pads, layerId: this.group.layerId + 1, rect, name: pads ? `←${pads.left} →${pads.right} ↑${pads.top} ↓${pads.bottom}` : prompt.slice(0, 24) }; return this.group; }
+  async createFillGroup(d: number, rect: Rect, prompt: string, pads?: Pads, kind?: FillGroup["kind"]): Promise<FillGroup> { this.groupSelected = true; this.list = []; this.group = { ...this.group, docId: d, kind: pads ? "outpaint" : kind ?? "inpaint", pads, layerId: this.group.layerId + 1, rect, name: pads ? `←${pads.left} →${pads.right} ↑${pads.top} ↓${pads.bottom}` : prompt.slice(0, 24) }; return this.group; }
   async addVariation(_g: FillGroup, _png: Uint8Array, _p: Rect, prompt: string, _m: VariationMask): Promise<Variation> {
     const n = Math.max(0, ...this.list.map(v => v.number)) + 1;
     const v = { layerId: 100 + n, number: n, label: String(n), prompt, visible: true };
@@ -84,14 +86,16 @@ class MockComfy implements Comfy {
       "图像缩放V2_孤海": { input: { required: { "图像": ["IMAGE"] }, optional: { "遮罩": ["MASK"] } }, output: ["IMAGE", "INT", "INT", "MASK"] },
     } as any;
   }
-  async listWorkflows() { return ["孤海 Qwen2.1 Turbo PS专用/Qwen-2.1-移除、局部重绘_PS插件连接本地comfyui专用_本机适配.json", "孤海 Qwen2.1 Turbo PS专用/Qwen-2.1-移除、局部重绘、扩图.json"]; }
-  async readWorkflow(path?: string) { return path && /扩图/.test(path) ? outpaintUi : fixtureUi; }
+  async listWorkflows() { return ["孤海 Qwen2.1 Turbo PS专用/Qwen-2.1-移除、局部重绘_PS插件连接本地comfyui专用_本机适配.json", "孤海 Qwen2.1 Turbo PS专用/Qwen-2.1-移除、局部重绘、扩图.json", "Qwen Image 2.1 文生图.json"]; }
+  async readWorkflow(path?: string) { return path && /扩图/.test(path) ? outpaintUi : path && /文生图/.test(path) ? txt2imgUi : fixtureUi; }
   last = { width: 16, height: 10 };
   out = this.last;
   async uploadImage(b: Uint8Array, name: string) { if (!/_ref\d/.test(name)) this.last = pngSize(b) ?? this.last; await sleep(150); return "waveplug/" + name; }
   async queue(api?: Record<string, { inputs: Record<string, unknown> }>) {
     // outpaint: the result has the padded size (pads come from the canvas node's sources)
     const pad = (id: string) => Number(api?.[id]?.inputs.value ?? 0);
+    const size = api?.["39"]?.inputs;
+    if (size && typeof size["自定宽度"] === "number") { this.out = { width: size["自定宽度"] as number, height: size["自定高度"] as number }; return { promptId: "mock-" + Date.now(), number: 1 }; }
     this.out = api?.["314"] ? { width: this.last.width + pad("342") + pad("343"), height: this.last.height + pad("346") + pad("347") } : this.last;
     return { promptId: "mock-" + Date.now(), number: 1 };
   }
@@ -114,11 +118,12 @@ class MockComfy implements Comfy {
 }
 
 const sleep = (ms: number) => new Promise(r => setTimeout(r, ms));
-let fixtureUi: unknown = null, outpaintUi: unknown = null;
+let fixtureUi: unknown = null, outpaintUi: unknown = null, txt2imgUi: unknown = null;
 
 async function boot() {
   fixtureUi = await (await fetch("fixture.json")).json();
   outpaintUi = await (await fetch("fixture_outpaint.json")).json();
+  txt2imgUi = await (await fetch("fixture_txt2img.json")).json();
   const host = new MockHost(), comfy = new MockComfy();
   if (!localStorage.getItem("wp.profiles")) {
     const { api } = uiToApi(fixtureUi);
@@ -148,6 +153,7 @@ async function boot() {
   };
   toggle("PS 中有选区", () => !!host.sel, v => { host.sel = v ? { left: 1020, top: 260, right: 1640, bottom: 900 } : null; });
   toggle("选中了 AI 结果智能对象（续写）", () => host.groupSelected, v => { host.groupSelected = v; });
+  toggle("PS 中有打开的文档", () => host.docOpen, v => { host.docOpen = v; });
   toggle("ComfyUI 在线", () => comfy.online, v => { comfy.online = v; });
   const reset = document.createElement("button"); reset.textContent = "重置预览数据";
   reset.onclick = () => { localStorage.clear(); location.reload(); }; ctl.append(reset);

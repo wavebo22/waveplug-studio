@@ -32,6 +32,9 @@ export interface RunInput {
   addTo?: FillGroup;
   /** outpaint profiles: pixels to add on each side (ignored when adding to an existing expand) */
   pads?: Pads;
+  /** text-to-image profiles: size to generate. The result goes into `addTo`'s area, else the
+   *  selection, else the whole canvas, else a new document of that size. */
+  size?: { width: number; height: number };
 }
 
 export interface RunHooks {
@@ -79,6 +82,7 @@ export async function runInpaint(host: PsHost, comfy: Comfy, input: RunInput, ho
   const { profile } = input;
   const check = () => { if (hooks.signal.aborted) throw new Error("已取消"); };
 
+  if (profile.taskType === "txt2img") return runTxt2img(host, comfy, input, hooks);
   // ── 1. snapshot ──
   hooks.stage("读取 Photoshop 画面…");
   const doc = host.activeDoc();
@@ -231,7 +235,11 @@ async function referenceUploader(host: PsHost, comfy: Comfy, input: RunInput, st
   const forVariation = async (k: number) => {
     for (const slot of slots) {
       const src = input.references[slot];
-      if (!src) { if (bound.includes(slot)) throw new Error(`参考图 ${slot} 还没有选择素材`); continue; }
+      if (!src) {
+        const b = profile.bindings.find(x => x.role === "reference" && x.slot === slot);
+        if (b && !b.emptyValue) throw new Error(`参考图 ${slot} 还没有选择素材`);
+        continue;
+      }
       if (k === 0) hooks.stage(`上传参考图 ${slot}…`);
       files[slot] = await uploadRef(slot, src, k);
     }
@@ -317,6 +325,88 @@ async function runOutpaint(host: PsHost, comfy: Comfy, input: RunInput, hooks: R
       { pixels: outpaintSeam(w, h, pads, feather), rect: inner, outside: "reveal" });
     variations.push(v); seeds.push(run.seed);
     hooks.variationAdded?.(group, v, run.seed);
+    check();
+  }
+  return { group: group!, variations, seeds, continued: !!target };
+}
+
+/** Largest rect of aspect `ratio` (w / h) centred inside `area`. */
+export function containRect(area: Rect, ratio: number): Rect {
+  const aw = rectW(area), ah = rectH(area);
+  const w = Math.min(aw, Math.round(ah * ratio)), h = Math.min(ah, Math.round(aw / ratio));
+  const left = area.left + Math.round((aw - w) / 2), top = area.top + Math.round((ah - h) / 2);
+  return { left, top, right: left + w, bottom: top + h };
+}
+
+/**
+ * Text-to-image: nothing is read from the document (references aside). Each result becomes a
+ * variation of an 「AI生成」 group, fitted into the selection / canvas, or a new document is made.
+ */
+async function runTxt2img(host: PsHost, comfy: Comfy, input: RunInput, hooks: RunHooks): Promise<RunResult> {
+  const { profile } = input;
+  const check = () => { if (hooks.signal.aborted) throw new Error("已取消"); };
+  if (!input.size) throw new Error("缺少输出尺寸");
+  const size = input.size;
+  let doc = host.activeDoc();
+  if (doc && (!/RGB|CMYK/i.test(doc.mode) || doc.bits !== 8)) throw new Error(`目前支持 RGB / CMYK 8 位文档（当前：${doc.mode} ${doc.bits} 位）`);
+  const target = input.addTo ? await host.refreshFillGroup(input.addTo) : null;
+  if (target && target.kind !== "txt2img") throw new Error("当前选中的不是 AI 生成的图层组");
+  if (target) doc = { ...doc!, id: target.docId };
+  // where results go: the group's area, the selection, the whole canvas — or (no document) a new one
+  let area: Rect | null = target ? target.rect : null;
+  if (!area && doc) {
+    const s = await host.selectionBounds(doc.id);
+    area = s ? clampRect(s, doc.width, doc.height) : { left: 0, top: 0, right: doc.width, bottom: doc.height };
+  }
+
+  const stamp = Date.now().toString(36);
+  const refs = await referenceUploader(host, comfy, input, stamp, hooks);
+  check();
+
+  let group: FillGroup | null = target;
+  const variations: Variation[] = [], seeds: number[] = [];
+  const count = Math.max(1, Math.min(4, Math.floor(input.count) || 1));
+  for (let k = 0; k < count; k++) {
+    const tag = count > 1 ? `（${k + 1}/${count}）` : "";
+    const references = await refs.forVariation(k);
+    const run = prepareRun(profile, { references, prompt: input.prompt, negative: input.negative, seed: input.seed === null ? null : input.seed + k, params: input.params, variant: k, size });
+    log("info", "run", JSON.stringify({ task: "txt2img", prompt: input.prompt, seed: run.seed, size, profile: profile.name, continued: !!target }));
+    if (input.fullRun) { hooks.stage("清空 ComfyUI 缓存" + tag); await comfy.freeCache(); }
+    hooks.debug?.(`${stamp}_workflow${k ? "_" + k : ""}.json`, utf8(JSON.stringify(run.api, null, 1)));
+    const job = await comfy.queue(run.api);
+    hooks.promptQueued?.(job.promptId);
+    hooks.stage("排队中" + tag);
+    const tQueued = Date.now();
+    const history = await comfy.waitFor(job.promptId, (e: JobEvent) => {
+      if (e.type === "running") { hooks.stage((e.node ? `执行中 · #${e.node} ${run.api[e.node]?._meta?.title ?? run.api[e.node]?.class_type ?? ""}` : "执行中") + tag); log("info", "comfy executing", e.node, run.api[e.node ?? ""]?.class_type ?? "", `+${((Date.now() - tQueued) / 1000).toFixed(1)}s`); }
+      if (e.type === "progress") hooks.progress(e.max ? (k + e.value / e.max) / count : null, `采样 ${e.value}/${e.max}${tag}`);
+    }, { signal: hooks.signal });
+    const out = run.outputs[0];
+    hooks.stage("取回结果" + tag);
+    const png = await comfy.view(outputImage(history, out.nodeId, out.imageIndex ?? 0));
+    hooks.debug?.(`${stamp}_output${k ? "_" + k : ""}.png`, png);
+    const outSize = pngSize(png) ?? size;
+    log("info", "run timing", `comfy ${((Date.now() - tQueued) / 1000).toFixed(1)}s`, "requested", `${size.width}x${size.height}`, "output", `${outSize.width}x${outSize.height}`);
+    check();
+
+    hooks.stage("写入 Photoshop" + tag);
+    try {
+      if (!doc) {
+        doc = await host.createDocument(outSize.width, outSize.height, "AI生成 " + (input.prompt.trim().slice(0, 20) || "图像"));
+        area = { left: 0, top: 0, right: outSize.width, bottom: outSize.height };
+      }
+      if (!host.docExists(doc.id)) throw new Error("发起任务的 PSD 已关闭");
+      // keep the result's own aspect: fit it inside the area, centred
+      const place = group ? group.rect : containRect(area!, outSize.width / outSize.height);
+      group = group ? await host.refreshFillGroup(group) : await host.createFillGroup(doc.id, place, input.prompt, undefined, "txt2img");
+      const full: Pixels = { width: rectW(place), height: rectH(place), channels: 1, data: new Uint8Array(rectW(place) * rectH(place)).fill(255) };
+      const v = await host.addVariation(group, png, place, input.prompt, { pixels: full, rect: place, outside: "hide" });
+      variations.push(v); seeds.push(run.seed);
+      hooks.variationAdded?.(group, v, run.seed);
+    } catch (e) {
+      if (e instanceof StashedResult) throw e;
+      throw new StashedResult((e as Error).message + "，结果未写入", png);
+    }
     check();
   }
   return { group: group!, variations, seeds, continued: !!target };

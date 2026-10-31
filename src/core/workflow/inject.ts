@@ -7,7 +7,7 @@ import { MAX_REFERENCES, applyReferences } from "./references.ts";
 
 export interface RunValues {
   /** uploaded file name (as returned by /upload/image, including subfolder) */
-  image: string;
+  image?: string;
   mask?: string;
   prompt: string;
   negative?: string;
@@ -21,6 +21,8 @@ export interface RunValues {
   variant?: number;
   /** outpaint: pixels to add on each side */
   pads?: Record<Side, number>;
+  /** text-to-image: output size in pixels (already rounded to the workflow's multiple) */
+  size?: { width: number; height: number };
 }
 
 export const MAX_SEED = 2 ** 50;
@@ -52,7 +54,7 @@ export function prepareRun(p: Profile, v: RunValues): Prepared {
   };
   for (const b of p.bindings) {
     switch (b.role) {
-      case "image": set(b, v.image); break;
+      case "image": set(b, v.image!); break;
       case "mask":
         if (!v.mask) throw new Error("缺少选区遮罩");
         set(b, v.mask); break;
@@ -60,7 +62,7 @@ export function prepareRun(p: Profile, v: RunValues): Prepared {
       case "negative": if (v.negative !== undefined) set(b, v.negative); break;
       case "seed": set(b, seed); break;
       case "reference": {
-        const file = v.references?.[b.slot ?? 0];
+        const file = v.references?.[b.slot ?? 0] ?? b.emptyValue;
         if (!file) throw new Error(`参考图 ${b.slot} 未选择素材`);
         set(b, file); break;
       }
@@ -77,6 +79,14 @@ export function prepareRun(p: Profile, v: RunValues): Prepared {
         set(b, Math.max(0, px));
         break;
       }
+      case "size": {
+        if (!v.size) throw new Error("缺少输出尺寸");
+        const px = Math.round(b.axis === "w" ? v.size.width : v.size.height);
+        const max = p.options.txt2img?.max ?? Infinity;
+        if (px > max) throw new Error(`输出尺寸最多 ${max} 像素（当前 ${px}）`);
+        set(b, Math.max(8, px));
+        break;
+      }
       case "output": break;
     }
   }
@@ -89,6 +99,8 @@ export function prepareRun(p: Profile, v: RunValues): Prepared {
     if (op.ratio) inputs[op.ratio.input] = op.ratio.value;
     if (op.layout) inputs[op.layout.input] = "";
   }
+  // text-to-image: make the size node use the given width/height (e.g. 比例 → 自定义宽高)
+  for (const f of p.options.txt2img?.forced ?? []) if (api[f.nodeId]) api[f.nodeId].inputs[f.input] = f.value;
   // workflows without their own reference loaders: add the given references to the copy
   if (!p.bindings.some(b => b.role === "reference") && p.options.refSlots && v.references) {
     const files = Array.from({ length: MAX_REFERENCES }, (_, i) => v.references![i + 1]).filter((f): f is string => !!f);

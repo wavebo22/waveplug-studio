@@ -3,8 +3,8 @@
 
 import { type ApiGraph, isLink, title } from "./api.ts";
 
-export type TaskType = "inpaint" | "outpaint";
-export type Role = "image" | "mask" | "prompt" | "negative" | "seed" | "reference" | "param" | "output" | "pad";
+export type TaskType = "inpaint" | "outpaint" | "txt2img";
+export type Role = "image" | "mask" | "prompt" | "negative" | "seed" | "reference" | "param" | "output" | "pad" | "size";
 export type Side = "left" | "right" | "top" | "bottom";
 export const SIDES: Side[] = ["left", "right", "top", "bottom"];
 
@@ -21,9 +21,19 @@ export interface OutpaintCanvas {
   maxPad: number;
 }
 
+/** Text-to-image: inputs the plugin fixes so its width/height are used as given (e.g. 比例 → 自定义宽高). */
+export interface Txt2ImgSize {
+  forced: { nodeId: string; input: string; value: string | number | boolean }[];
+  /** sizes are rounded to this multiple (the latent grid) */
+  multiple: number;
+  /** largest width/height the size inputs accept */
+  max: number;
+}
+
 export const ROLE_LABEL: Record<Role, string> = {
   image: "主画面（当前画面）",
   pad: "扩展尺寸",
+  size: "输出尺寸",
   mask: "选区遮罩",
   prompt: "提示词",
   negative: "负面提示词",
@@ -55,6 +65,10 @@ export interface Binding {
   imageIndex?: number;
   /** which side a pad binding controls */
   side?: Side;
+  /** which dimension a size binding controls */
+  axis?: "w" | "h";
+  /** reference loaders that can run without a picture (e.g. LoadImageGoohai's 「无」) */
+  emptyValue?: string;
   /** display label for params */
   label?: string;
   min?: number;
@@ -83,6 +97,8 @@ export interface Profile {
     cropDefault?: boolean;
     /** outpaint workflows: the canvas node's fixed inputs */
     outpaint?: OutpaintCanvas;
+    /** text-to-image workflows: how the output size is set */
+    txt2img?: Txt2ImgSize;
     /** free encoder image inputs for reference images (execution copy only), see references.ts */
     refSlots?: { nodes: { nodeId: string; inputs: string[] }[] };
     /** links that make the sampler respect the selection (execution copy only), see localMask.ts */
@@ -118,6 +134,11 @@ export function validateProfile(p: Profile): string[] {
   const problems: string[] = [];
   for (const b of p.bindings) { const s = checkBinding(p.api, b); if (!s.ok) problems.push(s.message); }
   const has = (r: Role) => p.bindings.some(b => b.role === r);
+  if (p.taskType === "txt2img") {
+    if (!has("output")) problems.push("未绑定输出图片");
+    for (const axis of ["w", "h"] as const) if (!p.bindings.some(b => b.role === "size" && b.axis === axis)) problems.push(`未绑定输出${axis === "w" ? "宽度" : "高度"}`);
+    return problems;
+  }
   if (!has("image")) problems.push("未绑定主画面");
   if (!has("output")) problems.push("未绑定输出图片");
   if (p.taskType === "outpaint") {

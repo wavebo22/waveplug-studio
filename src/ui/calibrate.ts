@@ -40,7 +40,7 @@ export function openCalibration(host: HTMLElement, g: ApiGraph, rec: Recognition
       chosen.set(slot, pre ?? null);
     };
     const imageS = sugg("image")[0];
-    addRow("image", "image", ROLE_LABEL.image, true, imageS);
+    if (rec.taskType !== "txt2img" || imageS || existing("image")) addRow("image", "image", ROLE_LABEL.image, rec.taskType !== "txt2img", imageS);
     const maskS = sugg("mask")[0];
     if (maskS || existing("mask")) addRow("mask", "mask", ROLE_LABEL.mask, true, maskS);
     addRow("prompt", "prompt", ROLE_LABEL.prompt, false, sugg("prompt")[0], literalFields(g, ["string"]).map(b => ({ ...b, role: "prompt" as Role })));
@@ -114,8 +114,11 @@ export function openCalibration(host: HTMLElement, g: ApiGraph, rec: Recognition
       }
       bindings.push(...params);
       // 扩图: the four extension amounts are always the canvas node's own sources
-      const pads = init.bindings.filter(b => b.role === "pad");
-      bindings.push(...(pads.length ? pads : rec.suggestions.filter(x => x.binding.role === "pad").map(x => x.binding)));
+      // 扩图 / 文生图: extension amounts and output size are set by the panel, always the recognised sources
+      for (const role of ["pad", "size"] as const) {
+        const own = init.bindings.filter(b => b.role === role);
+        bindings.push(...(own.length ? own : rec.suggestions.filter(x => x.binding.role === role).map(x => x.binding)));
+      }
       const bad = bindings.map(b => checkBinding(g, b)).find(s => !s.ok);
       if (bad && !bad.ok) { msg.textContent = bad.message; return; }
       close({ name: nameInput.value.trim() || init.name, bindings, options });

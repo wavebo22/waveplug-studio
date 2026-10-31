@@ -7,7 +7,7 @@
 
 import type { Pixels } from "../core/image/png.ts";
 import type { Rect } from "../core/image/region.ts";
-import type { Side } from "../core/workflow/profile.ts";
+import type { Side, TaskType } from "../core/workflow/profile.ts";
 
 export type Pads = Record<Side, number>;
 
@@ -22,7 +22,7 @@ export interface DocInfo {
 }
 
 export interface FillGroup {
-  kind: "inpaint" | "outpaint";
+  kind: TaskType;
   /** outpaint: pixels added on each side (the original image sits inside at left/top) */
   pads?: Pads;
   docId: number;
@@ -54,6 +54,7 @@ export interface Capture {
 
 export const FILL_PREFIX = "AI填充 · ";
 export const EXPAND_PREFIX = "AI扩图 · ";
+export const GENERATE_PREFIX = "AI生成 · ";
 
 export const padsLabel = (p: Pads) => `←${p.left} →${p.right} ↑${p.top} ↓${p.bottom}`;
 export function parsePads(name: string): Pads | null {
@@ -73,7 +74,7 @@ export interface PsHost {
   /** The fill group the active layer is (or is inside), else null. */
   activeFillGroup(): Promise<FillGroup | null>;
   /** All AI fill groups in the document (top to bottom). */
-  listFillGroups(docId: number): { layerId: number; name: string; kind: "inpaint" | "outpaint" }[];
+  listFillGroups(docId: number): { layerId: number; name: string; kind: TaskType }[];
   /** A fill group by id, or null if it no longer exists / has no variations. */
   fillGroupById(docId: number, layerId: number): Promise<FillGroup | null>;
   /** Fails with a readable message if the group is gone. */
@@ -94,8 +95,11 @@ export interface PsHost {
   /** Shows / hides the whole fill (compare with the original). Not recorded in history. */
   setFillVisible(g: FillGroup, visible: boolean): Promise<void>;
   deleteVariation(g: FillGroup, layerId: number): Promise<void>;
-  /** New, empty fill group for the area `rect` (an outpaint group when `pads` is given). */
-  createFillGroup(docId: number, rect: Rect, prompt: string, pads?: Pads): Promise<FillGroup>;
+  /** New, empty fill group for the area `rect` (an outpaint group when `pads` is given, a
+   *  text-to-image group when `kind` is "txt2img"). */
+  createFillGroup(docId: number, rect: Rect, prompt: string, pads?: Pads, kind?: TaskType): Promise<FillGroup>;
+  /** New RGB 8-bit document (text-to-image without an open document). */
+  createDocument(width: number, height: number, name: string): Promise<DocInfo>;
   /** Places the PNG (which covers `placement` in document pixels) as the next variation with the
    *  given layer mask, and shows it. */
   addVariation(g: FillGroup, png: Uint8Array, placement: Rect, prompt: string, mask: VariationMask): Promise<Variation>;
