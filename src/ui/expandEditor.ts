@@ -94,7 +94,8 @@ export function createExpandEditor(opts: { maxPad: number; onChange(p: Pads): vo
   const arrows = { left: "←", right: "→", top: "↑", bottom: "↓" };
   const fromEl = h("span"), toEl = h("b");
   const sizeEl = h("span", { class: "xp-size" }, fromEl, h("span", { class: "xp-to" }, " → "), toEl);
-  const ratioSel = h("select", { class: "field xp-ratio", title: "画布比例" }, ...RATIOS.map(r => h("option", { value: r }, r))) as HTMLSelectElement;
+  const ratioSel = h("select", { class: "field xp-ratio", title: "画布比例" }, ...RATIOS.map(r => h("option", { value: r, selected: r === ratio ? "" : undefined }, r))) as HTMLSelectElement;
+  ratioSel.value = ratio; // UXP shows an empty select until a value is set explicitly
   ratioSel.addEventListener("change", () => { ratio = ratioSel.value; set(pads); });
 
   const el = h("div", { class: "xp" },
@@ -202,6 +203,7 @@ export function createExpandEditor(opts: { maxPad: number; onChange(p: Pads): vo
     el,
     setImage(u, width, height) {
       url = u; W = Math.max(1, width); H = Math.max(1, height);
+      if (ratioSel.value !== ratio) ratioSel.value = ratio; // again once the panel is shown (UXP drops values set while detached)
       if (url && pic.getAttribute("src") !== url) pic.setAttribute("src", url);
       pic.hidden = !url;
       draw();
