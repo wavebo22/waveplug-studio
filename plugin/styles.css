@@ -256,11 +256,19 @@ button, .ub { font: inherit; color: inherit; background: none; border: 0; paddin
 .xp-stage { position: relative; height: 210px; border-radius: 4px; overflow: hidden; background: rgba(0, 0, 0, .28); user-select: none; }
 .xp-frame { position: absolute; border: 1px dashed var(--accent-hi); background-color: rgba(63, 181, 159, .14); }
 .xp-img { position: absolute; background-color: #777; cursor: move; overflow: hidden; box-shadow: 0 0 0 1px rgba(255, 255, 255, .55); }
-.xp-h { position: absolute; width: 10px; height: 10px; background: var(--accent-hi); border: 1px solid var(--accent-ink); border-radius: 2px; }
-.xp-h-l, .xp-h-r { cursor: ew-resize; }
-.xp-h-t, .xp-h-b { cursor: ns-resize; }
-.xp-h-tl, .xp-h-br { cursor: nwse-resize; }
-.xp-h-tr, .xp-h-bl { cursor: nesw-resize; }
+/* grips: transparent hit areas along each edge / at each corner, with a visible knob */
+.xp-g { position: absolute; display: flex; align-items: center; justify-content: center; }
+.xp-knob { width: 10px; height: 10px; background: var(--accent-hi); border: 1px solid var(--accent-ink); border-radius: 2px; }
+.xp-g-l .xp-knob, .xp-g-r .xp-knob { width: 6px; height: 22px; border-radius: 3px; }
+.xp-g-t .xp-knob, .xp-g-b .xp-knob { width: 22px; height: 6px; border-radius: 3px; }
+.xp-g:hover .xp-knob { background: #fff; }
+.xp-g-l, .xp-g-r { cursor: ew-resize; }
+.xp-g-t, .xp-g-b { cursor: ns-resize; }
+.xp-g-tl, .xp-g-br { cursor: nwse-resize; }
+.xp-g-tr, .xp-g-bl { cursor: nesw-resize; }
+.xp-stage.dragging .xp-frame { border-style: solid; }
+/* after a drag the view re-centres; ease it instead of jumping */
+.xp-stage:not(.dragging) .xp-frame, .xp-stage:not(.dragging) .xp-img, .xp-stage:not(.dragging) .xp-g { transition: left .12s ease-out, top .12s ease-out, width .12s ease-out, height .12s ease-out; }
 .xp-fields { display: flex; margin-top: 8px; }
 .xp-field { flex: 1 1 0; display: flex; align-items: center; margin-right: 6px; min-width: 0; }
 .xp-field:last-child { margin-right: 0; }
