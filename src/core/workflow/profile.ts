@@ -3,11 +3,27 @@
 
 import { type ApiGraph, isLink, title } from "./api.ts";
 
-export type TaskType = "inpaint";
-export type Role = "image" | "mask" | "prompt" | "negative" | "seed" | "reference" | "param" | "output";
+export type TaskType = "inpaint" | "outpaint";
+export type Role = "image" | "mask" | "prompt" | "negative" | "seed" | "reference" | "param" | "output" | "pad";
+export type Side = "left" | "right" | "top" | "bottom";
+export const SIDES: Side[] = ["left", "right", "top", "bottom"];
+
+/** Fixed inputs of an outpaint canvas node (孤海外补画板) that the plugin sets on every run. */
+export interface OutpaintCanvas {
+  nodeId: string;
+  /** e.g. "单位" → "像素", so pads are exact pixels */
+  unit?: { input: string; value: string };
+  /** e.g. "gh_visual_ratio" → "自由比例", so the node does not re-fit the pads to a ratio */
+  ratio?: { input: string; value: string };
+  /** e.g. "gh_visual_layout" → "", so a stale layout from the ComfyUI editor is ignored */
+  layout?: { input: string };
+  /** largest value one pad input accepts (pixels) */
+  maxPad: number;
+}
 
 export const ROLE_LABEL: Record<Role, string> = {
   image: "主画面（当前画面）",
+  pad: "扩展尺寸",
   mask: "选区遮罩",
   prompt: "提示词",
   negative: "负面提示词",
@@ -37,6 +53,8 @@ export interface Binding {
   slot?: number;
   /** output image index within the node's result list */
   imageIndex?: number;
+  /** which side a pad binding controls */
+  side?: Side;
   /** display label for params */
   label?: string;
   min?: number;
@@ -63,6 +81,8 @@ export interface Profile {
     cropMargin: number;
     /** set once the crop default (introduced in 0.2.3) has been applied to an older profile */
     cropDefault?: boolean;
+    /** outpaint workflows: the canvas node's fixed inputs */
+    outpaint?: OutpaintCanvas;
     /** free encoder image inputs for reference images (execution copy only), see references.ts */
     refSlots?: { nodes: { nodeId: string; inputs: string[] }[] };
     /** links that make the sampler respect the selection (execution copy only), see localMask.ts */
@@ -100,6 +120,10 @@ export function validateProfile(p: Profile): string[] {
   const has = (r: Role) => p.bindings.some(b => b.role === r);
   if (!has("image")) problems.push("未绑定主画面");
   if (!has("output")) problems.push("未绑定输出图片");
+  if (p.taskType === "outpaint") {
+    for (const side of SIDES) if (!p.bindings.some(b => b.role === "pad" && b.side === side)) problems.push(`未绑定扩展尺寸（${side}）`);
+    return problems;
+  }
   const img = p.bindings.find(b => b.role === "image");
   if (img && img.encoding !== "rgba-alpha-mask" && !has("mask")) problems.push("未绑定选区遮罩");
   return problems;

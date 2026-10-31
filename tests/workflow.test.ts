@@ -158,3 +158,28 @@ test("each variation gets its own reference loader node (no shared cached encodi
   applyReferences(a, slots, ["r.png"], 0); applyReferences(b, slots, ["r.png"], 1);
   assert.notDeepEqual(a["255"].inputs.image_02, b["255"].inputs.image_02);
 });
+
+test("outpaint workflow: image + four pads recognised, pads injected as exact pixels", () => {
+  const g = api("guhai_remove_inpaint_outpaint");
+  const r = recognize(g);
+  assert.equal(r.taskType, "outpaint");
+  assert.deepEqual(r.blockers, []);
+  const pick = (role: string) => r.suggestions.filter(s => s.binding.role === role);
+  assert.equal(pick("image")[0].binding.nodeId, "308");
+  assert.deepEqual(pick("pad").map(s => `${s.binding.side}:${s.binding.nodeId}`), ["left:342", "right:343", "top:346", "bottom:347"]);
+  assert.equal(pick("prompt")[0].binding.nodeId, "313");
+  assert.equal(pick("output")[0].binding.nodeId, "315");
+  assert.ok(!pick("param").some(s => ["342", "343", "346", "347"].includes(s.binding.nodeId)), "pads are not listed as params");
+  assert.equal(r.outpaint?.nodeId, "314");
+  const p = newProfile("扩图", g, r.suggestions.filter(s => s.confidence === "certain").map(s => s.binding));
+  p.taskType = "outpaint"; p.options.outpaint = r.outpaint; p.options.allowEmptyPrompt = true;
+  assert.deepEqual(validateProfile(p), []);
+  const run = prepareRun(p, { image: "src.png", prompt: "", seed: 3, pads: { left: 120, right: 80, top: 0, bottom: 300 } });
+  assert.equal(run.api["342"].inputs.value, 120);
+  assert.equal(run.api["347"].inputs.value, 300);
+  assert.equal(run.api["314"].inputs["单位"], "像素");
+  assert.equal(run.api["314"].inputs.gh_visual_ratio, "自由比例");
+  assert.equal(run.api["314"].inputs.gh_visual_layout, "");
+  assert.equal(run.api["308"].inputs.image, "src.png");
+  assert.throws(() => prepareRun(p, { image: "a", prompt: "", seed: 1, pads: { left: 3500, right: 0, top: 0, bottom: 0 } }), /3000/);
+});

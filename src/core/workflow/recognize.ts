@@ -3,7 +3,7 @@
 // confidence, "certain" ones are pre-filled, everything else waits for the user.
 
 import { type ApiGraph, consumers, downstream, isLink, literalSource, title } from "./api.ts";
-import type { Binding, Role } from "./profile.ts";
+import type { Binding, OutpaintCanvas, Role, Side, TaskType } from "./profile.ts";
 
 export type Confidence = "certain" | "likely" | "ambiguous";
 
@@ -20,6 +20,27 @@ export interface Recognition {
   /** Why the workflow can't serve the inpaint contract, if it can't. */
   blockers: string[];
   notes: string[];
+  taskType: TaskType;
+  outpaint?: OutpaintCanvas;
+}
+
+const PAD_INPUTS: Record<Side, RegExp> = { left: /^(左|left)$/i, right: /^(右|right)$/i, top: /^(上|top)$/i, bottom: /^(下|bottom)$/i };
+
+/** A node taking an image plus left/right/top/bottom amounts = an outpaint canvas (孤海外补画板 etc.). */
+function findOutpaintCanvas(g: ApiGraph): { id: string; pads: Record<Side, string>; image: string } | null {
+  for (const [id, n] of Object.entries(g)) {
+    const keys = Object.keys(n.inputs);
+    const pads = {} as Record<Side, string>;
+    for (const side of Object.keys(PAD_INPUTS) as Side[]) {
+      const k = keys.find(x => PAD_INPUTS[side].test(x));
+      if (!k) break;
+      pads[side] = k;
+    }
+    if (Object.keys(pads).length !== 4) continue;
+    const imageInput = keys.find(k => isLink(n.inputs[k]) && LOAD_IMAGE.test(g[(n.inputs[k] as [string, number])[0]]?.class_type ?? ""));
+    if (imageInput) return { id, pads, image: (n.inputs[imageInput] as [string, number])[0] };
+  }
+  return null;
 }
 
 const LOAD_IMAGE = /^LoadImage$|^LoadImageFromPath|^Load ?Image(?!.*Mask)/;
@@ -61,6 +82,31 @@ export function recognize(g: ApiGraph): Recognition {
     });
   }
 
+  // ── outpaint: image + four pad amounts instead of image + mask ──
+  const op = findOutpaintCanvas(g);
+  let taskType: TaskType = "inpaint";
+  let outpaint: OutpaintCanvas | undefined;
+  if (op) {
+    taskType = "outpaint";
+    suggestions.push({ binding: bindingFor(g, "image", op.image, "image", { encoding: "rgb" }), confidence: "certain", reason: "扩图画布节点的原图输入" });
+    for (const side of Object.keys(op.pads) as Side[]) {
+      const src = literalSource(g, op.id, op.pads[side], "number");
+      if (src) suggestions.push({ binding: bindingFor(g, "pad", src.nodeId, src.input, { side, label: `扩展 ${side}` }), confidence: "certain", reason: `#${op.id}.${op.pads[side]} 的数值来源` });
+      else blockers.push(`扩图节点 #${op.id} 的「${op.pads[side]}」无法写入`);
+    }
+    const inputs = g[op.id].inputs;
+    const unit = Object.keys(inputs).find(k => /^(单位|unit)$/i.test(k));
+    const ratio = Object.keys(inputs).find(k => /ratio/i.test(k));
+    const layout = Object.keys(inputs).find(k => /layout/i.test(k));
+    outpaint = {
+      nodeId: op.id,
+      unit: unit && typeof inputs[unit] === "string" ? { input: unit, value: /^[a-z]/i.test(String(inputs[unit])) ? "pixels" : "像素" } : undefined,
+      ratio: ratio && typeof inputs[ratio] === "string" ? { input: ratio, value: /^[a-z]/i.test(String(inputs[ratio])) ? "free" : "自由比例" } : undefined,
+      layout: layout ? { input: layout } : undefined,
+      maxPad: 3000,
+    };
+  }
+
   // ── image + mask ──
   const loaders = ids.filter(id => LOAD_IMAGE.test(g[id].class_type) && typeof g[id].inputs.image === "string");
   const maskLoaders = ids.filter(id => LOAD_MASK.test(g[id].class_type));
@@ -72,7 +118,9 @@ export function recognize(g: ApiGraph): Recognition {
     return (numberedTitle(t) ?? 99) * -1 + (/加载图像|主图|原图|input|source/i.test(t) ? 50 : 0) + (consumers(g, id, 1).length ? 30 : 0);
   };
 
-  if (alphaMasked.length) {
+  if (op) {
+    mainImage = op.image;
+  } else if (alphaMasked.length) {
     const sorted = [...alphaMasked].sort((a, b) => rankImage(b) - rankImage(a));
     mainImage = sorted[0];
     const b = bindingFor(g, "image", mainImage, "image", { encoding: "rgba-alpha-mask" });
@@ -194,5 +242,5 @@ export function recognize(g: ApiGraph): Recognition {
     }
   }
 
-  return { suggestions, blockers, notes };
+  return { suggestions, blockers, notes, taskType, outpaint };
 }

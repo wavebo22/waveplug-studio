@@ -1,7 +1,7 @@
 // Builds the execution copy of a profile's workflow. The stored template is never mutated.
 
 import { type ApiGraph, cloneGraph } from "./api.ts";
-import { type Binding, type Profile, checkBinding, validateProfile } from "./profile.ts";
+import { type Binding, type Profile, type Side, checkBinding, validateProfile } from "./profile.ts";
 import { applyMaskLinks } from "./localMask.ts";
 import { MAX_REFERENCES, applyReferences } from "./references.ts";
 
@@ -19,6 +19,8 @@ export interface RunValues {
   seed: number | null;
   /** index of the variation within one run (keeps per-variation reference encodings separate) */
   variant?: number;
+  /** outpaint: pixels to add on each side */
+  pads?: Record<Side, number>;
 }
 
 export const MAX_SEED = 2 ** 50;
@@ -67,10 +69,26 @@ export function prepareRun(p: Profile, v: RunValues): Prepared {
         if (v.params && key in v.params) set(b, v.params[key]);
         break;
       }
+      case "pad": {
+        if (!v.pads) throw new Error("缺少扩展尺寸");
+        const max = p.options.outpaint?.maxPad ?? Infinity;
+        const px = Math.round(v.pads[b.side!]);
+        if (px > max) throw new Error(`单边扩展最多 ${max} 像素（当前 ${px}）`);
+        set(b, Math.max(0, px));
+        break;
+      }
       case "output": break;
     }
   }
   if (p.options.localMask?.enabled) applyMaskLinks(api, p.options.localMask.links);
+  // outpaint canvas: pads are exact pixels; ignore any ratio / layout chosen in ComfyUI's editor
+  const op = p.options.outpaint;
+  if (op && api[op.nodeId]) {
+    const inputs = api[op.nodeId].inputs;
+    if (op.unit) inputs[op.unit.input] = op.unit.value;
+    if (op.ratio) inputs[op.ratio.input] = op.ratio.value;
+    if (op.layout) inputs[op.layout.input] = "";
+  }
   // workflows without their own reference loaders: add the given references to the copy
   if (!p.bindings.some(b => b.role === "reference") && p.options.refSlots && v.references) {
     const files = Array.from({ length: MAX_REFERENCES }, (_, i) => v.references![i + 1]).filter((f): f is string => !!f);
