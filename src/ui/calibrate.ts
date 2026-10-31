@@ -113,6 +113,9 @@ export function openCalibration(host: HTMLElement, g: ApiGraph, rec: Recognition
         if (b) bindings.push({ ...b, role: r.role });
       }
       bindings.push(...params);
+      // 扩图: the four extension amounts are always the canvas node's own sources
+      const pads = init.bindings.filter(b => b.role === "pad");
+      bindings.push(...(pads.length ? pads : rec.suggestions.filter(x => x.binding.role === "pad").map(x => x.binding)));
       const bad = bindings.map(b => checkBinding(g, b)).find(s => !s.ok);
       if (bad && !bad.ok) { msg.textContent = bad.message; return; }
       close({ name: nameInput.value.trim() || init.name, bindings, options });

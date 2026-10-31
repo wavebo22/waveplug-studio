@@ -14,6 +14,7 @@ cpSync("plugin/icons", "dist/plugin/icons", { recursive: true });
 cpSync("plugin/styles.css", "dist/preview/styles.css");
 cpSync("src/preview/preview.html", "dist/preview/index.html");
 cpSync("tests/fixtures/ui/guhai_inpaint_ps.json", "dist/preview/fixture.json");
+cpSync("tests/fixtures/ui/guhai_remove_inpaint_outpaint.json", "dist/preview/fixture_outpaint.json");
 
 // development loader: separate plugin id, loads dist/plugin/index.js from F: at runtime
 const manifest = JSON.parse(readFileSync("plugin/manifest.json", "utf8"));

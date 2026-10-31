@@ -8,7 +8,7 @@ import { uiToApi } from "../core/workflow/uiToApi.ts";
 import { recognize } from "../core/workflow/recognize.ts";
 import { newProfile } from "../core/workflow/profile.ts";
 import type { Services } from "../app/services.ts";
-import type { Capture, DocInfo, FillGroup, LayerInfo, PsHost, Variation } from "../ps/host.ts";
+import type { Capture, DocInfo, FillGroup, LayerInfo, Pads, PsHost, Variation, VariationMask } from "../ps/host.ts";
 import { mountApp } from "../ui/app.ts";
 
 const HUES = [168, 24, 210, 280, 96, 340];
@@ -28,7 +28,7 @@ class MockHost implements PsHost {
   doc: DocInfo = { id: 1, name: "poster_v3.psd", width: 1920, height: 1200, mode: "RGBColorMode", bits: 8 };
   sel: Rect | null = { left: 1020, top: 260, right: 1640, bottom: 900 };
   groupSelected = true;
-  group: FillGroup = { docId: 1, layerId: 42, name: "橘子汁", rect: { left: 1020, top: 260, right: 1640, bottom: 900 } };
+  group: FillGroup = { kind: "inpaint", docId: 1, layerId: 42, name: "橘子汁", rect: { left: 1020, top: 260, right: 1640, bottom: 900 } };
   list: Variation[] = [1, 2, 4].map(n => ({ layerId: 100 + n, number: n, label: String(n), prompt: n === 4 ? "把杯子换成橘子汁" : "橘子汁，玻璃杯", visible: n === 4 }));
   private cbs: (() => void)[] = [];
 
@@ -37,8 +37,10 @@ class MockHost implements PsHost {
   docExists() { return true; }
   async selectionBounds() { return this.sel; }
   async activeFillGroup() { return this.groupSelected ? this.group : null; }
-  listFillGroups() { return this.list.length || this.groupSelected ? [{ layerId: this.group.layerId, name: this.group.name }, { layerId: 77, name: "价格牌" }] : []; }
-  async fillGroupById(_d: number, id: number) { return id === this.group.layerId ? this.group : id === 77 ? { ...this.group, layerId: 77, name: "价格牌", rect: { left: 200, top: 200, right: 600, bottom: 500 } } : null; }
+  listFillGroups() { return this.list.length || this.groupSelected ? [{ layerId: this.group.layerId, name: this.group.name, kind: this.group.kind }, { layerId: 77, name: "价格牌", kind: "inpaint" as const }] : []; }
+  async fillGroupById(_d: number, id: number) { return id === this.group.layerId ? this.group : id === 77 ? { ...this.group, kind: "inpaint" as const, layerId: 77, name: "价格牌", rect: { left: 200, top: 200, right: 600, bottom: 500 } } : null; }
+  async expandCanvas(_d: number, p: Pads) { this.doc = { ...this.doc, width: this.doc.width + p.left + p.right, height: this.doc.height + p.top + p.bottom }; return this.doc; }
+  async docThumbnail() { const c = document.createElement("canvas"); const r = this.doc.width / this.doc.height; c.width = r >= 1 ? 240 : Math.round(240 * r); c.height = r >= 1 ? Math.round(240 / r) : 240; const g = c.getContext("2d")!; const gr = g.createLinearGradient(0, 0, c.width, c.height); gr.addColorStop(0, "#c9a36b"); gr.addColorStop(1, "#7a3b2e"); g.fillStyle = gr; g.fillRect(0, 0, c.width, c.height); g.fillStyle = "rgba(255,255,255,.8)"; g.beginPath(); g.ellipse(c.width * .5, c.height * .55, c.width * .18, c.height * .25, 0, 0, 7); g.fill(); return c.toDataURL(); }
   async refreshFillGroup(g: FillGroup) { return g; }
   async groupMask(g: FillGroup): Promise<Pixels> { const w = g.rect.right - g.rect.left, h = g.rect.bottom - g.rect.top; return { width: w, height: h, channels: 1, data: new Uint8Array(w * h).fill(255) }; }
   async capture(_d: number, rect: Rect): Promise<Capture> {
@@ -56,8 +58,8 @@ class MockHost implements PsHost {
   async setFillVisible() {}
   async showVariation(_g: FillGroup, layerId: number) { this.list.forEach(v => { v.visible = v.layerId === layerId; }); }
   async deleteVariation(_g: FillGroup, layerId: number) { this.list = this.list.filter(v => v.layerId !== layerId); if (!this.list.some(v => v.visible) && this.list.length) this.list[this.list.length - 1].visible = true; }
-  async createFillGroup(_d: number, rect: Rect, prompt: string): Promise<FillGroup> { this.groupSelected = true; this.list = []; this.group = { ...this.group, rect, name: prompt.slice(0, 24) }; return this.group; }
-  async addVariation(_g: FillGroup, _png: Uint8Array, _p: Rect, prompt: string): Promise<Variation> {
+  async createFillGroup(_d: number, rect: Rect, prompt: string, pads?: Pads): Promise<FillGroup> { this.groupSelected = true; this.list = []; this.group = { ...this.group, kind: pads ? "outpaint" : "inpaint", pads, layerId: this.group.layerId + 1, rect, name: pads ? `←${pads.left} →${pads.right} ↑${pads.top} ↓${pads.bottom}` : prompt.slice(0, 24) }; return this.group; }
+  async addVariation(_g: FillGroup, _png: Uint8Array, _p: Rect, prompt: string, _m: VariationMask): Promise<Variation> {
     const n = Math.max(0, ...this.list.map(v => v.number)) + 1;
     const v = { layerId: 100 + n, number: n, label: String(n), prompt, visible: true };
     this.list.forEach(x => { x.visible = false; }); this.list.push(v);
@@ -82,14 +84,20 @@ class MockComfy implements Comfy {
       "图像缩放V2_孤海": { input: { required: { "图像": ["IMAGE"] }, optional: { "遮罩": ["MASK"] } }, output: ["IMAGE", "INT", "INT", "MASK"] },
     } as any;
   }
-  async listWorkflows() { return ["孤海 Qwen2.1 Turbo PS专用/Qwen-2.1-移除、局部重绘_PS插件连接本地comfyui专用_本机适配.json"]; }
-  async readWorkflow() { return fixtureUi; }
+  async listWorkflows() { return ["孤海 Qwen2.1 Turbo PS专用/Qwen-2.1-移除、局部重绘_PS插件连接本地comfyui专用_本机适配.json", "孤海 Qwen2.1 Turbo PS专用/Qwen-2.1-移除、局部重绘、扩图.json"]; }
+  async readWorkflow(path?: string) { return path && /扩图/.test(path) ? outpaintUi : fixtureUi; }
   last = { width: 16, height: 10 };
-  async uploadImage(b: Uint8Array, name: string) { this.last = pngSize(b) ?? this.last; await sleep(150); return "waveplug/" + name; }
-  async queue() { return { promptId: "mock-" + Date.now(), number: 1 }; }
+  out = this.last;
+  async uploadImage(b: Uint8Array, name: string) { if (!/_ref\d/.test(name)) this.last = pngSize(b) ?? this.last; await sleep(150); return "waveplug/" + name; }
+  async queue(api?: Record<string, { inputs: Record<string, unknown> }>) {
+    // outpaint: the result has the padded size (pads come from the canvas node's sources)
+    const pad = (id: string) => Number(api?.[id]?.inputs.value ?? 0);
+    this.out = api?.["314"] ? { width: this.last.width + pad("342") + pad("343"), height: this.last.height + pad("346") + pad("347") } : this.last;
+    return { promptId: "mock-" + Date.now(), number: 1 };
+  }
   async history(): Promise<HistoryEntry | null> { return null; }
   async view() { // same aspect as the uploaded image, tiny
-    const { width, height } = this.last;
+    const { width, height } = this.out;
     return encodePng({ width, height, channels: 3, data: new Uint8Array(width * height * 3).fill(90) });
   }
   async cancel() {}
@@ -101,15 +109,16 @@ class MockComfy implements Comfy {
       if (opts.signal?.aborted) throw new Error("已取消");
       onEvent({ type: "progress", promptId, value: i, max: 9, node: "274" });
     }
-    return { outputs: { "38": { images: [{ filename: "o.png", subfolder: "", type: "output" }] } }, status: { completed: true, status_str: "success" } };
+    return { outputs: { "315": { images: [{ filename: "o.png", subfolder: "", type: "output" }] }, "38": { images: [{ filename: "o.png", subfolder: "", type: "output" }] } }, status: { completed: true, status_str: "success" } };
   }
 }
 
 const sleep = (ms: number) => new Promise(r => setTimeout(r, ms));
-let fixtureUi: unknown = null;
+let fixtureUi: unknown = null, outpaintUi: unknown = null;
 
 async function boot() {
   fixtureUi = await (await fetch("fixture.json")).json();
+  outpaintUi = await (await fetch("fixture_outpaint.json")).json();
   const host = new MockHost(), comfy = new MockComfy();
   if (!localStorage.getItem("wp.profiles")) {
     const { api } = uiToApi(fixtureUi);

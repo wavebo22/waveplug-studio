@@ -241,3 +241,33 @@ button, .ub { font: inherit; color: inherit; background: none; border: 0; paddin
 .layer-thumb img { width: 100%; height: 100%; object-fit: contain; }
 .layer-name { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .ref-ext { font-size: 10px; font-weight: 700; color: var(--muted); }
+
+/* ── mode switch ── */
+.seg { display: flex; border: 1px solid var(--field-line); border-radius: 6px; padding: 2px; margin-bottom: 10px; background: var(--field); }
+.seg-btn { flex: 1 1 0; height: 26px; border-radius: 4px; font-size: var(--fs); color: var(--muted); }
+.seg-btn:hover { color: var(--text); background: var(--hover); }
+.seg-btn.on { background: var(--accent); color: var(--accent-ink); font-weight: 700; }
+
+/* ── expand editor (外补画板) ── */
+.xp-bar { display: flex; align-items: center; margin-bottom: 8px; }
+.xp-ratio { width: 96px; }
+.xp-quick { height: 24px; padding: 0 8px; margin-right: 6px; border: 1px solid var(--field-line); border-radius: var(--r); font-size: var(--fs-s); }
+.xp-quick:hover { background: var(--hover); border-color: var(--accent); }
+.xp-stage { position: relative; height: 210px; border-radius: 4px; overflow: hidden; background: rgba(0, 0, 0, .28); user-select: none; }
+.xp-frame { position: absolute; border: 1px dashed var(--accent-hi); background-color: rgba(63, 181, 159, .14); }
+.xp-img { position: absolute; background-color: #777; cursor: move; overflow: hidden; box-shadow: 0 0 0 1px rgba(255, 255, 255, .55); }
+.xp-h { position: absolute; width: 10px; height: 10px; background: var(--accent-hi); border: 1px solid var(--accent-ink); border-radius: 2px; }
+.xp-h-l, .xp-h-r { cursor: ew-resize; }
+.xp-h-t, .xp-h-b { cursor: ns-resize; }
+.xp-h-tl, .xp-h-br { cursor: nwse-resize; }
+.xp-h-tr, .xp-h-bl { cursor: nesw-resize; }
+.xp-fields { display: flex; margin-top: 8px; }
+.xp-field { flex: 1 1 0; display: flex; align-items: center; margin-right: 6px; min-width: 0; }
+.xp-field:last-child { margin-right: 0; }
+.xp-arrow { color: var(--accent-hi); font-weight: 700; margin-right: 4px; flex: none; }
+.xp-num { flex: 1 1 auto; width: auto; min-width: 0; }
+.xp-hint { display: flex; flex-direction: column; margin-top: 6px; font-size: var(--fs-s); }
+.xp-size { color: var(--text); }
+.xp-size b { color: var(--accent-hi); }
+.xp-to { color: var(--muted); }
+.xp-pic { display: block; width: 100%; height: 100%; pointer-events: none; }

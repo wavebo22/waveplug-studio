@@ -5,20 +5,21 @@ import { type Comfy, ComfyError } from "../core/comfy/client.ts";
 import type { Rect } from "../core/image/region.ts";
 import { asApiGraph } from "../core/workflow/api.ts";
 import { MAX_SEED, randomSeed } from "../core/workflow/inject.ts";
-import { type Binding, type Profile, carryOver, newProfile, validateProfile } from "../core/workflow/profile.ts";
+import { type Binding, type Profile, type TaskType, ROLE_LABEL, carryOver, newProfile, validateProfile } from "../core/workflow/profile.ts";
 import { recognize } from "../core/workflow/recognize.ts";
 import { uiToApi } from "../core/workflow/uiToApi.ts";
 import { findLocalMaskLinks } from "../core/workflow/localMask.ts";
 import { MAX_REFERENCES, findReferenceSlots } from "../core/workflow/references.ts";
 import { type RefSource, StashedResult, runInpaint } from "../app/generate.ts";
 import { type ProfileState, type Services, type Settings, store } from "../app/services.ts";
-import type { DocInfo, FillGroup, Variation } from "../ps/host.ts";
+import type { DocInfo, FillGroup, Pads, Variation } from "../ps/host.ts";
 import { log, withTimeout } from "../app/log.ts";
 import { openCalibration } from "./calibrate.ts";
 import { h, icon, replace } from "./dom.ts";
 import { encodePng } from "../core/image/png.ts";
 import { onWhite } from "../core/image/compose.ts";
-import { FILL_PREFIX } from "../ps/host.ts";
+import { EXPAND_PREFIX, FILL_PREFIX } from "../ps/host.ts";
+import { createExpandEditor } from "./expandEditor.ts";
 
 type Conn = { state: "checking" | "ok" | "down"; text: string };
 
@@ -63,7 +64,14 @@ type RefSlot = RefSource & { thumb?: string };
 export function mountApp(root: HTMLElement, svc: Services) {
   let settings: Settings = store.settings();
   let profiles: Profile[] = store.profiles();
-  let profile: Profile | null = profiles.find(p => p.id === settings.activeProfile) ?? profiles[0] ?? null;
+  // Two modes (局部重绘 / 扩图), each with its own current workflow.
+  const modeOf = (p: Profile): TaskType => p.taskType ?? "inpaint";
+  const pickFor = (m: TaskType) => {
+    const id = settings.activeByMode?.[m] ?? (m === "inpaint" ? settings.activeProfile : null);
+    return profiles.find(p => p.id === id && modeOf(p) === m) ?? profiles.find(p => modeOf(p) === m) ?? null;
+  };
+  let mode: TaskType = settings.mode ?? "inpaint";
+  let profile: Profile | null = pickFor(mode);
   let pstate: ProfileState | null = profile ? store.state(profile.id) : null;
   let comfy: Comfy = svc.comfy(settings.comfyUrl);
   let conn: Conn = { state: "checking", text: "连接中…" };
@@ -79,7 +87,9 @@ export function mountApp(root: HTMLElement, svc: Services) {
   const near = (a: Rect, b: Rect) => Math.abs(a.left - b.left) <= 2 && Math.abs(a.top - b.top) <= 2 && Math.abs(a.right - b.right) <= 2 && Math.abs(a.bottom - b.bottom) <= 2;
   /** true: the next 生成 adds variations to the current fill; false: it creates a new fill */
   const willAdd = () => {
-    if (!group) return false;
+    if (!group || group.kind !== mode) return false;
+    // 扩图: with no extension set, 生成 adds variations to the current expansion
+    if (mode === "outpaint") return !padTotal();
     if (!sel) return true;
     if (choice && choice.sel === selKey(sel)) return choice.add;
     return near(sel, group.rect);
@@ -91,12 +101,14 @@ export function mountApp(root: HTMLElement, svc: Services) {
   let run: null | { stage: string; progress: number | null; detail: string; promptId?: string; signal: { aborted: boolean } } = null;
   let status: { text: string; kind: "info" | "ok" | "error" } = { text: "就绪", kind: "info" };
   let stash: Uint8Array | null = null;
+  let pads: Pads = { left: 0, right: 0, top: 0, bottom: 0 };
+  const padTotal = () => pads.left + pads.right + pads.top + pads.bottom;
 
   // ── skeleton ──
   const connEl = h("button", { class: "conn", title: "ComfyUI 连接设置", onClick: () => openSettings() });
   const targetEl = h("span", { class: "target" });
   targetEl.addEventListener("click", () => {
-    if (!group || !sel) return;
+    if (!group || !sel || mode !== "inpaint") return;
     choice = { sel: selKey(sel), add: !willAdd() };
     renderHistory(); renderAction();
   });
@@ -121,6 +133,13 @@ export function mountApp(root: HTMLElement, svc: Services) {
   const advBody = h("div", { class: "adv-body" });
   const statusEl = h("div", { class: "status" });
   const sheetHost = h("div", { class: "sheet-host" });
+
+  const modeBtns = (["inpaint", "outpaint"] as const).map(m =>
+    h("button", { class: "seg-btn", onClick: () => setMode(m) }, m === "inpaint" ? "局部重绘" : "扩图"));
+  const modeEl = h("div", { class: "seg" }, ...modeBtns);
+  const expander = createExpandEditor({ maxPad: 3000, onChange: p => { pads = p; renderHistory(); renderSelection(); renderAction(); } });
+  const expandCard = h("section", { class: "card xp-card" }, expander.el);
+  let thumbKey = "";
 
   const mainEl = h("main", { class: "scroll" });
   const footEl = h("footer", { class: "foot" });
@@ -148,6 +167,8 @@ export function mountApp(root: HTMLElement, svc: Services) {
         svc.devReload ? h("button", { class: "icon-btn dev-reload", title: "重新加载开发版代码（F:\\waveplug\\studio\\dist\\plugin）", onClick: () => svc.devReload!() }, icon("refresh", 13)) : null),
       h("div", { class: "top-right" }, flowBtn, connEl)),
     (mainEl.append(
+      modeEl,
+      expandCard,
       h("section", { class: "card" },
         prompt, promptHint, refsEl,
         h("div", { class: "ctx-row" }, targetEl, selEl),
@@ -187,11 +208,13 @@ export function mountApp(root: HTMLElement, svc: Services) {
 
   function renderHistory() {
     const add = willAdd();
-    targetEl.textContent = add ? `添加到「${group!.name}」` : "新建填充";
-    targetEl.title = !group ? "用当前选区新建一个 AI 填充"
+    targetEl.textContent = add ? `添加到「${group!.name}」` : mode === "outpaint" ? "新建扩图" : "新建填充";
+    targetEl.title = mode === "outpaint"
+      ? (add ? `新变体加入「${group!.name}」，使用它原来的扩展尺寸。拖动上面的画布边缘可改为新建扩图` : "按上面设定的尺寸扩展画布，并生成扩展部分")
+      : !group ? "用当前选区新建一个 AI 填充"
       : add ? `新变体加入「${group.name}」，使用它原来的遮罩${sel ? "。点击改为用当前选区新建填充" : ""}`
       : `当前选区和「${group.name}」不同，将新建填充。点击改为添加到「${group.name}」`;
-    targetEl.className = "target " + (add ? "cont" : "new") + (group && sel ? " switchable" : "");
+    targetEl.className = "target " + (add ? "cont" : "new") + (group && sel && mode === "inpaint" ? " switchable" : "");
     replace(fillSel, ...fills.map(f => h("option", { value: String(f.layerId) }, f.name)));
     fillSel.hidden = fills.length < 1;
     fillSel.value = group ? String(group.layerId) : "";
@@ -214,7 +237,9 @@ export function mountApp(root: HTMLElement, svc: Services) {
     const shown = variations.find(x => x.visible) ?? variations[variations.length - 1];
     regenBtn.hidden = !group || !shown;
     regenBtn.disabled = !!run;
-    regenBtn.title = shown ? `用变体 ${shown.number} 的提示词「${shown.prompt || "移除"}」和原来的遮罩，再生成新的变体（不读取当前选区和输入框）` : "";
+    regenBtn.title = !shown ? "" : group?.kind === "outpaint"
+      ? `用变体 ${shown.number} 的提示词和原来的扩展尺寸，再生成新的变体`
+      : `用变体 ${shown.number} 的提示词「${shown.prompt || "移除"}」和原来的遮罩，再生成新的变体（不读取当前选区和输入框）`;
     replace(historyEl, ...tiles);
     const active = variations.find(v => v.visible);
     replace(varPromptEl, active ? h("span", null, h("span", { class: "muted" }, `变体 ${active.number}：`), active.prompt || "（无提示词）",
@@ -237,13 +262,16 @@ export function mountApp(root: HTMLElement, svc: Services) {
   }
 
   function renderFlows() {
-    flowName.textContent = profile ? profile.name : "导入工作流";
+    modeBtns.forEach((b, i) => b.classList.toggle("on", (i ? "outpaint" : "inpaint") === mode));
+    expandCard.hidden = mode !== "outpaint";
+    flowName.textContent = profile ? profile.name : mode === "outpaint" ? "导入扩图工作流" : "导入工作流";
     flowBtn.title = profile ? `工作流：${profile.name}（点击切换、导入或校准）` : "导入 ComfyUI 工作流";
     flowBtn.classList.toggle("warn", !!profile && validateProfile(profile).length > 0);
     countSel.value = String(pstate?.count ?? 1);
     const allowEmpty = profile?.options.allowEmptyPrompt;
     // UXP's native textarea can merge its placeholder into the typed text, so the hint lives outside it
-    promptHint.textContent = allowEmpty ? "描述要画进选区的内容；留空 = 移除选区内的内容" : "描述要画进选区的内容";
+    promptHint.textContent = mode === "outpaint" ? "描述扩展出来的内容（可留空，自动延续画面）"
+      : allowEmpty ? "描述要画进选区的内容；留空 = 移除选区内的内容" : "描述要画进选区的内容";
     prompt.title = promptHint.textContent;
     prompt.value = pstate?.prompt ?? "";
     promptHint.hidden = !!prompt.value;
@@ -277,19 +305,26 @@ export function mountApp(root: HTMLElement, svc: Services) {
 
   function renderSelection() {
     if (!doc) { selEl.textContent = "未打开文档"; return; }
+    if (mode === "outpaint") {
+      selEl.textContent = willAdd() && group?.pads ? `扩展 ${group.pads.left + group.pads.right} × ${group.pads.top + group.pads.bottom}`
+        : `画布 ${doc.width} × ${doc.height}` + (padTotal() ? ` → ${doc.width + pads.left + pads.right} × ${doc.height + pads.top + pads.bottom}` : "");
+      selEl.className = "sel-state" + (!padTotal() && !willAdd() ? " warn" : "");
+      return;
+    }
     if (sel) selEl.textContent = `选区 ${sel.right - sel.left} × ${sel.bottom - sel.top}`;
     else selEl.textContent = group ? "无选区 · 用原来的遮罩" : "无选区";
     selEl.className = "sel-state" + (!sel && !group ? " warn" : "");
   }
 
   function blockedReason(text = prompt.value, regenerating = false): string | null {
-    if (!profile) return "请先导入工作流";
+    if (!profile) return mode === "outpaint" ? "请先导入扩图工作流（含「外补画板」节点）" : "请先导入工作流";
     const problems = validateProfile(profile);
     if (problems.length) return "工作流需要校准：" + problems[0];
     if (conn.state !== "ok") return "未连接 ComfyUI";
     if (!doc) return "请先打开 PSD";
-    if (!regenerating && !sel && !group) return "请先建立选区";
-    if (!profile.options.allowEmptyPrompt && profile.bindings.some(b => b.role === "prompt") && !text.trim()) return "请输入提示词（留空移除可在「接口校准」里开启）";
+    if (mode === "outpaint" && !regenerating && !willAdd() && !padTotal()) return "拖动上面画布的边缘，设定要扩展的尺寸";
+    if (mode === "inpaint" && !regenerating && !sel && !willAdd()) return "请先建立选区";
+    if (modeOf(profile) === "inpaint" && !profile.options.allowEmptyPrompt && profile.bindings.some(b => b.role === "prompt") && !text.trim()) return "请输入提示词（留空移除可在「接口校准」里开启）";
     return null;
   }
 
@@ -307,7 +342,7 @@ export function mountApp(root: HTMLElement, svc: Services) {
     genBtn.className = "generate";
     genBtn.disabled = !!why;
     genBtn.title = why ?? "";
-    replace(genBtn, icon("spark"), h("span", null, willAdd() ? "生成更多变体" : "生成"));
+    replace(genBtn, icon("spark"), h("span", null, willAdd() ? "生成更多变体" : mode === "outpaint" ? "扩图" : "生成"));
     progEl.hidden = !why;
     replace(progEl, why ? h("div", { class: "stage muted" }, why,
       conn.state === "down" && svc.launch ? h("button", { class: "link", onClick: () => void launchComfy() }, settings.comfyLaunch ? "  一键启动" : "  设置启动文件") : null) : null);
@@ -367,13 +402,14 @@ export function mountApp(root: HTMLElement, svc: Services) {
     replace(advBody, ...rows);
   }
 
-  function renderAll() { renderConn(); renderHistory(); renderFlows(); renderRefs(); renderSelection(); renderAction(); renderAdvanced(); renderStatus(); }
+  function renderAll() { renderConn(); renderFlows(); renderHistory(); renderRefs(); renderSelection(); renderAction(); renderAdvanced(); renderStatus(); }
 
   // ── Photoshop state ──
   let refreshing = false, again = false;
   async function refresh() {
     if (refreshing) { again = true; return; }
     refreshing = true;
+    let switchTo: TaskType | null = null;
     try {
       doc = svc.host.activeDoc();
       sel = doc ? await svc.host.selectionBounds(doc.id) : null;
@@ -381,7 +417,10 @@ export function mountApp(root: HTMLElement, svc: Services) {
       const active = doc ? await svc.host.activeFillGroup() : null;
       // only a *newly* selected fill layer takes over, so picking another fill in the panel sticks
       const activeKey = active ? `${active.docId}:${active.layerId}` : "";
-      if (doc && active && activeKey !== lastActive && pinned.get(doc.id) !== active.layerId) { pinned.set(doc.id, active.layerId); choice = null; }
+      if (doc && active && activeKey !== lastActive && pinned.get(doc.id) !== active.layerId) {
+        pinned.set(doc.id, active.layerId); choice = null;
+        if (active.kind !== mode && !run) switchTo = active.kind; // selecting an expansion opens 扩图 and vice versa
+      }
       lastActive = activeKey;
       const pin = doc ? pinned.get(doc.id) : undefined;
       group = doc && pin !== undefined ? await svc.host.fillGroupById(doc.id, pin) : null;
@@ -391,8 +430,36 @@ export function mountApp(root: HTMLElement, svc: Services) {
       if (now !== lastGroupKey) { log("info", "current fill", now || "none", active ? "(selected)" : pin !== undefined ? "(pinned)" : ""); lastGroupKey = now; }
     } catch (e) { log("warn", "refresh failed", e); }
     finally { refreshing = false; }
+    if (switchTo) setMode(switchTo);
+    void loadDocThumb();
     renderHistory(); renderSelection(); renderAction();
     if (again) { again = false; void refresh(); }
+  }
+
+  /** The expand editor shows the current canvas; reloaded when the document or its size changes. */
+  async function loadDocThumb(force = false) {
+    if (mode !== "outpaint") return;
+    const key = doc ? `${doc.id}:${doc.width}x${doc.height}` : "";
+    if (key === thumbKey && !force) return;
+    thumbKey = key;
+    if (!doc) { expander.setImage(null, 1, 1); return; }
+    const d = doc;
+    expander.setImage(null, d.width, d.height);
+    try {
+      const url = await svc.host.docThumbnail(d.id, 480);
+      if (thumbKey === key) expander.setImage(url, d.width, d.height);
+    } catch (e) { log("warn", "doc thumbnail", e); }
+  }
+
+  function setMode(m: TaskType) {
+    if (m === mode || run) return;
+    mode = m; settings.mode = m; store.saveSettings(settings);
+    profile = pickFor(m);
+    pstate = profile ? store.state(profile.id) : null;
+    for (const k of Object.keys(refs)) delete refs[Number(k)];
+    renderAll();
+    void loadDocThumb();
+    if (profile && conn.state === "ok") void quietSync(profile);
   }
 
   async function showVariation(v: Variation) {
@@ -514,9 +581,15 @@ export function mountApp(root: HTMLElement, svc: Services) {
   function selectProfile(id: string) {
     profile = profiles.find(p => p.id === id) ?? null;
     pstate = profile ? store.state(profile.id) : null;
-    settings.activeProfile = profile?.id ?? null; store.saveSettings(settings);
+    if (profile) {
+      mode = modeOf(profile); settings.mode = mode;
+      settings.activeByMode = { ...settings.activeByMode, [mode]: profile.id };
+      if (mode === "inpaint") settings.activeProfile = profile.id;
+    }
+    store.saveSettings(settings);
     for (const k of Object.keys(refs)) delete refs[Number(k)];
-    renderFlows(); renderRefs(); renderAction(); renderAdvanced();
+    renderFlows(); renderRefs(); renderHistory(); renderSelection(); renderAction(); renderAdvanced();
+    void loadDocThumb();
     if (profile && conn.state === "ok") void quietSync(profile);
   }
 
@@ -536,12 +609,12 @@ export function mountApp(root: HTMLElement, svc: Services) {
         h("button", { class: "icon-btn", title: "关闭", onClick: () => sheet.remove() }, icon("close"))),
       h("div", { class: "sheet-body" },
         profiles.length ? null : h("div", { class: "muted" }, "还没有导入工作流。"),
-        ...profiles.map(p => {
+        ...[...profiles].sort((a, b) => Number(modeOf(a) !== mode) - Number(modeOf(b) !== mode)).map(p => {
           const bad = validateProfile(p).length > 0;
           return h("button", { class: "menu-item flow-item" + (p.id === profile?.id ? " on" : ""), onClick: () => { selectProfile(p.id); sheet.remove(); } },
             icon(p.id === profile?.id ? "check" : "flow"),
             h("span", { class: "grow" }, h("b", null, p.name), h("span", { class: "muted small block" },
-              (p.source?.kind === "comfy" ? "ComfyUI 已保存的工作流" : "API JSON") + (bad ? " · 需要校准" : ""))));
+              (modeOf(p) === "outpaint" ? "扩图 · " : "局部重绘 · ") + (p.source?.kind === "comfy" ? "ComfyUI 已保存的工作流" : "API JSON") + (bad ? " · 需要校准" : ""))));
         })),
       h("div", { class: "sheet-foot" },
         profile ? h("button", { class: "btn", onClick: () => { sheet.remove(); void calibrate(); } }, "校准当前") : null,
@@ -627,12 +700,14 @@ export function mountApp(root: HTMLElement, svc: Services) {
           h("div", { class: "sum-name" }, icon("check", 16), h("span", null, name)),
           h("div", { class: "muted small" }, "所有必需的接口都已自动找到，可以直接使用。"),
           h("div", { class: "sum" },
-            line("画面 + 选区", img, img?.encoding === "rgba-alpha-mask" ? "（选区写入透明通道）" : ""),
+            line(bindings.some(b => b.role === "pad") ? "原图" : "画面 + 选区", img, img?.encoding === "rgba-alpha-mask" ? "（选区写入透明通道）" : ""),
             line("选区遮罩", bindings.find(b => b.role === "mask")),
+            bindings.some(b => b.role === "pad") ? h("div", { class: "sum-row" }, h("span", { class: "sum-k" }, ROLE_LABEL.pad),
+              h("span", { class: "sum-v" }, bindings.filter(b => b.role === "pad").map(b => `#${b.nodeId}.${b.input}`).join("、") + "（由面板上的画布控制）")) : null,
             line("提示词", bindings.find(b => b.role === "prompt")),
             line("输出", bindings.find(b => b.role === "output")),
             params.length ? h("div", { class: "sum-row" }, h("span", { class: "sum-k" }, "高级参数"), h("span", { class: "sum-v" }, params.join("、"))) : null),
-          bindings.some(b => b.role === "prompt")
+          bindings.some(b => b.role === "prompt") && !bindings.some(b => b.role === "pad")
             ? h("label", { class: "check-row sum-opt" }, empty, h("span", null, "提示词留空时执行「移除选区内容」")) : null),
         h("div", { class: "sheet-foot" },
           h("button", { class: "btn", onClick: () => done("adjust") }, "手动调整"),
@@ -645,18 +720,25 @@ export function mountApp(root: HTMLElement, svc: Services) {
   async function adopt(name: string, api: ReturnType<typeof asApiGraph>, warnings: string[], source: Profile["source"] = { kind: "file" }) {
     const rec = recognize(api);
     if (warnings.length) rec.notes.push(...warnings);
+    /** 扩图 workflows: task type, the canvas node's fixed inputs, prompt may be empty */
+    const typed = (p: Profile) => {
+      p.taskType = rec.taskType;
+      if (rec.taskType === "outpaint") { p.options.outpaint = rec.outpaint; p.options.allowEmptyPrompt = true; }
+      else delete p.options.outpaint;
+      return p;
+    };
     const old = profiles.find(p => p.name === name);
     if (old) {
       const c = carryOver(old, api);
       if (!c.broken.length && !validateProfile(c.profile).length) {
-        Object.assign(old, { ...c.profile, source, updatedAt: Date.now() });
+        typed(Object.assign(old, { ...c.profile, source, updatedAt: Date.now() }));
         saveProfiles(old.id);
         setStatus(`已更新「${old.name}」，原有绑定全部有效`, "ok");
         return;
       }
       const result = await openCalibration(sheetHost, api, rec, { name, bindings: c.profile.bindings, options: c.profile.options }, false);
       if (!result) return;
-      Object.assign(old, { ...c.profile, source, name: result.name, bindings: result.bindings, options: result.options, updatedAt: Date.now() });
+      typed(Object.assign(old, { ...c.profile, source, name: result.name, bindings: result.bindings, options: result.options, updatedAt: Date.now() }));
       saveProfiles(old.id);
       setStatus(`已更新「${old.name}」：保留 ${c.kept.length} 项，自动迁移 ${c.remapped.length} 项` + (c.broken.length ? `，${c.broken.length} 项已重新绑定` : ""), "ok");
       return;
@@ -664,14 +746,14 @@ export function mountApp(root: HTMLElement, svc: Services) {
     const options = newProfile(name, api, []).options;
     const auto = autoBindings(rec);
     if (auto) {
-      options.allowEmptyPrompt = looksLikeRemoval(name, auto);
+      options.allowEmptyPrompt = rec.taskType === "outpaint" || looksLikeRemoval(name, auto);
       const choice = await openSummary(name, auto, options);
       if (!choice) return;
       if (choice === "ok") {
         const p = newProfile(name, api, auto);
         p.options = options;
         p.source = source;
-        profiles.push(p);
+        profiles.push(typed(p));
         saveProfiles(p.id);
         setStatus(`已导入「${p.name}」，可以开始生成`, "ok");
         return;
@@ -682,7 +764,7 @@ export function mountApp(root: HTMLElement, svc: Services) {
     const p = newProfile(result.name, api, result.bindings);
     p.options = result.options;
     p.source = source;
-    profiles.push(p);
+    profiles.push(typed(p));
     saveProfiles(p.id);
     setStatus(`已导入「${p.name}」`, "ok");
   }
@@ -708,7 +790,7 @@ export function mountApp(root: HTMLElement, svc: Services) {
     const auto = !!profile && !profile.bindings.some(b => b.role === "reference");
     const tag = auto ? `图${slot + 1}` : `参考 ${slot}`;
     const set = (r: RefSlot) => { refs[slot] = r; sheet.remove(); renderRefs(); };
-    const layers = doc ? svc.host.listLayers(doc.id).filter(l => l.kind !== "group" && !l.name.startsWith(FILL_PREFIX)) : [];
+    const layers = doc ? svc.host.listLayers(doc.id).filter(l => l.kind !== "group" && !l.name.startsWith(FILL_PREFIX) && !l.name.startsWith(EXPAND_PREFIX)) : [];
     const list = h("div", { class: "layer-list" }, ...layers.map(l => {
       const img = h("div", { class: "layer-thumb" }, icon("image", 14));
       const row = h("button", { class: "layer-row", title: l.name, onClick: () => {
@@ -786,6 +868,11 @@ export function mountApp(root: HTMLElement, svc: Services) {
       const c = carryOver(p, api);
       if (c.broken.length) return `ComfyUI 中的工作流已修改，${c.broken.length} 项绑定失效（${c.broken[0].reason}），请点「接口校准」重新确认`;
       Object.assign(p, { api: c.profile.api, bindings: c.profile.bindings, source: { kind: "comfy", path }, updatedAt: Date.now() });
+      if (modeOf(p) === "outpaint") {
+        const op = recognize(api).outpaint;
+        if (!op) return "ComfyUI 中的工作流里找不到「外补画板」节点了。如果它和局部重绘共用一个工作流，请在 ComfyUI 里切回扩图模式后保存";
+        p.options.outpaint = op;
+      }
       if (!p.options.cropDefault) Object.assign(p.options, { sendScope: "crop", cropMargin: 1, cropDefault: true });
       refreshMaskLinks(p);
       store.saveProfiles(profiles);
@@ -815,6 +902,9 @@ export function mountApp(root: HTMLElement, svc: Services) {
   async function regenerate() {
     const v = variations.find(x => x.visible) ?? variations[variations.length - 1];
     if (!group || !v || run) return;
+    // a fill is regenerated with a workflow of its own kind
+    if (group.kind !== mode) setMode(group.kind);
+    if (!profile) { setStatus(group.kind === "outpaint" ? "请先导入扩图工作流" : "请先导入局部重绘工作流", "error"); return; }
     await generate({ addTo: group, prompt: v.prompt === "移除" ? "" : v.prompt });
   }
 
@@ -836,6 +926,7 @@ export function mountApp(root: HTMLElement, svc: Services) {
       const res = await runInpaint(svc.host, comfy, {
         profile: p, prompt: again ? again.prompt : cleanPrompt(prompt.value), seed: ps.seedMode === "fixed" ? ps.seed : null, params: effectiveParams(p, ps),
         addTo: again ? again.addTo : willAdd() ? group ?? undefined : undefined,
+        pads: modeOf(p) === "outpaint" ? { ...pads } : undefined,
         references: Object.fromEntries(Object.entries(refs).map(([k, v]) => [k, v])),
         count: ps.count ?? 1,
         fullRun: !!ps.fullRun,
@@ -852,7 +943,9 @@ export function mountApp(root: HTMLElement, svc: Services) {
         debug: settings.debugFiles ? svc.debugSave : undefined,
       });
       if (ps.seedMode === "random") { ps.seed = res.seeds[res.seeds.length - 1]; store.saveState(p.id, ps); }
-      setStatus(`${res.continued ? "已加入" : "已新建 AI 填充，"}变体 ${res.variations.map(v => v.number).join("、")} · seed ${res.seeds.join("、")}`, "ok");
+      // the canvas is now expanded; the next 生成 adds variations unless a new extension is drawn
+      if (modeOf(p) === "outpaint" && !res.continued) { pads = { left: 0, right: 0, top: 0, bottom: 0 }; expander.setPads(pads); }
+      setStatus(`${res.continued ? "已加入" : modeOf(p) === "outpaint" ? "已扩展画布，" : "已新建 AI 填充，"}变体 ${res.variations.map(v => v.number).join("、")} · seed ${res.seeds.join("、")}`, "ok");
     } catch (e) {
       log("error", "generate failed", e);
       if (e instanceof StashedResult) { stash = e.png; setStatus(e.message, "error"); }
@@ -861,6 +954,7 @@ export function mountApp(root: HTMLElement, svc: Services) {
       run = null;
       renderAll();
       await refresh();
+      void loadDocThumb(true);
     }
   }
 

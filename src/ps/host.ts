@@ -7,6 +7,9 @@
 
 import type { Pixels } from "../core/image/png.ts";
 import type { Rect } from "../core/image/region.ts";
+import type { Side } from "../core/workflow/profile.ts";
+
+export type Pads = Record<Side, number>;
 
 export interface DocInfo {
   id: number;
@@ -19,6 +22,9 @@ export interface DocInfo {
 }
 
 export interface FillGroup {
+  kind: "inpaint" | "outpaint";
+  /** outpaint: pixels added on each side (the original image sits inside at left/top) */
+  pads?: Pads;
   docId: number;
   /** the layer group's id */
   layerId: number;
@@ -47,6 +53,16 @@ export interface Capture {
 }
 
 export const FILL_PREFIX = "AI填充 · ";
+export const EXPAND_PREFIX = "AI扩图 · ";
+
+export const padsLabel = (p: Pads) => `←${p.left} →${p.right} ↑${p.top} ↓${p.bottom}`;
+export function parsePads(name: string): Pads | null {
+  const m = /←(\d+)\s*→(\d+)\s*↑(\d+)\s*↓(\d+)/.exec(name);
+  return m ? { left: +m[1], right: +m[2], top: +m[3], bottom: +m[4] } : null;
+}
+
+/** Layer mask for a variation: `pixels` cover `rect`; everything outside is hidden or revealed. */
+export interface VariationMask { pixels: Pixels; rect: Rect; outside: "hide" | "reveal" }
 
 export interface PsHost {
   readonly kind: "uxp" | "mock";
@@ -57,7 +73,7 @@ export interface PsHost {
   /** The fill group the active layer is (or is inside), else null. */
   activeFillGroup(): Promise<FillGroup | null>;
   /** All AI fill groups in the document (top to bottom). */
-  listFillGroups(docId: number): { layerId: number; name: string }[];
+  listFillGroups(docId: number): { layerId: number; name: string; kind: "inpaint" | "outpaint" }[];
   /** A fill group by id, or null if it no longer exists / has no variations. */
   fillGroupById(docId: number, layerId: number): Promise<FillGroup | null>;
   /** Fails with a readable message if the group is gone. */
@@ -78,11 +94,15 @@ export interface PsHost {
   /** Shows / hides the whole fill (compare with the original). Not recorded in history. */
   setFillVisible(g: FillGroup, visible: boolean): Promise<void>;
   deleteVariation(g: FillGroup, layerId: number): Promise<void>;
-  /** New, empty fill group for the area `rect`. */
-  createFillGroup(docId: number, rect: Rect, prompt: string): Promise<FillGroup>;
-  /** Places the PNG (which covers `placement` in document pixels) as the next variation, masked by
-   *  `mask` (1-channel over the group rect, everything outside hidden), and shows it. */
-  addVariation(g: FillGroup, png: Uint8Array, placement: Rect, prompt: string, mask: Pixels): Promise<Variation>;
+  /** New, empty fill group for the area `rect` (an outpaint group when `pads` is given). */
+  createFillGroup(docId: number, rect: Rect, prompt: string, pads?: Pads): Promise<FillGroup>;
+  /** Places the PNG (which covers `placement` in document pixels) as the next variation with the
+   *  given layer mask, and shows it. */
+  addVariation(g: FillGroup, png: Uint8Array, placement: Rect, prompt: string, mask: VariationMask): Promise<Variation>;
+  /** Grows the canvas by `pads` (part of the document's history). */
+  expandCanvas(docId: number, pads: Pads): Promise<DocInfo>;
+  /** Small composite image of the whole document, for the expand editor. */
+  docThumbnail(docId: number, maxEdge: number): Promise<string>;
   thumbnail(g: FillGroup, layerId: number, size: number): Promise<string>;
   /** Called (debounced) whenever document, selection or layers may have changed. */
   onChange(cb: () => void): void;

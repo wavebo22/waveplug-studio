@@ -5,7 +5,7 @@ import { encodePng, type Pixels, withPlacementHints } from "../core/image/png.ts
 import { type Rect, nonZeroBounds, rectH, rectW } from "../core/image/region.ts";
 import { placeGray } from "../core/image/compose.ts";
 import { flushLog, log } from "../app/log.ts";
-import { type Capture, type DocInfo, FILL_PREFIX, type FillGroup, type LayerInfo, type PsHost, type Variation } from "./host.ts";
+import { type Capture, type DocInfo, EXPAND_PREFIX, FILL_PREFIX, type FillGroup, type LayerInfo, type Pads, type PsHost, type Variation, type VariationMask, padsLabel, parsePads } from "./host.ts";
 
 declare const require: (m: string) => any;
 
@@ -51,7 +51,9 @@ function findLayer(layers: any[], id: number): any | null {
   return null;
 }
 
-const isFillGroup = (l: any) => !!l && String(l.kind) === "group" && String(l.name).startsWith(FILL_PREFIX);
+const isFillGroup = (l: any) => !!l && String(l.kind) === "group" && (String(l.name).startsWith(FILL_PREFIX) || String(l.name).startsWith(EXPAND_PREFIX));
+const isExpandGroup = (l: any) => String(l?.name ?? "").startsWith(EXPAND_PREFIX);
+const groupName = (l: any) => String(l.name).slice((isExpandGroup(l) ? EXPAND_PREFIX : FILL_PREFIX).length);
 
 async function selectLayer(layerId: number) {
   await play([{ _obj: "select", _target: [{ _ref: "layer", _id: layerId }], makeVisible: false, _options: DONT }]);
@@ -136,6 +138,12 @@ export class UxpHost implements PsHost {
   private rects = new Map<string, Rect>();
 
   private async groupInfo(doc: any, group: any): Promise<FillGroup> {
+    if (isExpandGroup(group)) {
+      // outpaint groups cover the (expanded) canvas; the pads are part of the group name
+      const pads = parsePads(String(group.name));
+      if (!pads) throw new Error("AI 扩图图层组的名称被改动，无法读取扩展尺寸");
+      return { kind: "outpaint", pads, docId: doc.id, layerId: group.id, name: groupName(group), rect: { left: 0, top: 0, right: Math.round(doc.width), bottom: Math.round(doc.height) } };
+    }
     const vs = variationLayers(group);
     if (!vs.length) throw new Error("AI 填充图层组里没有变体");
     const key = `${doc.id}:${group.id}`;
@@ -154,12 +162,12 @@ export class UxpHost implements PsHost {
         rect = lb;
       }
     }
-    return { docId: doc.id, layerId: group.id, name: String(group.name).slice(FILL_PREFIX.length), rect };
+    return { kind: "inpaint", docId: doc.id, layerId: group.id, name: groupName(group), rect };
   }
 
-  listFillGroups(docId: number): { layerId: number; name: string }[] {
-    const out: { layerId: number; name: string }[] = [];
-    const walk = (ls: any[]) => { for (const l of ls) { if (isFillGroup(l)) out.push({ layerId: l.id, name: String(l.name).slice(FILL_PREFIX.length) }); else if (l.layers?.length) walk(l.layers); } };
+  listFillGroups(docId: number): { layerId: number; name: string; kind: "inpaint" | "outpaint" }[] {
+    const out: { layerId: number; name: string; kind: "inpaint" | "outpaint" }[] = [];
+    const walk = (ls: any[]) => { for (const l of ls) { if (isFillGroup(l)) out.push({ layerId: l.id, name: groupName(l), kind: isExpandGroup(l) ? "outpaint" : "inpaint" }); else if (l.layers?.length) walk(l.layers); } };
     if (this.docExists(docId)) walk(docById(docId).layers);
     return out;
   }
@@ -176,7 +184,7 @@ export class UxpHost implements PsHost {
     const doc = docById(g.docId);
     const group = findLayer(doc.layers, g.layerId);
     if (!isFillGroup(group)) throw new Error("AI 填充图层组已被删除或改名");
-    return { ...g, name: String(group.name).slice(FILL_PREFIX.length) };
+    return isExpandGroup(group) ? this.groupInfo(doc, group) : { ...g, name: groupName(group) };
   }
 
   async groupMask(g: FillGroup): Promise<Pixels> {
@@ -294,17 +302,43 @@ export class UxpHost implements PsHost {
     });
   }
 
-  async createFillGroup(docId: number, rect: Rect, prompt: string): Promise<FillGroup> {
-    return step("WavePlug 新建 AI 填充", docId, async () => {
+  async createFillGroup(docId: number, rect: Rect, prompt: string, pads?: Pads): Promise<FillGroup> {
+    return step(pads ? "WavePlug 新建 AI 扩图" : "WavePlug 新建 AI 填充", docId, async () => {
       const doc = docById(docId);
       ps().app.activeDocument = doc;
-      const group = await doc.createLayerGroup({ name: FILL_PREFIX + (prompt.trim().slice(0, 24) || "移除") });
+      const name = pads ? EXPAND_PREFIX + padsLabel(pads) : FILL_PREFIX + (prompt.trim().slice(0, 24) || "移除");
+      const group = await doc.createLayerGroup({ name });
+      if (pads) { await group.move(doc.layers[0], ps().constants.ElementPlacement.PLACEBEFORE); return { kind: "outpaint" as const, pads, docId, layerId: group.id, name: groupName(group), rect }; }
       this.rects.set(`${docId}:${group.id}`, rect);
-      return { docId, layerId: group.id, name: String(group.name).slice(FILL_PREFIX.length), rect };
+      return { kind: "inpaint" as const, docId, layerId: group.id, name: groupName(group), rect };
     });
   }
 
-  async addVariation(g: FillGroup, png: Uint8Array, placement: Rect, prompt: string, mask: Pixels): Promise<Variation> {
+  async expandCanvas(docId: number, pads: Pads): Promise<DocInfo> {
+    return step("WavePlug 扩展画布", docId, async () => {
+      const { app, constants } = ps();
+      const doc = docById(docId);
+      app.activeDocument = doc;
+      const w = Math.round(doc.width), h = Math.round(doc.height);
+      // two resizes: grow right/bottom anchored top-left, then left/top anchored bottom-right
+      if (pads.right || pads.bottom) await doc.resizeCanvas(w + pads.right, h + pads.bottom, constants.AnchorPosition.TOPLEFT);
+      if (pads.left || pads.top) await doc.resizeCanvas(w + pads.right + pads.left, h + pads.bottom + pads.top, constants.AnchorPosition.BOTTOMRIGHT);
+      log("info", "canvas expanded", w, h, "->", Math.round(doc.width), Math.round(doc.height));
+      return info(doc);
+    });
+  }
+
+  async docThumbnail(docId: number, maxEdge: number): Promise<string> {
+    const doc = docById(docId);
+    const w = Math.round(doc.width), h = Math.round(doc.height);
+    const px = await modal("WavePlug 画布缩略图", () => readPixels({ documentID: docId, targetSize: w >= h ? { width: Math.min(w, maxEdge) } : { height: Math.min(h, maxEdge) } }));
+    const bytes = encodePng(px);
+    let bin = "";
+    for (let i = 0; i < bytes.length; i += 0x8000) bin += String.fromCharCode(...bytes.subarray(i, i + 0x8000));
+    return "data:image/png;base64," + btoa(bin);
+  }
+
+  async addVariation(g: FillGroup, png: Uint8Array, placement: Rect, prompt: string, mask: VariationMask): Promise<Variation> {
     const target = docById(g.docId);
     const dpi = Number(target.resolution) || 72;
     log("info", "document", JSON.stringify({ mode: String(target.mode), profile: target.colorProfileName ?? null, dpi }));
@@ -345,9 +379,10 @@ export class UxpHost implements PsHost {
       // mask: hide everything, then reveal the selection inside the fill rect
       await trace("mask");
       await selectLayer(layer.id);
-      await play([{ _obj: "make", new: { _class: "channel" }, at: { _ref: "channel", _enum: "channel", _value: "mask" }, using: { _enum: "userMaskEnabled", _value: "hideAll" }, _options: DONT }]);
-      const m = await imaging.createImageDataFromBuffer(mask.data, { width: mask.width, height: mask.height, components: 1, colorSpace: "Grayscale", chunky: true });
-      try { await imaging.putLayerMask({ documentID: doc.id, layerID: layer.id, imageData: m, targetBounds: { left: g.rect.left, top: g.rect.top } }); }
+      await play([{ _obj: "make", new: { _class: "channel" }, at: { _ref: "channel", _enum: "channel", _value: "mask" }, using: { _enum: "userMaskEnabled", _value: mask.outside === "hide" ? "hideAll" : "revealAll" }, _options: DONT }]);
+      const mp = mask.pixels;
+      const m = await imaging.createImageDataFromBuffer(mp.data, { width: mp.width, height: mp.height, components: 1, colorSpace: "Grayscale", chunky: true });
+      try { await imaging.putLayerMask({ documentID: doc.id, layerID: layer.id, imageData: m, targetBounds: { left: mask.rect.left, top: mask.rect.top } }); }
       finally { m.dispose(); }
 
       for (const v of variationLayers(group)) v.layer.visible = v.layer.id === layer.id;

@@ -1,7 +1,7 @@
 // Everything the UI depends on, injected so the same UI runs in Photoshop and in the browser preview.
 
 import type { Comfy } from "../core/comfy/client.ts";
-import type { Profile } from "../core/workflow/profile.ts";
+import type { Profile, TaskType } from "../core/workflow/profile.ts";
 import type { PsHost } from "../ps/host.ts";
 
 export interface PickedImage { name: string; bytes: Uint8Array; url: string }
@@ -34,6 +34,9 @@ export interface Settings {
   debugFiles: boolean;
   /** ComfyUI start script / executable for one-click start (e.g. run_nvidia_gpu.bat) */
   comfyLaunch: string;
+  /** panel mode and the workflow last used in each mode */
+  mode?: TaskType;
+  activeByMode?: Partial<Record<TaskType, string>>;
 }
 export interface ProfileState { prompt: string; params: Record<string, number | boolean>; seedMode: "random" | "fixed"; seed: number; count?: number; fullRun?: boolean }
 

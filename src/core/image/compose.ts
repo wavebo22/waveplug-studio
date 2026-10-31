@@ -43,6 +43,25 @@ export function maskFile(selection: Pixels, encoding: "mask-alpha" | "mask-gray"
   return { width: selection.width, height: selection.height, channels: 4, data: out };
 }
 
+/**
+ * Outpaint seam: a mask over the original image area that is 0 (keep the original) inside and
+ * ramps to 255 over `feather` pixels at each edge that was extended, so the generated surround
+ * blends into the original without covering it.
+ */
+export function outpaintSeam(w: number, h: number, pads: { left: number; right: number; top: number; bottom: number }, feather: number): Pixels {
+  const out = new Uint8Array(w * h);
+  const f = Math.max(1, Math.round(feather));
+  for (let y = 0; y < h; y++) {
+    const vy = Math.max(pads.top > 0 ? 1 - y / f : 0, pads.bottom > 0 ? 1 - (h - 1 - y) / f : 0);
+    for (let x = 0; x < w; x++) {
+      const vx = Math.max(pads.left > 0 ? 1 - x / f : 0, pads.right > 0 ? 1 - (w - 1 - x) / f : 0);
+      const v = Math.max(vx, vy);
+      if (v > 0) out[y * w + x] = Math.round(255 * Math.min(1, v));
+    }
+  }
+  return { width: w, height: h, channels: 1, data: out };
+}
+
 /** RGBA → RGB composited over white (transparent layer areas would otherwise turn black in LoadImage). */
 export function onWhite(p: Pixels): Pixels {
   if (p.channels !== 4) return { width: p.width, height: p.height, channels: 3, data: toRgb(p) };
