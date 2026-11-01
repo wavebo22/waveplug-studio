@@ -90,7 +90,8 @@ export function prepareRun(p: Profile, v: RunValues): Prepared {
       case "output": break;
     }
   }
-  if (p.options.localMask?.enabled) applyMaskLinks(api, p.options.localMask.links);
+  // "只重绘选区内" is an inpaint feature: an outpaint / text-to-image encoder must keep its own mask
+  if (p.taskType === "inpaint" && p.options.localMask?.enabled) applyMaskLinks(api, p.options.localMask.links);
   // outpaint canvas: pads are exact pixels; ignore any ratio / layout chosen in ComfyUI's editor
   const op = p.options.outpaint;
   if (op && api[op.nodeId]) {

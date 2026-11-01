@@ -58,6 +58,8 @@ const isGenerateGroup = (l: any) => String(l?.name ?? "").startsWith(GENERATE_PR
 const groupKind = (l: any) => isExpandGroup(l) ? "outpaint" as const : isGenerateGroup(l) ? "txt2img" as const : "inpaint" as const;
 const groupName = (l: any) => String(l.name).slice((PREFIXES.find(p => String(l.name).startsWith(p)) ?? "").length);
 
+const rectKey = (doc: any, groupId: number) => `${doc.id}:${groupId}:${Math.round(doc.width)}x${Math.round(doc.height)}`;
+
 async function selectLayer(layerId: number) {
   await play([{ _obj: "select", _target: [{ _ref: "layer", _id: layerId }], makeVisible: false, _options: DONT }]);
 }
@@ -87,12 +89,17 @@ async function grayInto(r: any, want: Rect, fill: number): Promise<Pixels> {
   } finally { r.imageData.dispose(); }
 }
 
-async function tempPng(bytes: Uint8Array): Promise<string> {
+/** Writes a temporary PNG for placeEvent; `remove()` deletes it once Photoshop has placed it. */
+async function tempPng(bytes: Uint8Array): Promise<{ token: string; remove(): Promise<void> }> {
   const fs = uxpStorage().localFileSystem;
   const folder = await fs.getTemporaryFolder();
   const file = await folder.createFile(`waveplug_${Date.now()}.png`, { overwrite: true });
   await file.write(bytes, { format: uxpStorage().formats.binary });
-  return fs.createSessionToken(file);
+  return {
+    token: fs.createSessionToken(file),
+    // a full-size result can be tens of MB; without this every variation stayed in the temp folder
+    remove: async () => { try { await file.delete(); } catch (e) { log("warn", "temp png not deleted", e); } },
+  };
 }
 
 function variationLayers(group: any): { layer: any; n: number; prompt: string }[] {
@@ -137,19 +144,24 @@ export class UxpHost implements PsHost {
   }
 
   /** The fill area = non-zero bounds of a variation's layer mask (variations may extend past it). */
-  /** fill rect per "docId:groupId" — reading a mask needs a modal scope, so it is done once */
+  /** fill rect per document + group + canvas size — reading a mask needs a modal scope, so it is
+   *  done once; a canvas resize (扩图) moves the layers, so the size is part of the key */
   private rects = new Map<string, Rect>();
 
   private async groupInfo(doc: any, group: any): Promise<FillGroup> {
     if (isExpandGroup(group)) {
-      // outpaint groups cover the (expanded) canvas; the pads are part of the group name
+      // an expansion covers the canvas as it was right after expanding; the pads are in the name.
+      // Its variations are opaque and placed over exactly that area, so their bounds give it even
+      // after the canvas was expanded again (which moves every layer).
       const pads = parsePads(String(group.name));
       if (!pads) throw new Error("AI 扩图图层组的名称被改动，无法读取扩展尺寸");
-      return { kind: "outpaint", pads, docId: doc.id, layerId: group.id, name: groupName(group), rect: { left: 0, top: 0, right: Math.round(doc.width), bottom: Math.round(doc.height) } };
+      const first = variationLayers(group)[0];
+      const rect = first ? boundsRect(first.layer) : { left: 0, top: 0, right: Math.round(doc.width), bottom: Math.round(doc.height) };
+      return { kind: "outpaint", pads, docId: doc.id, layerId: group.id, name: groupName(group), rect };
     }
     const vs = variationLayers(group);
     if (!vs.length) throw new Error("AI 填充图层组里没有变体");
-    const key = `${doc.id}:${group.id}`;
+    const key = rectKey(doc, group.id);
     let rect = this.rects.get(key);
     if (!rect) {
       const lb = boundsRect(vs[0].layer);
@@ -313,7 +325,7 @@ export class UxpHost implements PsHost {
       const name = pads ? EXPAND_PREFIX + padsLabel(pads) : (gen ? GENERATE_PREFIX : FILL_PREFIX) + (prompt.trim().slice(0, 24) || (gen ? "无提示词" : "移除"));
       const group = await doc.createLayerGroup({ name });
       if (pads) { await group.move(doc.layers[0], ps().constants.ElementPlacement.PLACEBEFORE); return { kind: "outpaint" as const, pads, docId, layerId: group.id, name: groupName(group), rect }; }
-      this.rects.set(`${docId}:${group.id}`, rect);
+      this.rects.set(rectKey(doc, group.id), rect);
       return { kind: gen ? "txt2img" as const : "inpaint" as const, docId, layerId: group.id, name: groupName(group), rect };
     });
   }
@@ -355,9 +367,9 @@ export class UxpHost implements PsHost {
     const target = docById(g.docId);
     const dpi = Number(target.resolution) || 72;
     log("info", "document", JSON.stringify({ mode: String(target.mode), profile: target.colorProfileName ?? null, dpi }));
-    const token = await tempPng(withPlacementHints(png, dpi));
+    const temp = await tempPng(withPlacementHints(png, dpi));
     const trace = async (what: string) => { log("info", "write-back", what); await flushLog(); };
-    return step("WavePlug AI 填充", g.docId, async () => {
+    try { return await step("WavePlug AI 填充", g.docId, async () => {
       const { app, imaging, constants } = ps();
       const userDoc = app.activeDocument;
       const doc = docById(g.docId);
@@ -369,7 +381,7 @@ export class UxpHost implements PsHost {
       await trace(`place v${n} ${rectW(placement)}x${rectH(placement)}`);
       await selectLayer(group.id);
       await play([{
-        _obj: "placeEvent", null: { _path: token, _kind: "local" },
+        _obj: "placeEvent", null: { _path: temp.token, _kind: "local" },
         freeTransformCenterState: { _enum: "quadCenterState", _value: "QCSAverage" },
         offset: { _obj: "offset", horizontal: { _unit: "pixelsUnit", _value: 0 }, vertical: { _unit: "pixelsUnit", _value: 0 } },
         _options: DONT,
@@ -403,7 +415,7 @@ export class UxpHost implements PsHost {
       if (userDoc && userDoc.id !== doc.id && this.docExists(userDoc.id)) app.activeDocument = userDoc;
       await trace(`done v${n}`);
       return { layerId: layer.id, number: n, label: String(n), prompt: prompt.trim(), visible: true };
-    });
+    }); } finally { await temp.remove(); }
   }
 
   async thumbnail(g: FillGroup, layerId: number, size: number): Promise<string> {

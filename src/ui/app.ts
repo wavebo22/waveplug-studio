@@ -964,7 +964,8 @@ export function mountApp(root: HTMLElement, svc: Services) {
     const had = !!p.options.refSlots;
     p.options.refSlots = slots ?? undefined;
     if (!!slots !== had) { log("info", "reference slots", JSON.stringify(slots)); renderRefs(); }
-    const links = findLocalMaskLinks(p.api, objectInfo);
+    // only inpaint: in 扩图 / 文生图 workflows such a link would feed e.g. an empty mask to the encoder
+    const links = modeOf(p) === "inpaint" ? findLocalMaskLinks(p.api, objectInfo) : [];
     const was = p.options.localMask;
     p.options.localMask = links.length ? { enabled: was ? was.enabled : true, links } : undefined;
     store.saveProfiles(profiles);
@@ -1010,6 +1011,9 @@ export function mountApp(root: HTMLElement, svc: Services) {
         progress: (f, t) => { current.progress = f; current.detail = t ?? ""; renderAction(); renderHistory(); },
         promptQueued: id => { current.promptId = id; },
         variationAdded: (g, v) => {
+          // the canvas has grown: clear the extension at once, so a later failure / cancel
+          // can't leave it set and expand the canvas a second time
+          if (g.kind === "outpaint" && group?.layerId !== g.layerId && padTotal()) { pads = { left: 0, right: 0, top: 0, bottom: 0 }; expander.setPads(pads); }
           if (group?.layerId !== g.layerId) variations = [];
           group = g; pinned.set(g.docId, g.layerId); choice = null;
           variations = [...variations.map(x => ({ ...x, visible: false })), v]; renderHistory();
@@ -1017,8 +1021,6 @@ export function mountApp(root: HTMLElement, svc: Services) {
         debug: settings.debugFiles ? svc.debugSave : undefined,
       });
       if (ps.seedMode === "random") { ps.seed = res.seeds[res.seeds.length - 1]; store.saveState(p.id, ps); }
-      // the canvas is now expanded; the next 生成 adds variations unless a new extension is drawn
-      if (modeOf(p) === "outpaint" && !res.continued) { pads = { left: 0, right: 0, top: 0, bottom: 0 }; expander.setPads(pads); }
       setStatus(`${res.continued ? "已加入" : modeOf(p) === "outpaint" ? "已扩展画布，" : modeOf(p) === "txt2img" ? "已生成，" : "已新建 AI 填充，"}变体 ${res.variations.map(v => v.number).join("、")} · seed ${res.seeds.join("、")}`, "ok");
     } catch (e) {
       log("error", "generate failed", e);

@@ -260,9 +260,11 @@ async function runOutpaint(host: PsHost, comfy: Comfy, input: RunInput, hooks: R
   if (target && target.kind !== "outpaint") throw new Error("当前选中的是局部重绘的填充，请在扩图模式下新建扩图");
   const pads = target ? target.pads! : input.pads;
   if (!pads || !(pads.left || pads.right || pads.top || pads.bottom)) throw new Error("请先在画布上拖出要扩展的范围");
-  // original image area: the whole canvas for a new expand, the inner area for an existing one
+  // the expansion's whole area (where results go) and the original image inside it: the whole
+  // canvas for a new expand; for an existing one its own area, which may no longer be the canvas
+  const area: Rect = target ? target.rect : { left: 0, top: 0, right: doc.width + pads.left + pads.right, bottom: doc.height + pads.top + pads.bottom };
   const orig: Rect = target
-    ? { left: pads.left, top: pads.top, right: doc.width - pads.right, bottom: doc.height - pads.bottom }
+    ? { left: area.left + pads.left, top: area.top + pads.top, right: area.right - pads.right, bottom: area.bottom - pads.bottom }
     : { left: 0, top: 0, right: doc.width, bottom: doc.height };
   const w = rectW(orig), h = rectH(orig);
   if (w <= 0 || h <= 0) throw new Error("画布尺寸与扩图记录不符（画布可能被裁剪过），请新建扩图");
@@ -314,14 +316,14 @@ async function runOutpaint(host: PsHost, comfy: Comfy, input: RunInput, hooks: R
     try {
       if (!group) {
         await host.expandCanvas(doc.id, pads);
-        group = await host.createFillGroup(doc.id, { left: 0, top: 0, right: outW, bottom: outH }, input.prompt, pads);
+        group = await host.createFillGroup(doc.id, area, input.prompt, pads);
       } else group = await host.refreshFillGroup(group);
     } catch (e) {
       throw new StashedResult((e as Error).message + "，结果未写入", png);
     }
-    const inner: Rect = { left: pads.left, top: pads.top, right: pads.left + w, bottom: pads.top + h };
+    const inner: Rect = { left: area.left + pads.left, top: area.top + pads.top, right: area.left + pads.left + w, bottom: area.top + pads.top + h };
     const feather = Math.max(4, Math.min(32, Math.round(Math.min(w, h) * 0.01)));
-    const v = await host.addVariation(group, png, { left: 0, top: 0, right: outW, bottom: outH }, input.prompt,
+    const v = await host.addVariation(group, png, area, input.prompt,
       { pixels: outpaintSeam(w, h, pads, feather), rect: inner, outside: "reveal" });
     variations.push(v); seeds.push(run.seed);
     hooks.variationAdded?.(group, v, run.seed);

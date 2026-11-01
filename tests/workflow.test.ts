@@ -182,6 +182,11 @@ test("outpaint workflow: image + four pads recognised, pads injected as exact pi
   assert.equal(run.api["314"].inputs.gh_visual_layout, "");
   assert.equal(run.api["308"].inputs.image, "src.png");
   assert.throws(() => prepareRun(p, { image: "a", prompt: "", seed: 1, pads: { left: 3500, right: 0, top: 0, bottom: 0 } }), /3000/);
+
+  // "只重绘选区内" belongs to inpaint: a stored link must not reach an outpaint encoder
+  p.options.localMask = { enabled: true, links: [{ nodeId: "332", input: "mask", from: ["329", 3] }] };
+  const noMask = prepareRun(p, { image: "src.png", prompt: "", seed: 3, pads: { left: 1, right: 0, top: 0, bottom: 0 } });
+  assert.equal(noMask.api["332"].inputs.mask, undefined);
 });
 
 test("text-to-image: size node, optional reference, forced custom ratio", () => {
