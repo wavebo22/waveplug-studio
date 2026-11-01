@@ -78,14 +78,14 @@ class MockHost implements PsHost {
   onChange(cb: () => void) { this.cbs.push(cb); }
 }
 
-/** 工具: a few layers, three instances of one smart object; the first two and the pixel layer start selected. */
+/** 工具: a few layers, three instances of one smart object; the first two, the text and the pixel layer start selected. */
 class MockTools implements LayerTools {
   layers: ToolLayer[] = [
     { id: 1, name: "徽章", kind: "smartObject", selected: true, contentId: "a", file: "徽章.psb" },
     { id: 2, name: "徽章 拷贝", kind: "smartObject", selected: true, contentId: "a", file: "徽章.psb" },
     { id: 3, name: "徽章 拷贝 2", kind: "smartObject", selected: false, contentId: "a", file: "徽章.psb" },
     { id: 4, name: "产品图", kind: "smartObject", selected: false, contentId: "b", file: "产品.png" },
-    { id: 5, name: "标题", kind: "text", selected: false },
+    { id: 5, name: "标题", kind: "text", selected: true },
     { id: 6, name: "背景", kind: "pixel", selected: true },
   ];
   private next = 100;
@@ -107,6 +107,7 @@ class MockTools implements LayerTools {
   private pixels() { return { done: this.layers.filter(l => l.selected && l.kind === "pixel").length, skipped: [] }; }
   async trimEdges() { const sel = this.layers.filter(l => l.selected && (l.kind === "pixel" || l.kind === "smartObject")); return this.done({ done: sel.length, skipped: [], note: sel.some(l => l.kind === "smartObject") ? "1 个智能对象的内容不是 PNG，用图层蒙版隐藏了杂色" : undefined }); }
   async countIslands() { await sleep(200); return this.layers.some(l => l.selected && (l.kind === "pixel" || l.kind === "smartObject")) ? 26 : 0; }
+  async splitTextLines() { return this.done({ done: this.layers.filter(l => l.selected && l.kind === "text").length, skipped: [] }); }
   async splitIslands() { const so = this.layers.filter(l => l.selected && l.kind === "smartObject").length; return this.done({ done: this.pixels().done + so, skipped: [], note: so ? `${so} 个智能对象已栅格化` : undefined }); }
 }
 

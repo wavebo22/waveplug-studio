@@ -93,6 +93,7 @@ export function createToolsView(tools: LayerTools, status: Status) {
     soList.hidden = !smart.length;
     buttons.forEach((b, i) => { (b as any).disabled = busy || (list[i].needs === "smart" ? !smart.length : !sel.length); });
     renderPixel();
+    renderText();
   }
 
   async function refresh() {
@@ -151,6 +152,17 @@ export function createToolsView(tools: LayerTools, status: Status) {
     splitBtn.classList.toggle("primary", pending !== null);
   };
 
+  // ── 文字 ──
+  const textInfo = h("div", { class: "tool-info" });
+  const textBtn = h("button", { class: "btn tool-btn wide", title: "多行文字拆成每行一个文字图层，位置、字体、样式不变，放进一个同名图层组。按回车或 Shift+回车 换的行都算一行" }, "按行拆分文字");
+  textBtn.addEventListener("click", () => void use({ label: "按行拆分文字", verb: "已拆分", after: "文字图层，每行放进了同名图层组", run: () => tools.splitTextLines() }));
+  const renderText = () => {
+    const n = (layers ?? []).filter(l => l.selected && l.kind === "text").length;
+    replace(textInfo, !layers ? "未打开文档" : n ? `已选 ${n} 个文字图层` : "选中多行的文字图层");
+    textInfo.className = "tool-info" + (n ? "" : " muted");
+    (textBtn as any).disabled = busy || !n;
+  };
+
   const [unique, same, ...rest] = buttons;
   const el = h("div", { class: "tools" },
     h("section", { class: "card" },
@@ -168,7 +180,10 @@ export function createToolsView(tools: LayerTools, status: Status) {
       h("div", { class: "tool-pair" },
         h("div", { class: "param", title: "比这小的零碎小块不单独成层，留在「零碎」图层里" }, h("div", { class: "param-top" }, h("span", { class: "param-label" }, "最小面积"), h("span", { class: "muted small" }, "像素")), num("minArea", 100000)),
         h("div", { class: "param", title: "相距不超过这么多像素的几块算作同一块（比如文字的笔画、虚线）" }, h("div", { class: "param-top" }, h("span", { class: "param-label" }, "合并距离"), h("span", { class: "muted small" }, "像素")), num("merge", 500))),
-      splitBtn));
+      splitBtn),
+    h("section", { class: "card" },
+      h("div", { class: "card-head" }, h("span", { class: "label" }, "文字")),
+      textInfo, textBtn));
   render();
   return { el, refresh };
 }

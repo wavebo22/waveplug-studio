@@ -7,6 +7,7 @@ import type { LayerTools } from "./host.ts";
 import { findLayer, grayInto, modal, play, step } from "./uxpHost.ts";
 import { cleanMask, cleanRgba, cleanSettings, findIslands } from "../core/layers/islands.ts";
 import { decodePng } from "../core/image/decode.ts";
+import { lineName, onlyLine, textLines } from "../core/layers/text.ts";
 import { encodePng } from "../core/image/png.ts";
 import type { Pixels } from "../core/image/png.ts";
 import type { Rect } from "../core/image/region.ts";
@@ -506,5 +507,46 @@ export class UxpTools implements LayerTools {
       return n;
     });
     return { done, skipped, note: rasterized ? `${rasterized} 个智能对象已栅格化` : undefined };
+  }
+
+  /** Each line: a duplicate of the layer (same style, transform and effects) showing only that line,
+   *  the other lines emptied so it stays in place; then the empty lines are dropped and the layer
+   *  moved back by however far that shifted the glyphs. */
+  async splitTextLines(): Promise<ToolResult> {
+    const { doc, layers } = await this.layers();
+    const skipped: string[] = [], targets: ToolLayer[] = [];
+    for (const l of layers.filter(x => x.selected && x.kind === "text")) {
+      if (l.locked) skipped.push(`${l.name}：图层已锁定`); else targets.push(l);
+    }
+    if (!targets.length) return { done: 0, skipped };
+    const made: number[] = [];
+    let mixed = 0;
+    const done = await step("WavePlug 按行拆分文字", doc.id, () => each(targets, skipped, async l => {
+      const layer = findLayer(doc.layers, l.id);
+      if (!layer) throw new Error("图层已不存在");
+      const text = String(layer.textItem.contents ?? "");
+      const lines = textLines(text);
+      if (lines.length < 2) throw new Error("只有一行");
+      const [info] = await play([{ _obj: "get", _target: [{ _property: "textKey" }, layerRef(l.id)] }]);
+      if ((info?.textKey?.textStyleRange?.length ?? 1) > 1) mixed++;
+      const parts: any[] = [];
+      // bottom line first: every duplicate lands just above the original, so the first line ends on top
+      for (const line of [...lines].reverse()) {
+        const dup = await layer.duplicate();
+        dup.textItem.contents = onlyLine(text, line.index);
+        const at = layerRect(dup);
+        dup.textItem.contents = line.text;
+        const now = layerRect(dup);
+        if (now.left !== at.left || now.top !== at.top) await dup.translate(at.left - now.left, at.top - now.top);
+        dup.name = lineName(line.text);
+        parts.push(dup);
+      }
+      await act({ _obj: "delete", _target: [layerRef(l.id)] });
+      const group = await doc.createLayerGroup({ name: l.name, fromLayers: parts.reverse() });
+      made.push(group.id);
+      log("info", "split text", l.name, lines.length);
+    }));
+    if (made.length) await modal("WavePlug 选中拆分结果", () => selectLayers(made)).catch(e => log("warn", "reselect", e));
+    return { done, skipped, note: mixed ? `${mixed} 个图层原来混用了多种样式，拆分后每行统一成该行开头的样式` : undefined };
   }
 }

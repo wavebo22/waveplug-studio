@@ -146,4 +146,6 @@ export interface LayerTools {
   countIslands(minArea: number, merge: number): Promise<number>;
   /** 像素岛: each island (≥ minArea px; pieces ≤ merge px apart count as one) into its own layer */
   splitIslands(minArea: number, merge: number): Promise<ToolResult>;
+  /** 按行拆分文字: each line of the selected text layers into its own text layer, in place */
+  splitTextLines(): Promise<ToolResult>;
 }
