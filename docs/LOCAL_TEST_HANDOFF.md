@@ -1,4 +1,5 @@
 > **历史文档**：这是 0.1.x 首次实机测试时给本地 AI 的交接说明，当时的智能对象方案已在 0.2.0 被「AI 填充图层组」取代。安装与开发请看 [DEVELOPMENT.md](DEVELOPMENT.md)。
+> **2026-11-01 安装器位置更新**：Adobe UPIA 已迁到 `D:\App\Adobe-UPIA-Extract\UPI64-unpacked\UnifiedPluginInstallerAgent\UnifiedPluginInstallerAgent.exe`。本文出现的 J 盘 UPIA 路径仅为历史记录，今后请使用 `scripts\install_ccx.cmd` 或 [DEVELOPMENT.md](DEVELOPMENT.md) 中的新路径。
 
 # WavePlug Studio · 本地实机测试交接（给 mainpc 上的 AI）
 

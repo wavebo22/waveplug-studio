@@ -210,3 +210,28 @@ test("text-to-image: size node, optional reference, forced custom ratio", () => 
   assert.equal(withRef.api["193"].inputs.image, "waveplug/r.png");
   assert.throws(() => prepareRun(p, { prompt: "猫", seed: 7, size: { width: 20000, height: 10 } }), /最多/);
 });
+
+test("upscale (VOSR2): loaded image + scale factor, no mask", () => {
+  const g = api("vosr2_upscale");
+  const r = recognize(g);
+  assert.equal(r.taskType, "upscale");
+  assert.deepEqual(r.blockers, []);
+  assert.equal(find(r, "image")[0].binding.nodeId, "2");
+  assert.equal(find(r, "image")[0].binding.encoding, "rgb");
+  // the factor is set on the 「easy int」 feeding TESpeedVOSR2Image.scale
+  assert.deepEqual(find(r, "scale").map(s => `${s.binding.nodeId}.${s.binding.input}`), ["4.value"]);
+  assert.equal(find(r, "reference").length, 0);
+  const p = newProfile("up", g, r.suggestions.filter(s => s.confidence === "certain").map(s => s.binding));
+  p.taskType = "upscale"; p.options.upscale = r.upscale; p.options.allowEmptyPrompt = true;
+  assert.deepEqual(validateProfile(p), []);
+  const run = prepareRun(p, { image: "src.png", prompt: "", seed: 5, scale: 2 });
+  assert.equal(run.api["4"].inputs.value, 2);
+  assert.equal(run.api["2"].inputs.image, "src.png");
+  assert.equal(run.api["11"].inputs.seed, 5);
+  assert.throws(() => prepareRun(p, { image: "src.png", prompt: "", seed: 5 }), /放大倍数/);
+});
+
+test("an inpaint workflow with a scale node is still inpaint", () => {
+  assert.equal(recognize(api("guhai_inpaint_ps")).taskType, "inpaint");
+  assert.equal(recognize(api("guhai_remove_inpaint_outpaint")).taskType, "outpaint");
+});

@@ -15,7 +15,7 @@ python scripts\package_ccx.py dev    # → releases\WavePlug_Studio_DEV_<版本>
 
 ## 安装（Adobe UPIA）
 
-mainpc 不使用 UXP Developer Tool，而是用 J 盘提取出的 Adobe UPIA 安装 `.ccx`：
+mainpc 不使用 UXP Developer Tool，而是使用 `D:\App\Adobe-UPIA-Extract\UPI64-unpacked\UnifiedPluginInstallerAgent\UnifiedPluginInstallerAgent.exe` 安装 `.ccx`：
 
 1. 完全关闭 Photoshop。
 2. 右键 `scripts\install_ccx.cmd` → **以管理员身份运行**。它会切到 C 盘工作目录、安装 `releases` 中**最新生成**的 `.ccx`，并把环境与 `/list all` 结果写入 `reports\install_*.log`。

@@ -3,6 +3,7 @@
 import { ComfyClient } from "./core/comfy/client.ts";
 import type { Services } from "./app/services.ts";
 import { UxpHost } from "./ps/uxpHost.ts";
+import { UxpTools } from "./ps/uxpTools.ts";
 import { log, setLogSink } from "./app/log.ts";
 import { mountApp } from "./ui/app.ts";
 import { diagnose, uxpFetch } from "./ps/net.ts";
@@ -43,6 +44,7 @@ const host = new UxpHost();
 
 const services: Services = {
   host,
+  tools: new UxpTools(),
   comfy: base => new ComfyClient(base, { fetch: uxpFetch, WebSocket }),
   diagnose,
   debugSave: DEV ? (name, png) => {

@@ -8,7 +8,8 @@ import { uiToApi } from "../core/workflow/uiToApi.ts";
 import { recognize } from "../core/workflow/recognize.ts";
 import { newProfile } from "../core/workflow/profile.ts";
 import type { Services } from "../app/services.ts";
-import type { Capture, DocInfo, FillGroup, LayerInfo, Pads, PsHost, Variation, VariationMask } from "../ps/host.ts";
+import type { ActiveLayer, Capture, DocInfo, FillGroup, LayerInfo, LayerTools, Pads, PsHost, Variation, VariationMask } from "../ps/host.ts";
+import { type ToolLayer, sameSourceIds, selectedContents, uniquePlan } from "../core/layers/smart.ts";
 import { mountApp } from "../ui/app.ts";
 
 const HUES = [168, 24, 210, 280, 96, 340];
@@ -52,6 +53,9 @@ class MockHost implements PsHost {
     for (let y = s.top - rect.top; y < s.bottom - rect.top; y++) sel.fill(255, y * w + (s.left - rect.left), y * w + (s.right - rect.left));
     return { doc: this.doc, rect, image: { width: w, height: h, channels: 3, data: new Uint8Array(w * h * 3).fill(128) }, selection: { width: w, height: h, channels: 1, data: sel } };
   }
+  activeLayer(): ActiveLayer | null { return this.docOpen ? { id: 7, name: "产品参考", kind: "pixel", rect: { left: 300, top: 200, right: 700, bottom: 650 } } : null; }
+  async layerImage() { const w = 400, h = 450, data = new Uint8Array(w * h * 4); for (let i = 0; i < w * h; i++) { data[i * 4] = 200; data[i * 4 + 1] = 120; data[i * 4 + 2] = 60; data[i * 4 + 3] = (i % w) > 40 ? 255 : 0; } await sleep(100); return { pixels: { width: w, height: h, channels: 4 as const, data }, rect: { left: 300, top: 200, right: 700, bottom: 650 } }; }
+  async placeUpscaledLayer(_d: number, _l: number, _png: Uint8Array, _r: Rect, name: string) { console.log("placed smart object", name); await sleep(150); return 99; }
   listLayers(): LayerInfo[] { return [{ id: 1, name: "标题文字", depth: 0, kind: "text" }, { id: 42, name: "AI填充 · 橘子汁", depth: 0, kind: "group" }, { id: 7, name: "产品参考", depth: 0, kind: "pixel" }, { id: 3, name: "背景", depth: 0, kind: "pixel" }]; }
   async layerPixels(): Promise<Pixels> { return { width: 8, height: 8, channels: 3, data: new Uint8Array(192) }; }
   async layerThumbnail(_d: number, id: number) { return swatch(id, 64, 64); }
@@ -74,6 +78,38 @@ class MockHost implements PsHost {
   onChange(cb: () => void) { this.cbs.push(cb); }
 }
 
+/** 工具: a few layers, three instances of one smart object; the first two and the pixel layer start selected. */
+class MockTools implements LayerTools {
+  layers: ToolLayer[] = [
+    { id: 1, name: "徽章", kind: "smartObject", selected: true, contentId: "a", file: "徽章.psb" },
+    { id: 2, name: "徽章 拷贝", kind: "smartObject", selected: true, contentId: "a", file: "徽章.psb" },
+    { id: 3, name: "徽章 拷贝 2", kind: "smartObject", selected: false, contentId: "a", file: "徽章.psb" },
+    { id: 4, name: "产品图", kind: "smartObject", selected: false, contentId: "b", file: "产品.png" },
+    { id: 5, name: "标题", kind: "text", selected: false },
+    { id: 6, name: "背景", kind: "pixel", selected: true },
+  ];
+  private next = 100;
+  constructor(private changed: () => void) {}
+  async inspect() { return this.layers.map(l => ({ ...l })); }
+  private async done<T>(r: T) { await sleep(300); this.changed(); return r; }
+  async makeUnique() {
+    const { copy, skipped } = uniquePlan(this.layers);
+    for (const l of copy) l.contentId = "c" + this.next++;
+    return this.done({ done: copy.length, skipped });
+  }
+  async selectSameSource() { const ids = sameSourceIds(this.layers); this.layers.forEach(l => { l.selected = ids.includes(l.id); }); return this.done({ done: ids.length, skipped: [] }); }
+  async convert(separately: boolean) { const n = this.layers.filter(l => l.selected).length; return this.done({ done: separately ? n : 1, skipped: [] }); }
+  private smart() { const sel = this.layers.filter(l => l.selected); return { done: sel.filter(l => l.kind === "smartObject").length, skipped: sel.filter(l => l.kind !== "smartObject").map(l => l.name + "：不是智能对象") }; }
+  async unpack() { return this.done(this.smart()); }
+  async resetTransform() { return this.done(this.smart()); }
+  async replaceContents() { const r = selectedContents(this.layers); return this.done({ done: r.layers.length, skipped: r.skipped }); }
+  async exportContents() { const r = selectedContents(this.layers); return this.done({ done: r.layers.length, skipped: r.skipped }); }
+  private pixels() { return { done: this.layers.filter(l => l.selected && l.kind === "pixel").length, skipped: [] }; }
+  async trimEdges() { const sel = this.layers.filter(l => l.selected && (l.kind === "pixel" || l.kind === "smartObject")); return this.done({ done: sel.length, skipped: [], note: sel.some(l => l.kind === "smartObject") ? "1 个智能对象的内容不是 PNG，用图层蒙版隐藏了杂色" : undefined }); }
+  async countIslands() { await sleep(200); return this.layers.some(l => l.selected && (l.kind === "pixel" || l.kind === "smartObject")) ? 26 : 0; }
+  async splitIslands() { const so = this.layers.filter(l => l.selected && l.kind === "smartObject").length; return this.done({ done: this.pixels().done + so, skipped: [], note: so ? `${so} 个智能对象已栅格化` : undefined }); }
+}
+
 class MockComfy implements Comfy {
   readonly base = "http://127.0.0.1:8188";
   online = true;
@@ -86,16 +122,18 @@ class MockComfy implements Comfy {
       "图像缩放V2_孤海": { input: { required: { "图像": ["IMAGE"] }, optional: { "遮罩": ["MASK"] } }, output: ["IMAGE", "INT", "INT", "MASK"] },
     } as any;
   }
-  async listWorkflows() { return ["孤海 Qwen2.1 Turbo PS专用/Qwen-2.1-移除、局部重绘_PS插件连接本地comfyui专用_本机适配.json", "孤海 Qwen2.1 Turbo PS专用/Qwen-2.1-移除、局部重绘、扩图.json", "Qwen Image 2.1 文生图.json"]; }
-  async readWorkflow(path?: string) { return path && /扩图/.test(path) ? outpaintUi : path && /文生图/.test(path) ? txt2imgUi : fixtureUi; }
+  async listWorkflows() { return ["孤海 Qwen2.1 Turbo PS专用/Qwen-2.1-移除、局部重绘_PS插件连接本地comfyui专用_本机适配.json", "孤海 Qwen2.1 Turbo PS专用/Qwen-2.1-移除、局部重绘、扩图.json", "Qwen Image 2.1 文生图.json", "▶▷VOSR2-图像放大.json"]; }
+  async readWorkflow(path?: string) { return path && /扩图/.test(path) ? outpaintUi : path && /文生图/.test(path) ? txt2imgUi : path && /放大/.test(path) ? upscaleUi : fixtureUi; }
   last = { width: 16, height: 10 };
   out = this.last;
   async uploadImage(b: Uint8Array, name: string) { if (!/_ref\d/.test(name)) this.last = pngSize(b) ?? this.last; await sleep(150); return "waveplug/" + name; }
-  async queue(api?: Record<string, { inputs: Record<string, unknown> }>) {
+  async queue(api?: Record<string, { class_type?: string; inputs: Record<string, unknown> }>) {
     // outpaint: the result has the padded size (pads come from the canvas node's sources)
     const pad = (id: string) => Number(api?.[id]?.inputs.value ?? 0);
     const size = api?.["39"]?.inputs;
     if (size && typeof size["自定宽度"] === "number") { this.out = { width: size["自定宽度"] as number, height: size["自定高度"] as number }; return { promptId: "mock-" + Date.now(), number: 1 }; }
+    // upscale: the factor is on node 4 (easy int)
+    if (api?.["11"]?.class_type === "TESpeedVOSR2Image") { const f = pad("4"); this.out = { width: this.last.width * f, height: this.last.height * f }; return { promptId: "mock-" + Date.now(), number: 1 }; }
     this.out = api?.["314"] ? { width: this.last.width + pad("342") + pad("343"), height: this.last.height + pad("346") + pad("347") } : this.last;
     return { promptId: "mock-" + Date.now(), number: 1 };
   }
@@ -113,17 +151,18 @@ class MockComfy implements Comfy {
       if (opts.signal?.aborted) throw new Error("已取消");
       onEvent({ type: "progress", promptId, value: i, max: 9, node: "274" });
     }
-    return { outputs: { "315": { images: [{ filename: "o.png", subfolder: "", type: "output" }] }, "38": { images: [{ filename: "o.png", subfolder: "", type: "output" }] } }, status: { completed: true, status_str: "success" } };
+    return { outputs: { "315": { images: [{ filename: "o.png", subfolder: "", type: "output" }] }, "38": { images: [{ filename: "o.png", subfolder: "", type: "output" }] }, "1": { images: [{ filename: "o.png", subfolder: "", type: "output" }] } }, status: { completed: true, status_str: "success" } };
   }
 }
 
 const sleep = (ms: number) => new Promise(r => setTimeout(r, ms));
-let fixtureUi: unknown = null, outpaintUi: unknown = null, txt2imgUi: unknown = null;
+let fixtureUi: unknown = null, outpaintUi: unknown = null, txt2imgUi: unknown = null, upscaleUi: unknown = null;
 
 async function boot() {
   fixtureUi = await (await fetch("fixture.json")).json();
   outpaintUi = await (await fetch("fixture_outpaint.json")).json();
   txt2imgUi = await (await fetch("fixture_txt2img.json")).json();
+  upscaleUi = await (await fetch("fixture_upscale.json")).json();
   const host = new MockHost(), comfy = new MockComfy();
   if (!localStorage.getItem("wp.profiles")) {
     const { api } = uiToApi(fixtureUi);
@@ -135,7 +174,7 @@ async function boot() {
     localStorage.setItem("wp.state." + p.id, JSON.stringify({ prompt: "磨砂玻璃瓶，瓶身有细小水珠，柔和侧光", params: {}, seedMode: "random", seed: 0 }));
   }
   const svc: Services = {
-    host, comfy: () => comfy,
+    host, comfy: () => comfy, tools: new MockTools(() => host.changed()),
     async pickJson() { return null; },
     async pickImage() { return { name: "参考.png", bytes: new Uint8Array(), url: swatch(3, 80, 80) }; },
     async saveImage() { return true; },

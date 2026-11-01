@@ -3,7 +3,8 @@
 // group is hidden while reading), and every write-back targets the document captured at the start.
 
 import { encodePng, type Pixels } from "../core/image/png.ts";
-import { fullSelection, imageFile, isEmptySelection, maskFile, onWhite, outpaintSeam } from "../core/image/compose.ts";
+import { bleedTransparent, fullSelection, hasTransparency, imageFile, isEmptySelection, maskFile, onWhite, outpaintSeam, resizeAlpha, withAlpha } from "../core/image/compose.ts";
+import { decodePng } from "../core/image/decode.ts";
 import { MAX_REFERENCES } from "../core/workflow/references.ts";
 import { type Rect, clampRect, expandBy, rectH, rectW } from "../core/image/region.ts";
 import { type Comfy, type JobEvent, outputImage, pngSize, utf8 } from "../core/comfy/client.ts";
@@ -35,7 +36,14 @@ export interface RunInput {
   /** text-to-image profiles: size to generate. The result goes into `addTo`'s area, else the
    *  selection, else the whole canvas, else a new document of that size. */
   size?: { width: number; height: number };
+  /** upscale profiles: factor. The selection (else the whole canvas) is upscaled into a new document. */
+  scale?: number;
+  /** upscale profiles: upscale this layer instead, into a smart object above it */
+  layer?: { id: number; name: string };
 }
+
+/** Longest side an upscale result may have (larger PNGs make placing in Photoshop very heavy). */
+export const MAX_UPSCALE_EDGE = 12288;
 
 export interface RunHooks {
   stage(text: string): void;
@@ -48,7 +56,7 @@ export interface RunHooks {
   signal: { aborted: boolean };
 }
 
-export interface RunResult { group: FillGroup; variations: Variation[]; seeds: number[]; continued: boolean }
+export interface RunResult { group?: FillGroup; variations: Variation[]; seeds: number[]; continued: boolean }
 
 /** A finished result that could not be written back (document closed, group deleted …). */
 export class StashedResult extends Error {
@@ -89,6 +97,7 @@ export async function runInpaint(host: PsHost, comfy: Comfy, input: RunInput, ho
   if (!doc) throw new Error("请先打开一个 PSD");
   if (!/RGB|CMYK/i.test(doc.mode) || doc.bits !== 8) throw new Error(`目前支持 RGB / CMYK 8 位文档（当前：${doc.mode} ${doc.bits} 位）`);
   if (profile.taskType === "outpaint") return runOutpaint(host, comfy, input, hooks, doc);
+  if (profile.taskType === "upscale") return runUpscale(host, comfy, input, hooks, doc);
   const target = input.addTo ? await host.refreshFillGroup(input.addTo) : null;
   const selBounds = input.addTo ? null : await host.selectionBounds(doc.id);
   if (!target && !selBounds) throw new Error("请先用选区框出要重绘的区域");
@@ -412,4 +421,139 @@ async function runTxt2img(host: PsHost, comfy: Comfy, input: RunInput, hooks: Ru
     check();
   }
   return { group: group!, variations, seeds, continued: !!target };
+}
+
+/**
+ * Upscale: the selection's bounds (else the whole canvas, all visible layers) are sent; the result
+ * goes into a new document as variations of an 「AI放大」 group, so the source document is untouched.
+ */
+async function runUpscale(host: PsHost, comfy: Comfy, input: RunInput, hooks: RunHooks, doc: { id: number; name: string; width: number; height: number }): Promise<RunResult> {
+  const { profile } = input;
+  const check = () => { if (hooks.signal.aborted) throw new Error("已取消"); };
+  const scale = input.scale ?? 2;
+  if (input.layer) return runUpscaleLayer(host, comfy, input, hooks, doc, input.layer, scale);
+  const sel = await host.selectionBounds(doc.id);
+  const rect: Rect = sel ? clampRect(sel, doc.width, doc.height) : { left: 0, top: 0, right: doc.width, bottom: doc.height };
+  const w = rectW(rect), h = rectH(rect);
+  if (w <= 0 || h <= 0) throw new Error("选区为空");
+  if (Math.max(w, h) * scale > MAX_UPSCALE_EDGE) throw new Error(`放大后 ${w * scale}×${h * scale} 超过上限 ${MAX_UPSCALE_EDGE} 像素，请框选一部分或降低倍数`);
+  const cap = await host.capture(doc.id, rect, fullSelection(w, h));
+  check();
+
+  hooks.stage("上传到 ComfyUI…");
+  const stamp = Date.now().toString(36);
+  const png0 = encodePng(onWhite(cap.image));
+  hooks.debug?.(`${stamp}_image.png`, png0);
+  const image = await comfy.uploadImage(png0, `wp_${stamp}_image.png`);
+  check();
+
+  const label = `×${scale}` + (sel ? ` 选区 ${w}×${h}` : "");
+  let target: { id: number } | null = null;
+  let group: FillGroup | null = null;
+  const variations: Variation[] = [], seeds: number[] = [];
+  const count = Math.max(1, Math.min(4, Math.floor(input.count) || 1));
+  for (let k = 0; k < count; k++) {
+    const tag = count > 1 ? `（${k + 1}/${count}）` : "";
+    const run = prepareRun(profile, { image, prompt: input.prompt, negative: input.negative, seed: input.seed === null ? null : input.seed + k, params: input.params, variant: k, scale });
+    log("info", "run", JSON.stringify({ task: "upscale", scale, rect, seed: run.seed, profile: profile.name }));
+    if (input.fullRun) { hooks.stage("清空 ComfyUI 缓存" + tag); await comfy.freeCache(); }
+    hooks.debug?.(`${stamp}_workflow${k ? "_" + k : ""}.json`, utf8(JSON.stringify(run.api, null, 1)));
+    const job = await comfy.queue(run.api);
+    hooks.promptQueued?.(job.promptId);
+    hooks.stage("排队中" + tag);
+    const tQueued = Date.now();
+    const history = await comfy.waitFor(job.promptId, (e: JobEvent) => {
+      if (e.type === "running") { hooks.stage((e.node ? `执行中 · #${e.node} ${run.api[e.node]?._meta?.title ?? run.api[e.node]?.class_type ?? ""}` : "执行中") + tag); log("info", "comfy executing", e.node, run.api[e.node ?? ""]?.class_type ?? "", `+${((Date.now() - tQueued) / 1000).toFixed(1)}s`); }
+      if (e.type === "progress") hooks.progress(e.max ? (k + e.value / e.max) / count : null, `进度 ${e.value}/${e.max}${tag}`);
+    }, { signal: hooks.signal });
+    const out = run.outputs[0];
+    hooks.stage("取回结果" + tag);
+    const png = await comfy.view(outputImage(history, out.nodeId, out.imageIndex ?? 0));
+    hooks.debug?.(`${stamp}_output${k ? "_" + k : ""}.png`, png);
+    const outSize = pngSize(png) ?? { width: w * scale, height: h * scale };
+    log("info", "run timing", `comfy ${((Date.now() - tQueued) / 1000).toFixed(1)}s`, "sent", `${w}x${h}`, "output", `${outSize.width}x${outSize.height}`);
+    if (Math.abs(outSize.width / outSize.height - w / h) / (w / h) > 0.02) {
+      throw new StashedResult(`放大输出 ${outSize.width}×${outSize.height} 与原图 ${w}×${h} 比例不同，未写入`, png);
+    }
+    check();
+
+    hooks.stage("写入 Photoshop" + tag);
+    try {
+      // every variation of this run goes into the first one's document and group, at its size
+      if (!target) target = await host.createDocument(outSize.width, outSize.height, `${doc.name.replace(/\.[a-z0-9]+$/i, "")} ${label}`);
+      if (!host.docExists(target.id)) throw new Error("放大结果的文档已关闭");
+      const area: Rect = group ? group.rect : { left: 0, top: 0, right: outSize.width, bottom: outSize.height };
+      group = group ? await host.refreshFillGroup(group) : await host.createFillGroup(target.id, area, label, undefined, "upscale");
+      const full: Pixels = { width: rectW(area), height: rectH(area), channels: 1, data: new Uint8Array(rectW(area) * rectH(area)).fill(255) };
+      const v = await host.addVariation(group, png, area, label, { pixels: full, rect: area, outside: "hide" });
+      variations.push(v); seeds.push(run.seed);
+      hooks.variationAdded?.(group, v, run.seed);
+    } catch (e) {
+      if (e instanceof StashedResult) throw e;
+      throw new StashedResult((e as Error).message + "，结果未写入", png);
+    }
+    check();
+  }
+  return { group: group!, variations, seeds, continued: false };
+}
+
+/**
+ * Upscale one layer: its own pixels (full resolution, transparency kept) are sent and the result is
+ * placed as a smart object above it at the same size, with the upscaled pixels inside; the original
+ * layer is hidden. Transparent layers: the colour is upscaled by the workflow, the alpha locally.
+ */
+async function runUpscaleLayer(host: PsHost, comfy: Comfy, input: RunInput, hooks: RunHooks, doc: { id: number }, layer: { id: number; name: string }, scale: number): Promise<RunResult> {
+  const { profile } = input;
+  const check = () => { if (hooks.signal.aborted) throw new Error("已取消"); };
+  hooks.stage("读取图层…");
+  const src = await host.layerImage(doc.id, layer.id);
+  const w = src.pixels.width, h = src.pixels.height;
+  if (w <= 1 || h <= 1) throw new Error(`图层「${layer.name}」是空的`);
+  if (Math.max(w, h) * scale > MAX_UPSCALE_EDGE) throw new Error(`放大后 ${w * scale}×${h * scale} 超过上限 ${MAX_UPSCALE_EDGE} 像素，请降低倍数`);
+  const transparent = hasTransparency(src.pixels);
+  check();
+
+  hooks.stage("上传到 ComfyUI…");
+  const stamp = Date.now().toString(36);
+  const png0 = encodePng(transparent ? bleedTransparent(src.pixels) : onWhite(src.pixels));
+  hooks.debug?.(`${stamp}_image.png`, png0);
+  const image = await comfy.uploadImage(png0, `wp_${stamp}_image.png`);
+  check();
+
+  const run = prepareRun(profile, { image, prompt: input.prompt, negative: input.negative, seed: input.seed, params: input.params, scale });
+  log("info", "run", JSON.stringify({ task: "upscale-layer", scale, layer: layer.id, rect: src.rect, transparent, seed: run.seed, profile: profile.name }));
+  if (input.fullRun) { hooks.stage("清空 ComfyUI 缓存"); await comfy.freeCache(); }
+  hooks.debug?.(`${stamp}_workflow.json`, utf8(JSON.stringify(run.api, null, 1)));
+  const job = await comfy.queue(run.api);
+  hooks.promptQueued?.(job.promptId);
+  hooks.stage("排队中");
+  const tQueued = Date.now();
+  const history = await comfy.waitFor(job.promptId, (e: JobEvent) => {
+    if (e.type === "running") { hooks.stage(e.node ? `执行中 · #${e.node} ${run.api[e.node]?._meta?.title ?? run.api[e.node]?.class_type ?? ""}` : "执行中"); log("info", "comfy executing", e.node, run.api[e.node ?? ""]?.class_type ?? "", `+${((Date.now() - tQueued) / 1000).toFixed(1)}s`); }
+    if (e.type === "progress") hooks.progress(e.max ? e.value / e.max : null, `进度 ${e.value}/${e.max}`);
+  }, { signal: hooks.signal });
+  const out = run.outputs[0];
+  hooks.stage("取回结果");
+  let png = await comfy.view(outputImage(history, out.nodeId, out.imageIndex ?? 0));
+  hooks.debug?.(`${stamp}_output.png`, png);
+  const outSize = pngSize(png) ?? { width: w * scale, height: h * scale };
+  log("info", "run timing", `comfy ${((Date.now() - tQueued) / 1000).toFixed(1)}s`, "sent", `${w}x${h}`, "output", `${outSize.width}x${outSize.height}`);
+  if (Math.abs(outSize.width / outSize.height - w / h) / (w / h) > 0.02) {
+    throw new StashedResult(`放大输出 ${outSize.width}×${outSize.height} 与图层 ${w}×${h} 比例不同，未写入`, png);
+  }
+  check();
+
+  try {
+    if (transparent) {
+      hooks.stage("合成透明通道");
+      const color = decodePng(png);
+      png = encodePng(withAlpha(color, resizeAlpha(src.pixels, color.width, color.height)));
+    }
+    hooks.stage("写入 Photoshop");
+    if (!host.docExists(doc.id)) throw new Error("发起任务的 PSD 已关闭");
+    await host.placeUpscaledLayer(doc.id, layer.id, png, src.rect, `${layer.name} ×${scale}`);
+  } catch (e) {
+    throw new StashedResult((e as Error).message + "，结果未写入", png);
+  }
+  return { variations: [], seeds: [run.seed], continued: false };
 }

@@ -23,6 +23,8 @@ export interface RunValues {
   pads?: Record<Side, number>;
   /** text-to-image: output size in pixels (already rounded to the workflow's multiple) */
   size?: { width: number; height: number };
+  /** upscale: factor */
+  scale?: number;
 }
 
 export const MAX_SEED = 2 ** 50;
@@ -87,6 +89,10 @@ export function prepareRun(p: Profile, v: RunValues): Prepared {
         set(b, Math.max(8, px));
         break;
       }
+      case "scale":
+        if (!v.scale) throw new Error("缺少放大倍数");
+        set(b, Math.round(v.scale));
+        break;
       case "output": break;
     }
   }

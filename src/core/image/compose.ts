@@ -113,3 +113,62 @@ export function placeGray(p: Pixels, src: Rect, dst: Rect, fill = 0): Pixels {
   }
   return { width: w, height: h, channels: 1, data: out };
 }
+
+/** True when an RGBA image has any pixel that is not fully opaque. */
+export function hasTransparency(p: Pixels): boolean {
+  if (p.channels !== 4) return false;
+  for (let i = 3; i < p.data.length; i += 4) if (p.data[i] !== 255) return true;
+  return false;
+}
+
+/**
+ * RGBA → RGB for upscaling a transparent layer: fully transparent pixels take the colour of the
+ * nearest visible pixel (breadth-first), so edges don't pick up a white or black fringe.
+ */
+export function bleedTransparent(p: Pixels): Pixels {
+  const { width: w, height: h } = p, n = w * h, out = new Uint8Array(n * 3);
+  const done = new Uint8Array(n), queue = new Int32Array(n);
+  let head = 0, tail = 0;
+  for (let i = 0; i < n; i++) {
+    if (p.data[i * 4 + 3] === 0) continue;
+    out[i * 3] = p.data[i * 4]; out[i * 3 + 1] = p.data[i * 4 + 1]; out[i * 3 + 2] = p.data[i * 4 + 2];
+    done[i] = 1; queue[tail++] = i;
+  }
+  if (!tail) return { width: w, height: h, channels: 3, data: out.fill(255) };
+  while (head < tail) {
+    const i = queue[head++], x = i % w;
+    const visit = (j: number) => { if (!done[j]) { done[j] = 1; out[j * 3] = out[i * 3]; out[j * 3 + 1] = out[i * 3 + 1]; out[j * 3 + 2] = out[i * 3 + 2]; queue[tail++] = j; } };
+    if (x > 0) visit(i - 1);
+    if (x < w - 1) visit(i + 1);
+    if (i >= w) visit(i - w);
+    if (i < n - w) visit(i + w);
+  }
+  return { width: w, height: h, channels: 3, data: out };
+}
+
+/** The alpha channel of `p` resized (bilinear) to width × height. */
+export function resizeAlpha(p: Pixels, width: number, height: number): Pixels {
+  const { width: sw, height: sh } = p, out = new Uint8Array(width * height);
+  const fx = sw / width, fy = sh / height;
+  const a = (x: number, y: number) => p.data[(y * sw + x) * 4 + 3];
+  for (let y = 0; y < height; y++) {
+    const sy = Math.max(0, Math.min(sh - 1, (y + 0.5) * fy - 0.5)), y0 = Math.floor(sy), y1 = Math.min(sh - 1, y0 + 1), ty = sy - y0;
+    for (let x = 0; x < width; x++) {
+      const sx = Math.max(0, Math.min(sw - 1, (x + 0.5) * fx - 0.5)), x0 = Math.floor(sx), x1 = Math.min(sw - 1, x0 + 1), tx = sx - x0;
+      const top = a(x0, y0) + (a(x1, y0) - a(x0, y0)) * tx, bottom = a(x0, y1) + (a(x1, y1) - a(x0, y1)) * tx;
+      out[y * width + x] = Math.round(top + (bottom - top) * ty);
+    }
+  }
+  return { width, height, channels: 1, data: out };
+}
+
+/** RGB(A) colour + a 1-channel alpha of the same size → RGBA. */
+export function withAlpha(color: Pixels, alpha: Pixels): Pixels {
+  const n = color.width * color.height, ch = color.channels, out = new Uint8Array(n * 4);
+  if (alpha.width !== color.width || alpha.height !== color.height) throw new Error("透明通道尺寸与图像不符");
+  for (let i = 0; i < n; i++) {
+    out[i * 4] = color.data[i * ch]; out[i * 4 + 1] = color.data[i * ch + (ch >= 3 ? 1 : 0)]; out[i * 4 + 2] = color.data[i * ch + (ch >= 3 ? 2 : 0)];
+    out[i * 4 + 3] = alpha.data[i];
+  }
+  return { width: color.width, height: color.height, channels: 4, data: out };
+}

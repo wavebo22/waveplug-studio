@@ -8,6 +8,7 @@
 import type { Pixels } from "../core/image/png.ts";
 import type { Rect } from "../core/image/region.ts";
 import type { Side, TaskType } from "../core/workflow/profile.ts";
+import type { ToolLayer, ToolResult } from "../core/layers/smart.ts";
 
 export type Pads = Record<Side, number>;
 
@@ -43,6 +44,9 @@ export interface Variation {
 
 export interface LayerInfo { id: number; name: string; depth: number; kind: string }
 
+/** The active layer, for upscaling one layer. */
+export interface ActiveLayer { id: number; name: string; kind: string; rect: Rect }
+
 export interface Capture {
   doc: DocInfo;
   /** area that was read and will be sent to ComfyUI */
@@ -55,6 +59,7 @@ export interface Capture {
 export const FILL_PREFIX = "AI填充 · ";
 export const EXPAND_PREFIX = "AI扩图 · ";
 export const GENERATE_PREFIX = "AI生成 · ";
+export const UPSCALE_PREFIX = "AI放大 · ";
 
 export const padsLabel = (p: Pads) => `←${p.left} →${p.right} ↑${p.top} ↓${p.bottom}`;
 export function parsePads(name: string): Pads | null {
@@ -87,6 +92,13 @@ export interface PsHost {
   /** Pixels of a layer (RGBA when it has transparency), long edge capped at `maxEdge`. */
   layerPixels(docId: number, layerId: number, maxEdge?: number): Promise<Pixels>;
   layerThumbnail(docId: number, layerId: number, size: number): Promise<string>;
+  /** The (first) selected layer of the document, or null. */
+  activeLayer(docId: number): ActiveLayer | null;
+  /** A layer's own pixels at full resolution (RGBA when it has transparency) and where they are. */
+  layerImage(docId: number, layerId: number): Promise<{ pixels: Pixels; rect: Rect }>;
+  /** Places the PNG as an embedded smart object directly above `layerId`, scaled to cover `rect`,
+   *  named `name`, with the layer's opacity and blend mode; the original layer is hidden. One undo step. */
+  placeUpscaledLayer(docId: number, layerId: number, png: Uint8Array, rect: Rect, name: string): Promise<number>;
   /** Image currently on the clipboard (pasted through Photoshop), or null if there is none. */
   clipboardImage(maxEdge: number): Promise<Pixels | null>;
 
@@ -96,9 +108,9 @@ export interface PsHost {
   setFillVisible(g: FillGroup, visible: boolean): Promise<void>;
   deleteVariation(g: FillGroup, layerId: number): Promise<void>;
   /** New, empty fill group for the area `rect` (an outpaint group when `pads` is given, a
-   *  text-to-image group when `kind` is "txt2img"). */
+   *  text-to-image / upscale group when `kind` says so; an upscale group is named by `prompt`). */
   createFillGroup(docId: number, rect: Rect, prompt: string, pads?: Pads, kind?: TaskType): Promise<FillGroup>;
-  /** New RGB 8-bit document (text-to-image without an open document). */
+  /** New RGB 8-bit document (text-to-image without an open document, upscale results). */
   createDocument(width: number, height: number, name: string): Promise<DocInfo>;
   /** Places the PNG (which covers `placement` in document pixels) as the next variation with the
    *  given layer mask, and shows it. */
@@ -110,4 +122,28 @@ export interface PsHost {
   thumbnail(g: FillGroup, layerId: number, size: number): Promise<string>;
   /** Called (debounced) whenever document, selection or layers may have changed. */
   onChange(cb: () => void): void;
+}
+
+/** 工具 · 智能对象: each acts on the layers selected in the active document, as one undo step. */
+export interface LayerTools {
+  /** Layers of the active document with their smart-object details, or null without a document. */
+  inspect(): Promise<ToolLayer[] | null>;
+  /** 断开链接: selected instances get their own copy of the shared content */
+  makeUnique(): Promise<ToolResult>;
+  /** 查找同源: selects every instance sharing content with a selected smart object */
+  selectSameSource(): Promise<ToolResult>;
+  /** 转换为智能对象: all selected layers into one, or each into its own */
+  convert(separately: boolean): Promise<ToolResult>;
+  /** 解包图层: smart objects back into their layers */
+  unpack(): Promise<ToolResult>;
+  resetTransform(): Promise<ToolResult>;
+  /** null when the user cancels the file / folder picker */
+  replaceContents(): Promise<ToolResult | null>;
+  exportContents(): Promise<ToolResult | null>;
+  /** 裁剪边缘: clears faint pixels and small specks of selected pixel layers (清理强度 0–1) */
+  trimEdges(strength: number): Promise<ToolResult>;
+  /** 像素岛: how many layers splitting the selected pixel layers would make */
+  countIslands(minArea: number, merge: number): Promise<number>;
+  /** 像素岛: each island (≥ minArea px; pieces ≤ merge px apart count as one) into its own layer */
+  splitIslands(minArea: number, merge: number): Promise<ToolResult>;
 }

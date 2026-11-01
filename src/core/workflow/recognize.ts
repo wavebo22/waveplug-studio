@@ -3,7 +3,7 @@
 // confidence, "certain" ones are pre-filled, everything else waits for the user.
 
 import { type ApiGraph, consumers, downstream, isLink, literalSource, title } from "./api.ts";
-import type { Binding, OutpaintCanvas, Role, Side, TaskType, Txt2ImgSize } from "./profile.ts";
+import type { Binding, OutpaintCanvas, Role, Side, TaskType, Txt2ImgSize, UpscaleOptions } from "./profile.ts";
 
 export type Confidence = "certain" | "likely" | "ambiguous";
 
@@ -23,6 +23,7 @@ export interface Recognition {
   taskType: TaskType;
   outpaint?: OutpaintCanvas;
   txt2img?: Txt2ImgSize;
+  upscale?: UpscaleOptions;
 }
 
 const PAD_INPUTS: Record<Side, RegExp> = { left: /^(左|left)$/i, right: /^(右|right)$/i, top: /^(上|top)$/i, bottom: /^(下|bottom)$/i };
@@ -66,6 +67,19 @@ function findSizeSource(g: ApiGraph): { w: { nodeId: string; input: string }; h:
     if (!/^Empty.*Latent/i.test(n.class_type) || !("width" in n.inputs) || !("height" in n.inputs)) continue;
     const w = literalSource(g, id, "width", "number"), h = literalSource(g, id, "height", "number");
     if (w && h) return { w, h, size: { forced: [], multiple: 16, max: 16384 } };
+  }
+  return null;
+}
+
+/** A node taking a loaded image plus a scale factor (VOSR2 放大, ImageScaleBy …) = an upscaler. */
+function findUpscaler(g: ApiGraph): { image: string; scale: { nodeId: string; input: string } } | null {
+  for (const [id, n] of Object.entries(g)) {
+    const keys = Object.keys(n.inputs);
+    const sk = keys.find(k => /^(scale|scale_by|upscale_by|放大倍数|倍数)$/i.test(k));
+    if (!sk) continue;
+    const imageInput = keys.find(k => isLink(n.inputs[k]) && LOAD_IMAGE.test(g[(n.inputs[k] as [string, number])[0]]?.class_type ?? ""));
+    const scale = literalSource(g, id, sk, "number");
+    if (imageInput && scale) return { image: (n.inputs[imageInput] as [string, number])[0], scale };
   }
   return null;
 }
@@ -152,6 +166,16 @@ export function recognize(g: ApiGraph): Recognition {
   const alphaMasked = loaders.filter(id => consumers(g, id, 1).length > 0);
   let mainImage: string | null = null;
 
+  // ── upscale: a loaded image into a scale-factor node, and no mask anywhere ──
+  const up = op || sz || alphaMasked.length || maskLoaders.length ? null : findUpscaler(g);
+  let upscale: UpscaleOptions | undefined;
+  if (up) {
+    taskType = "upscale";
+    upscale = { factors: [1, 2, 3, 4] };
+    suggestions.push({ binding: bindingFor(g, "image", up.image, "image", { encoding: "rgb" }), confidence: "certain", reason: "放大节点的原图输入" });
+    suggestions.push({ binding: bindingFor(g, "scale", up.scale.nodeId, up.scale.input, { label: "放大倍数" }), confidence: "certain", reason: "放大倍数的来源" });
+  }
+
   const rankImage = (id: string) => {
     const t = title(g, id);
     return (numberedTitle(t) ?? 99) * -1 + (/加载图像|主图|原图|input|source/i.test(t) ? 50 : 0) + (consumers(g, id, 1).length ? 30 : 0);
@@ -159,6 +183,8 @@ export function recognize(g: ApiGraph): Recognition {
 
   if (op) {
     mainImage = op.image;
+  } else if (up) {
+    mainImage = up.image;
   } else if (sz) {
     // every loader is an (optional) reference image
   } else if (alphaMasked.length) {
@@ -286,5 +312,5 @@ export function recognize(g: ApiGraph): Recognition {
     }
   }
 
-  return { suggestions, blockers, notes, taskType, outpaint, txt2img };
+  return { suggestions, blockers, notes, taskType, outpaint, txt2img, upscale };
 }

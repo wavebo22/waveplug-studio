@@ -3,7 +3,7 @@ rem Installs the most recently built WavePlug Studio .ccx with Adobe UPIA (by fi
 rem Close Photoshop, then right-click this file -> Run as administrator (a non-elevated run returned -432 on mainpc).
 chcp 65001 >nul
 setlocal
-set "UPIA=J:\AI things\OpenLayer\Adobe-UPIA-Extract\UPI64-unpacked\UnifiedPluginInstallerAgent\UnifiedPluginInstallerAgent.exe"
+set "UPIA=D:\App\Adobe-UPIA-Extract\UPI64-unpacked\UnifiedPluginInstallerAgent\UnifiedPluginInstallerAgent.exe"
 set "ROOT=%~dp0.."
 set "LOG=%ROOT%\reports\install_%DATE:~0,4%%DATE:~5,2%%DATE:~8,2%_%RANDOM%.log"
 set "CCX="

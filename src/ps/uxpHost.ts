@@ -5,7 +5,7 @@ import { encodePng, type Pixels, withPlacementHints } from "../core/image/png.ts
 import { type Rect, nonZeroBounds, rectH, rectW } from "../core/image/region.ts";
 import { placeGray } from "../core/image/compose.ts";
 import { flushLog, log } from "../app/log.ts";
-import { type Capture, type DocInfo, EXPAND_PREFIX, FILL_PREFIX, GENERATE_PREFIX, type FillGroup, type LayerInfo, type Pads, type PsHost, type Variation, type VariationMask, padsLabel, parsePads } from "./host.ts";
+import { type ActiveLayer, type Capture, type DocInfo, EXPAND_PREFIX, FILL_PREFIX, GENERATE_PREFIX, UPSCALE_PREFIX, type FillGroup, type LayerInfo, type Pads, type PsHost, type Variation, type VariationMask, padsLabel, parsePads } from "./host.ts";
 
 declare const require: (m: string) => any;
 
@@ -15,16 +15,16 @@ const DONT = { dialogOptions: "dontDisplay" };
 const SRGB = "sRGB IEC61966-2.1";
 const VARIATION = /^v(\d+)(?:\s*·\s*(.*))?$/;
 
-async function play(descriptors: object[]): Promise<any[]> {
+export async function play(descriptors: object[]): Promise<any[]> {
   return ps().action.batchPlay(descriptors, {});
 }
 
-async function modal<T>(name: string, fn: (ctx: any) => Promise<T>): Promise<T> {
+export async function modal<T>(name: string, fn: (ctx: any) => Promise<T>): Promise<T> {
   return ps().core.executeAsModal(fn, { commandName: name });
 }
 
 /** Runs `fn` as one undo step named `name` in document `docId`. */
-async function step<T>(name: string, docId: number, fn: () => Promise<T>): Promise<T> {
+export async function step<T>(name: string, docId: number, fn: () => Promise<T>): Promise<T> {
   return modal(name, async ctx => {
     const hc = ctx.hostControl;
     const s = await hc.suspendHistory({ documentID: docId, name });
@@ -33,7 +33,7 @@ async function step<T>(name: string, docId: number, fn: () => Promise<T>): Promi
   });
 }
 
-function docById(id: number): any {
+export function docById(id: number): any {
   const d = ps().app.documents.find((x: any) => x.id === id);
   if (!d) throw new Error("发起任务的 PSD 已关闭");
   return d;
@@ -43,7 +43,7 @@ function info(d: any): DocInfo {
   return { id: d.id, name: d.title ?? d.name, width: Math.round(d.width), height: Math.round(d.height), mode: String(d.mode), bits: Number(String(d.bitsPerChannel).replace(/\D/g, "")) || 8 };
 }
 
-function findLayer(layers: any[], id: number): any | null {
+export function findLayer(layers: any[], id: number): any | null {
   for (const l of layers) {
     if (l.id === id) return l;
     if (l.layers?.length) { const f = findLayer(l.layers, id); if (f) return f; }
@@ -51,12 +51,41 @@ function findLayer(layers: any[], id: number): any | null {
   return null;
 }
 
-const PREFIXES = [FILL_PREFIX, EXPAND_PREFIX, GENERATE_PREFIX];
+const PREFIXES = [FILL_PREFIX, EXPAND_PREFIX, GENERATE_PREFIX, UPSCALE_PREFIX];
 const isFillGroup = (l: any) => !!l && String(l.kind) === "group" && PREFIXES.some(p => String(l.name).startsWith(p));
 const isExpandGroup = (l: any) => String(l?.name ?? "").startsWith(EXPAND_PREFIX);
 const isGenerateGroup = (l: any) => String(l?.name ?? "").startsWith(GENERATE_PREFIX);
-const groupKind = (l: any) => isExpandGroup(l) ? "outpaint" as const : isGenerateGroup(l) ? "txt2img" as const : "inpaint" as const;
+const isUpscaleGroup = (l: any) => String(l?.name ?? "").startsWith(UPSCALE_PREFIX);
+const groupKind = (l: any) => isExpandGroup(l) ? "outpaint" as const : isGenerateGroup(l) ? "txt2img" as const : isUpscaleGroup(l) ? "upscale" as const : "inpaint" as const;
 const groupName = (l: any) => String(l.name).slice((PREFIXES.find(p => String(l.name).startsWith(p)) ?? "").length);
+
+/** The outermost AI group containing `l` (itself included), or null. */
+function outermostFillGroup(l: any): any | null {
+  let top = null;
+  for (let p = l; p; p = p.parent) if (isFillGroup(p)) top = p;
+  return top;
+}
+
+/**
+ * A new group is made above the active layer — inside the previous fill when one of its variations
+ * is selected — so consecutive runs nested fills in each other. Moves every AI group that sits inside
+ * another one out, just above the outermost one. Returns how many were moved.
+ */
+async function unnestFillGroups(doc: any): Promise<number> {
+  const nested: any[] = [];
+  const walk = (ls: any[], inside: boolean) => {
+    for (const l of ls) {
+      if (inside && isFillGroup(l)) nested.push(l);
+      if (l.layers?.length) walk(l.layers, inside || isFillGroup(l));
+    }
+  };
+  walk(doc.layers, false);
+  for (const g of nested) {
+    const host = outermostFillGroup(g.parent);
+    if (host) await g.move(host, ps().constants.ElementPlacement.PLACEBEFORE);
+  }
+  return nested.length;
+}
 
 const rectKey = (doc: any, groupId: number) => `${doc.id}:${groupId}:${Math.round(doc.width)}x${Math.round(doc.height)}`;
 
@@ -80,7 +109,7 @@ function boundsOf(b: any, fallback: Rect): Rect {
 }
 
 /** Reads a 1-channel imaging result and places it into `want` (PS trims it to its own bounds). */
-async function grayInto(r: any, want: Rect, fill: number): Promise<Pixels> {
+export async function grayInto(r: any, want: Rect, fill: number): Promise<Pixels> {
   try {
     const d = r.imageData;
     const px: Pixels = { width: d.width, height: d.height, channels: 1, data: new Uint8Array(await d.getData({ chunky: true })) };
@@ -249,6 +278,61 @@ export class UxpHost implements PsHost {
     return modal("WavePlug 读取参考图层", () => readPixels(opts));
   }
 
+  activeLayer(docId: number): ActiveLayer | null {
+    if (!this.docExists(docId)) return null;
+    const l = docById(docId).activeLayers?.[0];
+    return l ? { id: l.id, name: String(l.name), kind: String(l.kind), rect: boundsRect(l) } : null;
+  }
+
+  async layerImage(docId: number, layerId: number): Promise<{ pixels: Pixels; rect: Rect }> {
+    const layer = findLayer(docById(docId).layers, layerId);
+    if (!layer) throw new Error("要放大的图层已不存在");
+    return modal("WavePlug 读取图层", async () => {
+      const r = await ps().imaging.getPixels({ documentID: docId, layerID: layerId, componentSize: 8, colorSpace: "RGB", colorProfile: SRGB });
+      try {
+        const d = r.imageData;
+        const pixels: Pixels = { width: d.width, height: d.height, channels: d.components, data: new Uint8Array(await d.getData({ chunky: true })) };
+        const b = boundsOf(r.sourceBounds, boundsRect(layer));
+        return { pixels, rect: { left: b.left, top: b.top, right: b.left + d.width, bottom: b.top + d.height } };
+      } finally { r.imageData.dispose(); }
+    });
+  }
+
+  async placeUpscaledLayer(docId: number, layerId: number, png: Uint8Array, rect: Rect, name: string): Promise<number> {
+    const target = docById(docId);
+    const temp = await tempPng(withPlacementHints(png, Number(target.resolution) || 72));
+    try {
+      return await step("WavePlug AI 放大图层", docId, async () => {
+        const { app, constants } = ps();
+        const userDoc = app.activeDocument;
+        const doc = docById(docId);
+        app.activeDocument = doc;
+        const orig = findLayer(doc.layers, layerId);
+        if (!orig) throw new Error("要放大的图层已不存在");
+        // placing with the original selected puts the smart object directly above it (in its group)
+        await selectLayer(layerId);
+        await play([{
+          _obj: "placeEvent", null: { _path: temp.token, _kind: "local" },
+          freeTransformCenterState: { _enum: "quadCenterState", _value: "QCSAverage" },
+          offset: { _obj: "offset", horizontal: { _unit: "pixelsUnit", _value: 0 }, vertical: { _unit: "pixelsUnit", _value: 0 } },
+          _options: DONT,
+        }]);
+        const layer = doc.activeLayers[0];
+        // shown at the original size: the smart object keeps the upscaled pixels inside
+        const b = boundsRect(layer);
+        if (rectW(b) !== rectW(rect) || rectH(b) !== rectH(rect)) await layer.scale(rectW(rect) / rectW(b) * 100, rectH(rect) / rectH(b) * 100, constants.AnchorPosition.TOPLEFT);
+        const nb = boundsRect(layer);
+        if (nb.left !== rect.left || nb.top !== rect.top) await layer.translate(rect.left - nb.left, rect.top - nb.top);
+        layer.name = name;
+        try { layer.opacity = orig.opacity; layer.blendMode = orig.blendMode; } catch (e) { log("warn", "copy layer style", e); }
+        orig.visible = false;
+        log("info", "upscaled layer placed", layer.id, JSON.stringify(boundsRect(layer)));
+        if (userDoc && userDoc.id !== doc.id && this.docExists(userDoc.id)) app.activeDocument = userDoc;
+        return layer.id as number;
+      });
+    } finally { await temp.remove(); }
+  }
+
   async clipboardImage(maxEdge: number): Promise<Pixels | null> {
     // Photoshop's own paste reads every clipboard format it understands (browser images,
     // screenshots, copied layers): paste into a throw-away document and read the layer.
@@ -318,15 +402,18 @@ export class UxpHost implements PsHost {
   }
 
   async createFillGroup(docId: number, rect: Rect, prompt: string, pads?: Pads, kind?: FillGroup["kind"]): Promise<FillGroup> {
-    const gen = kind === "txt2img";
-    return step(pads ? "WavePlug 新建 AI 扩图" : gen ? "WavePlug 新建 AI 生成" : "WavePlug 新建 AI 填充", docId, async () => {
+    const gen = kind === "txt2img", up = kind === "upscale";
+    return step(pads ? "WavePlug 新建 AI 扩图" : gen ? "WavePlug 新建 AI 生成" : up ? "WavePlug 新建 AI 放大" : "WavePlug 新建 AI 填充", docId, async () => {
       const doc = docById(docId);
       ps().app.activeDocument = doc;
-      const name = pads ? EXPAND_PREFIX + padsLabel(pads) : (gen ? GENERATE_PREFIX : FILL_PREFIX) + (prompt.trim().slice(0, 24) || (gen ? "无提示词" : "移除"));
+      const name = pads ? EXPAND_PREFIX + padsLabel(pads) : up ? UPSCALE_PREFIX + prompt
+        : (gen ? GENERATE_PREFIX : FILL_PREFIX) + (prompt.trim().slice(0, 24) || (gen ? "无提示词" : "移除"));
       const group = await doc.createLayerGroup({ name });
+      const moved = await unnestFillGroups(doc);
+      if (moved) log("info", "fill groups un-nested", moved);
       if (pads) { await group.move(doc.layers[0], ps().constants.ElementPlacement.PLACEBEFORE); return { kind: "outpaint" as const, pads, docId, layerId: group.id, name: groupName(group), rect }; }
       this.rects.set(rectKey(doc, group.id), rect);
-      return { kind: gen ? "txt2img" as const : "inpaint" as const, docId, layerId: group.id, name: groupName(group), rect };
+      return { kind: kind ?? "inpaint", docId, layerId: group.id, name: groupName(group), rect };
     });
   }
 

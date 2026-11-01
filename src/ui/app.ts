@@ -10,7 +10,7 @@ import { recognize } from "../core/workflow/recognize.ts";
 import { uiToApi } from "../core/workflow/uiToApi.ts";
 import { findLocalMaskLinks } from "../core/workflow/localMask.ts";
 import { MAX_REFERENCES, findReferenceSlots } from "../core/workflow/references.ts";
-import { type RefSource, StashedResult, runInpaint } from "../app/generate.ts";
+import { MAX_UPSCALE_EDGE, type RefSource, StashedResult, runInpaint } from "../app/generate.ts";
 import { type ProfileState, type Services, type Settings, store } from "../app/services.ts";
 import type { DocInfo, FillGroup, Pads, Variation } from "../ps/host.ts";
 import { log, withTimeout } from "../app/log.ts";
@@ -18,8 +18,9 @@ import { openCalibration } from "./calibrate.ts";
 import { h, icon, replace } from "./dom.ts";
 import { encodePng } from "../core/image/png.ts";
 import { onWhite } from "../core/image/compose.ts";
-import { EXPAND_PREFIX, FILL_PREFIX, GENERATE_PREFIX } from "../ps/host.ts";
+import { EXPAND_PREFIX, FILL_PREFIX, GENERATE_PREFIX, UPSCALE_PREFIX } from "../ps/host.ts";
 import { RATIOS, createExpandEditor } from "./expandEditor.ts";
+import { createToolsView } from "./tools.ts";
 
 type Conn = { state: "checking" | "ok" | "down"; text: string };
 
@@ -87,7 +88,7 @@ export function mountApp(root: HTMLElement, svc: Services) {
   const near = (a: Rect, b: Rect) => Math.abs(a.left - b.left) <= 2 && Math.abs(a.top - b.top) <= 2 && Math.abs(a.right - b.right) <= 2 && Math.abs(a.bottom - b.bottom) <= 2;
   /** true: the next 生成 adds variations to the current fill; false: it creates a new fill */
   const willAdd = () => {
-    if (!group || group.kind !== mode) return false;
+    if (!group || group.kind !== mode || mode === "upscale") return false;
     // 扩图: with no extension set, 生成 adds variations to the current expansion
     if (mode === "outpaint") return !padTotal();
     if (choice && choice.sel === selKey(sel)) return choice.add;
@@ -115,7 +116,7 @@ export function mountApp(root: HTMLElement, svc: Services) {
   const targetEl = h("span", { class: "target" });
   targetEl.addEventListener("click", () => {
     // inpaint: only with a selection (without one there is nothing new to fill); 文生图: always
-    if (!group || group.kind !== mode || mode === "outpaint" || (mode === "inpaint" && !sel)) return;
+    if (!group || group.kind !== mode || mode === "outpaint" || mode === "upscale" || (mode === "inpaint" && !sel)) return;
     choice = { sel: selKey(sel), add: !willAdd() };
     renderHistory(); renderSelection(); renderAction();
   });
@@ -141,9 +142,16 @@ export function mountApp(root: HTMLElement, svc: Services) {
   const statusEl = h("div", { class: "status" });
   const sheetHost = h("div", { class: "sheet-host" });
 
-  const MODES = [["inpaint", "局部重绘"], ["outpaint", "扩图"], ["txt2img", "文生图"]] as const;
+  const MODES = [["inpaint", "局部重绘"], ["outpaint", "扩图"], ["txt2img", "文生图"], ["upscale", "放大"]] as const;
   const modeBtns = MODES.map(([m, label]) => h("button", { class: "seg-btn", onClick: () => setMode(m) }, label));
   const modeEl = h("div", { class: "seg" }, ...modeBtns);
+  // 生成 (the AI modes above) | 工具 (Photoshop layer tools, no ComfyUI)
+  const toolsView = createToolsView(svc.tools, (text, kind) => setStatus(text, kind));
+  const viewBtns = ([["generate", "生成"], ["tools", "工具"]] as const).map(([v, label]) =>
+    h("button", { class: "seg-btn", onClick: () => setView(v) }, label));
+  const viewEl = h("div", { class: "seg view-seg" }, ...viewBtns);
+  const genView = h("div");
+  const toolsMode = () => settings.view === "tools";
   const expander = createExpandEditor({ maxPad: 3000, onChange: p => { pads = p; renderHistory(); renderSelection(); renderAction(); } });
   const expandCard = h("section", { class: "card xp-card" }, expander.el);
   let thumbKey = "";
@@ -161,6 +169,43 @@ export function mountApp(root: HTMLElement, svc: Services) {
   const t2iCard = h("section", { class: "card t2i-card" },
     h("div", { class: "t2i-row" }, h("span", { class: "t2i-k" }, "比例"), t2iRatio, h("span", { class: "t2i-k" }, "长边"), t2iLong),
     t2iInfo);
+
+  // 放大: factor buttons and what will be sent
+  const upBtns = h("div", { class: "seg up-seg" });
+  const upScope = h("div", { class: "seg up-seg" });
+  const upInfo = h("div", { class: "t2i-info" });
+  const upCard = h("section", { class: "card up-card" },
+    h("div", { class: "t2i-row" }, h("span", { class: "t2i-k" }, "范围"), upScope),
+    h("div", { class: "t2i-row up-row" }, h("span", { class: "t2i-k" }, "倍数"), upBtns), upInfo);
+  const upFactors = () => profile?.options.upscale?.factors ?? [1, 2, 3, 4];
+  const upScale = () => { const f = upFactors(); return f.includes(settings.upScale ?? 2) ? settings.upScale ?? 2 : f[Math.min(1, f.length - 1)]; };
+  const upLayerMode = () => settings.upTarget === "layer";
+  /** 放大 · 当前图层: the active layer, if it has pixels of its own (not a group / adjustment layer) */
+  const upLayer = () => {
+    const l = doc ? svc.host.activeLayer(doc.id) : null;
+    return l && /^(pixel|smartObject|text|solidColor|gradientFill|pattern)$/i.test(l.kind) ? l : null;
+  };
+  /** 放大: the active layer, or the selection's bounds, else the whole canvas */
+  const upSource = () => !doc ? null : upLayerMode() ? upLayer()?.rect ?? null : sel ?? { left: 0, top: 0, right: doc.width, bottom: doc.height };
+
+  // prompt favorites, one list per place a prompt is typed (重绘 / 扩图 / 文生图)
+  const MAX_FAVORITES = 40;
+  let favorites = store.favorites();
+  let favOpen = false;
+  const favKey = () => mode;
+  const favStar = h("button", { class: "fav-star" });
+  const favToggle = h("button", { class: "fav-toggle", title: "收藏的提示词" });
+  const favList = h("div", { class: "fav-list" });
+  const favEl = h("div", { class: "fav" }, h("div", { class: "fav-bar" }, favStar, favToggle), favList);
+  favStar.addEventListener("click", () => {
+    const text = prompt.value.trim(), list = favorites[favKey()] ?? [];
+    if (!text) return;
+    favorites[favKey()] = list.includes(text) ? list.filter(x => x !== text) : [text, ...list].slice(0, MAX_FAVORITES);
+    store.saveFavorites(favorites); renderFav();
+  });
+  favToggle.addEventListener("click", () => { favOpen = !favOpen; renderFav(); });
+  /** Puts `text` into the prompt box as if typed (saved with the workflow's state). */
+  const setPromptText = (text: string) => { prompt.value = text; prompt.dispatchEvent(new Event("input")); };
 
   const mainEl = h("main", { class: "scroll" });
   const footEl = h("footer", { class: "foot" });
@@ -187,12 +232,13 @@ export function mountApp(root: HTMLElement, svc: Services) {
       h("div", { class: "brand" }, h("span", { class: "mark" }, "W"), h("span", { class: "brand-name" }, "WavePlug"),
         svc.devReload ? h("button", { class: "icon-btn dev-reload", title: "重新加载开发版代码（F:\\waveplug\\studio\\dist\\plugin）", onClick: () => svc.devReload!() }, icon("refresh", 13)) : null),
       h("div", { class: "top-right" }, flowBtn, connEl)),
-    (mainEl.append(
+    (mainEl.append(viewEl, (genView.append(
       modeEl,
       expandCard,
       t2iCard,
+      upCard,
       h("section", { class: "card" },
-        prompt, promptHint, refsEl,
+        prompt, promptHint, favEl, refsEl,
         h("div", { class: "ctx-row" }, targetEl, selEl),
         h("div", { class: "gen-row" }, countSel, genBtn),
         progEl),
@@ -200,12 +246,12 @@ export function mountApp(root: HTMLElement, svc: Services) {
         h("div", { class: "card-head" }, h("span", { class: "label" }, "变体"), varCountEl, h("span", { class: "grow" }), compareBtn, regenBtn),
         fillSel,
         historyEl, varPromptEl),
-      h("section", { class: "card adv" }, advHead, advBody)), mainEl),
+      h("section", { class: "card adv" }, advHead, advBody)), genView), toolsView.el), mainEl),
     (footEl.append(statusEl, h("span", { class: "ver" }, svc.version)), footEl),
     sheetHost);
 
   // re-check the 生成 button as the user types (a required prompt enables it)
-  prompt.addEventListener("input", () => { promptHint.hidden = !!prompt.value; if (!run) renderAction(); });
+  prompt.addEventListener("input", () => { promptHint.hidden = !!prompt.value; renderFav(); if (!run) renderAction(); });
   prompt.addEventListener("input", () => { if (pstate && profile) { pstate.prompt = prompt.value; store.saveState(profile.id, pstate); } });
   // compare: hold to see the original (the fill group hidden), release to restore
   const showOriginal = (hide: boolean) => { if (group && !run) void svc.host.setFillVisible(group, !hide).catch(e => log("warn", "compare", e)); compareBtn.classList.toggle("on", hide); };
@@ -217,6 +263,21 @@ export function mountApp(root: HTMLElement, svc: Services) {
 
   // ── rendering ──
   function setStatus(text: string, kind: "info" | "ok" | "error" = "info") { status = { text, kind }; renderStatus(); }
+
+  function renderFav() {
+    favEl.hidden = mode === "upscale";
+    const list = favorites[favKey()] ?? [], text = prompt.value.trim(), saved = !!text && list.includes(text);
+    favStar.className = "ub fav-star" + (saved ? " on" : "") + (text ? "" : " is-disabled");
+    favStar.title = !text ? "先输入提示词再收藏" : saved ? "取消收藏这条提示词" : "收藏这条提示词";
+    replace(favStar, h("span", { class: "fav-icon" }, saved ? "★" : "☆"), h("span", null, saved ? "已收藏" : "收藏"));
+    replace(favToggle, h("span", null, `收藏夹 ${list.length}`), h("span", { class: "chev" + (favOpen ? " open" : "") }, icon("chevron", 12)));
+    favList.hidden = !favOpen;
+    if (!favOpen) return;
+    replace(favList, ...(list.length ? list.map(t => h("div", { class: "fav-item" + (t === text ? " on" : "") },
+      h("button", { class: "fav-text", title: t, onClick: () => setPromptText(t) }, t),
+      h("button", { class: "fav-del", title: "从收藏夹删除", onClick: () => { favorites[favKey()] = (favorites[favKey()] ?? []).filter(x => x !== t); store.saveFavorites(favorites); renderFav(); } }, icon("close", 10))))
+      : [h("div", { class: "fav-empty" }, "还没有收藏。输入提示词后点「☆ 收藏」")]));
+  }
 
   function renderStatus() {
     replace(statusEl, h("span", { class: "dot " + status.kind }), h("span", { class: "status-text", title: status.text }, status.text),
@@ -231,8 +292,9 @@ export function mountApp(root: HTMLElement, svc: Services) {
 
   function renderHistory() {
     const add = willAdd();
-    targetEl.textContent = add ? `添加到「${group!.name}」` : mode === "outpaint" ? "新建扩图" : mode === "txt2img" ? "新建生成" : "新建填充";
-    targetEl.title = mode === "txt2img"
+    targetEl.textContent = add ? `添加到「${group!.name}」` : mode === "outpaint" ? "新建扩图" : mode === "txt2img" ? "新建生成" : mode === "upscale" ? (upLayerMode() ? "智能对象" : "新文档") : "新建填充";
+    targetEl.title = mode === "upscale" ? (upLayerMode() ? "结果放在原图层上方，是同样大小的智能对象（里面是放大后的图片），原图层隐藏" : "放大结果放进一个新文档，原文档不改动")
+      : mode === "txt2img"
       ? (add ? `新变体加入「${group!.name}」，放在它原来的位置。点击改为新建` : group?.kind === "txt2img" ? `新建一组生成结果。点击改为添加到「${group.name}」` : "生成结果放进选区；没有选区时铺满画布；没有打开文档时新建文档")
       : mode === "outpaint"
       ? (add ? `新变体加入「${group!.name}」，使用它原来的扩展尺寸。拖动上面的画布边缘可改为新建扩图` : "按上面设定的尺寸扩展画布，并生成扩展部分")
@@ -260,15 +322,14 @@ export function mountApp(root: HTMLElement, svc: Services) {
     if (!tiles.length) tiles.push(h("div", { class: "history-empty" }, group ? "这个填充还没有变体" : "生成的结果会以变体出现在这里，点击即可切换"));
     varCountEl.textContent = variations.length ? `${variations.length} 个` : "";
     const shown = variations.find(x => x.visible) ?? variations[variations.length - 1];
-    regenBtn.hidden = !group || !shown;
+    regenBtn.hidden = !group || !shown || group.kind === "upscale";
     regenBtn.disabled = !!run;
     regenBtn.title = !shown ? "" : group?.kind === "outpaint"
       ? `用变体 ${shown.number} 的提示词和原来的扩展尺寸，再生成新的变体`
       : `用变体 ${shown.number} 的提示词「${shown.prompt || "移除"}」和原来的遮罩，再生成新的变体（不读取当前选区和输入框）`;
     replace(historyEl, ...tiles);
     const active = variations.find(v => v.visible);
-    replace(varPromptEl, active ? h("span", null, h("span", { class: "muted" }, `变体 ${active.number}：`), active.prompt || "（无提示词）",
-      active.prompt && active.prompt !== prompt.value ? h("button", { class: "link", onClick: () => { prompt.value = active.prompt; prompt.dispatchEvent(new Event("input")); renderAction(); } }, " 使用") : null) : null);
+    replace(varPromptEl, active ? h("span", null, h("span", { class: "muted" }, `变体 ${active.number}：`), active.prompt || "（无提示词）") : null);
     void loadThumbs();
   }
 
@@ -290,9 +351,19 @@ export function mountApp(root: HTMLElement, svc: Services) {
     modeBtns.forEach((b, i) => b.classList.toggle("on", MODES[i][0] === mode));
     expandCard.hidden = mode !== "outpaint";
     t2iCard.hidden = mode !== "txt2img";
+    upCard.hidden = mode !== "upscale";
+    const factor = upScale();
+    replace(upBtns, ...upFactors().map(f => h("button", { class: "seg-btn" + (f === factor ? " on" : ""), title: f === 1 ? "原尺寸修复（不放大）" : `放大 ${f} 倍`,
+      onClick: () => { settings.upScale = f; store.saveSettings(settings); renderFlows(); renderSelection(); renderAction(); } }, f === 1 ? "修复" : `${f}×`)));
+    const scope = upLayerMode() ? "layer" : "canvas";
+    replace(upScope, ...([["canvas", "整个画面", "选区或整个画面（所有可见图层）放大到新文档"], ["layer", "当前图层", "放大选中的图层，结果是同样大小的智能对象，里面是放大后的图片"]] as const).map(([k, label, tip]) =>
+      h("button", { class: "seg-btn" + (k === scope ? " on" : ""), title: tip, onClick: () => { settings.upTarget = k; store.saveSettings(settings); renderFlows(); renderHistory(); renderSelection(); renderAction(); } }, label)));
+    // the upscale workflow has no prompt; one layer gives one result
+    prompt.hidden = mode === "upscale";
+    countSel.hidden = mode === "upscale" && upLayerMode();
     t2iRatio.value = settings.t2iRatio ?? T2I_FOLLOW;
     t2iLong.value = String(settings.t2iLong ?? 1536);
-    flowName.textContent = profile ? profile.name : mode === "outpaint" ? "导入扩图工作流" : mode === "txt2img" ? "导入文生图工作流" : "导入工作流";
+    flowName.textContent = profile ? profile.name : mode === "outpaint" ? "导入扩图工作流" : mode === "txt2img" ? "导入文生图工作流" : mode === "upscale" ? "导入放大工作流" : "导入工作流";
     flowBtn.title = profile ? `工作流：${profile.name}（点击切换、导入或校准）` : "导入 ComfyUI 工作流";
     flowBtn.classList.toggle("warn", !!profile && validateProfile(profile).length > 0);
     countSel.value = String(pstate?.count ?? 1);
@@ -303,7 +374,8 @@ export function mountApp(root: HTMLElement, svc: Services) {
       : allowEmpty ? "描述要画进选区的内容；留空 = 移除选区内的内容" : "描述要画进选区的内容";
     prompt.title = promptHint.textContent;
     prompt.value = pstate?.prompt ?? "";
-    promptHint.hidden = !!prompt.value;
+    promptHint.hidden = !!prompt.value || mode === "upscale";
+    renderFav();
   }
 
   /** Reference slots: the workflow's own reference loaders, or free encoder inputs (auto-wired). */
@@ -363,7 +435,23 @@ export function mountApp(root: HTMLElement, svc: Services) {
       replace(t2iInfo, h("span", { class: "muted" }, "放入："), t.where);
       return;
     }
-    if (!doc) { selEl.textContent = "未打开文档"; return; }
+    if (!doc) { selEl.textContent = "未打开文档"; if (mode === "upscale") replace(upInfo); return; }
+    if (mode === "upscale" && upLayerMode()) {
+      const l = upLayer(), f = upScale();
+      if (!l) { selEl.textContent = "未选中图层"; selEl.className = "sel-state warn"; replace(upInfo, h("span", { class: "muted" }, "在图层面板选中要放大的图层")); return; }
+      const w = l.rect.right - l.rect.left, hh = l.rect.bottom - l.rect.top;
+      selEl.textContent = `内容 ${w * f} × ${hh * f}`;
+      selEl.className = "sel-state" + (Math.max(w, hh) * f > MAX_UPSCALE_EDGE ? " warn" : "");
+      replace(upInfo, h("span", { class: "muted" }, "放大："), `图层「${l.name}」 ${w} × ${hh}`, h("span", { class: "muted" }, "（放大后变成智能对象，原图层隐藏）"));
+      return;
+    }
+    if (mode === "upscale") {
+      const r = upSource()!, w = r.right - r.left, hh = r.bottom - r.top, f = upScale();
+      selEl.textContent = `输出 ${w * f} × ${hh * f}`;
+      selEl.className = "sel-state" + (Math.max(w, hh) * f > MAX_UPSCALE_EDGE ? " warn" : "");
+      replace(upInfo, h("span", { class: "muted" }, "放大："), sel ? `选区 ${w} × ${hh}` : `整个画面 ${w} × ${hh}`, h("span", { class: "muted" }, "（所有可见图层）"));
+      return;
+    }
     if (mode === "outpaint") {
       selEl.textContent = willAdd() && group?.pads ? `扩展 ${group.pads.left + group.pads.right} × ${group.pads.top + group.pads.bottom}`
         : `画布 ${doc.width} × ${doc.height}` + (padTotal() ? ` → ${doc.width + pads.left + pads.right} × ${doc.height + pads.top + pads.bottom}` : "");
@@ -376,7 +464,7 @@ export function mountApp(root: HTMLElement, svc: Services) {
   }
 
   function blockedReason(text = prompt.value, regenerating = false): string | null {
-    if (!profile) return mode === "outpaint" ? "请先导入扩图工作流（含「外补画板」节点）" : mode === "txt2img" ? "请先导入文生图工作流" : "请先导入工作流";
+    if (!profile) return mode === "outpaint" ? "请先导入扩图工作流（含「外补画板」节点）" : mode === "txt2img" ? "请先导入文生图工作流" : mode === "upscale" ? "请先导入放大工作流" : "请先导入工作流";
     const problems = validateProfile(profile);
     if (problems.length) return "工作流需要校准：" + problems[0];
     if (conn.state !== "ok") return "未连接 ComfyUI";
@@ -385,6 +473,11 @@ export function mountApp(root: HTMLElement, svc: Services) {
       return null;
     }
     if (!doc) return "请先打开 PSD";
+    if (mode === "upscale") {
+      const r = upSource();
+      if (!r) return "请在图层面板选中一个图层（不能是图层组或调整图层）";
+      return Math.max(r.right - r.left, r.bottom - r.top) * upScale() > MAX_UPSCALE_EDGE ? `放大后超过 ${MAX_UPSCALE_EDGE} 像素，请框选一部分或降低倍数` : null;
+    }
     if (mode === "outpaint" && !regenerating && !willAdd() && !padTotal()) return "拖动上面画布的边缘，设定要扩展的尺寸";
     if (mode === "inpaint" && !regenerating && !sel && !willAdd()) return "请先建立选区";
     if (modeOf(profile) === "inpaint" && !profile.options.allowEmptyPrompt && profile.bindings.some(b => b.role === "prompt") && !text.trim()) return "请输入提示词（留空移除可在「接口校准」里开启）";
@@ -405,7 +498,7 @@ export function mountApp(root: HTMLElement, svc: Services) {
     genBtn.className = "generate";
     genBtn.disabled = !!why;
     genBtn.title = why ?? "";
-    replace(genBtn, icon("spark"), h("span", null, willAdd() ? "生成更多变体" : mode === "outpaint" ? "扩图" : "生成"));
+    replace(genBtn, icon("spark"), h("span", null, willAdd() ? "生成更多变体" : mode === "outpaint" ? "扩图" : mode === "upscale" ? "放大" : "生成"));
     progEl.hidden = !why;
     replace(progEl, why ? h("div", { class: "stage muted" }, why,
       conn.state === "down" && svc.launch ? h("button", { class: "link", onClick: () => void launchComfy() }, settings.comfyLaunch ? "  一键启动" : "  设置启动文件") : null) : null);
@@ -465,7 +558,7 @@ export function mountApp(root: HTMLElement, svc: Services) {
     replace(advBody, ...rows);
   }
 
-  function renderAll() { renderConn(); renderFlows(); renderHistory(); renderRefs(); renderSelection(); renderAction(); renderAdvanced(); renderStatus(); }
+  function renderAll() { renderView(); renderConn(); renderFlows(); renderHistory(); renderRefs(); renderSelection(); renderAction(); renderAdvanced(); renderStatus(); }
 
   // ── Photoshop state ──
   let refreshing = false, again = false;
@@ -514,6 +607,20 @@ export function mountApp(root: HTMLElement, svc: Services) {
     } catch (e) { log("warn", "doc thumbnail", e); }
   }
 
+  function setView(v: "generate" | "tools") {
+    if (run) return;
+    settings.view = v; store.saveSettings(settings);
+    renderView();
+    if (v === "tools") void toolsView.refresh();
+  }
+
+  function renderView() {
+    viewBtns.forEach((b, i) => b.classList.toggle("on", (i === 1) === toolsMode()));
+    genView.hidden = toolsMode();
+    toolsView.el.hidden = !toolsMode();
+    flowBtn.hidden = toolsMode();
+  }
+
   function setMode(m: TaskType) {
     if (m === mode || run) return;
     mode = m; settings.mode = m; store.saveSettings(settings);
@@ -527,7 +634,11 @@ export function mountApp(root: HTMLElement, svc: Services) {
 
   async function showVariation(v: Variation) {
     if (!group || run) return;
-    try { await svc.host.showVariation(group, v.layerId); variations = variations.map(x => ({ ...x, visible: x.layerId === v.layerId })); renderHistory(); }
+    try {
+      await svc.host.showVariation(group, v.layerId); variations = variations.map(x => ({ ...x, visible: x.layerId === v.layerId })); renderHistory();
+      // the picked variation's prompt goes into the prompt box
+      if (group.kind !== "upscale" && group.kind === mode) setPromptText(v.prompt === "移除" ? "" : v.prompt);
+    }
     catch (e) { setStatus("切换失败：" + (e as Error).message, "error"); }
   }
 
@@ -677,7 +788,7 @@ export function mountApp(root: HTMLElement, svc: Services) {
           return h("button", { class: "menu-item flow-item" + (p.id === profile?.id ? " on" : ""), onClick: () => { selectProfile(p.id); sheet.remove(); } },
             icon(p.id === profile?.id ? "check" : "flow"),
             h("span", { class: "grow" }, h("b", null, p.name), h("span", { class: "muted small block" },
-              (modeOf(p) === "outpaint" ? "扩图 · " : modeOf(p) === "txt2img" ? "文生图 · " : "局部重绘 · ") + (p.source?.kind === "comfy" ? "ComfyUI 已保存的工作流" : "API JSON") + (bad ? " · 需要校准" : ""))));
+              (modeOf(p) === "outpaint" ? "扩图 · " : modeOf(p) === "txt2img" ? "文生图 · " : modeOf(p) === "upscale" ? "放大 · " : "局部重绘 · ") + (p.source?.kind === "comfy" ? "ComfyUI 已保存的工作流" : "API JSON") + (bad ? " · 需要校准" : ""))));
         })),
       h("div", { class: "sheet-foot" },
         profile ? h("button", { class: "btn", onClick: () => { sheet.remove(); void calibrate(); } }, "校准当前") : null,
@@ -763,17 +874,19 @@ export function mountApp(root: HTMLElement, svc: Services) {
           h("div", { class: "sum-name" }, icon("check", 16), h("span", null, name)),
           h("div", { class: "muted small" }, "所有必需的接口都已自动找到，可以直接使用。"),
           h("div", { class: "sum" },
-            line(bindings.some(b => b.role === "pad") ? "原图" : "画面 + 选区", img, img?.encoding === "rgba-alpha-mask" ? "（选区写入透明通道）" : ""),
+            line(bindings.some(b => b.role === "pad" || b.role === "scale") ? "原图" : "画面 + 选区", img, img?.encoding === "rgba-alpha-mask" ? "（选区写入透明通道）" : ""),
             line("选区遮罩", bindings.find(b => b.role === "mask")),
             bindings.some(b => b.role === "size") ? h("div", { class: "sum-row" }, h("span", { class: "sum-k" }, ROLE_LABEL.size),
               h("span", { class: "sum-v" }, bindings.filter(b => b.role === "size").map(b => `#${b.nodeId}.${b.input}`).join("、") + "（由面板上的比例和长边控制）")) : null,
             ...bindings.filter(b => b.role === "reference").map(b => line(`参考图 ${b.slot}`, b, b.emptyValue ? "（可选）" : "")),
             bindings.some(b => b.role === "pad") ? h("div", { class: "sum-row" }, h("span", { class: "sum-k" }, ROLE_LABEL.pad),
               h("span", { class: "sum-v" }, bindings.filter(b => b.role === "pad").map(b => `#${b.nodeId}.${b.input}`).join("、") + "（由面板上的画布控制）")) : null,
+            bindings.some(b => b.role === "scale") ? h("div", { class: "sum-row" }, h("span", { class: "sum-k" }, ROLE_LABEL.scale),
+              h("span", { class: "sum-v" }, bindings.filter(b => b.role === "scale").map(b => `#${b.nodeId}.${b.input}`).join("、") + "（由面板上的倍数控制）")) : null,
             line("提示词", bindings.find(b => b.role === "prompt")),
             line("输出", bindings.find(b => b.role === "output")),
             params.length ? h("div", { class: "sum-row" }, h("span", { class: "sum-k" }, "高级参数"), h("span", { class: "sum-v" }, params.join("、"))) : null),
-          bindings.some(b => b.role === "prompt") && !bindings.some(b => b.role === "pad" || b.role === "size")
+          bindings.some(b => b.role === "prompt") && !bindings.some(b => b.role === "pad" || b.role === "size" || b.role === "scale")
             ? h("label", { class: "check-row sum-opt" }, empty, h("span", null, "提示词留空时执行「移除选区内容」")) : null),
         h("div", { class: "sheet-foot" },
           h("button", { class: "btn", onClick: () => done("adjust") }, "手动调整"),
@@ -793,6 +906,8 @@ export function mountApp(root: HTMLElement, svc: Services) {
       else delete p.options.outpaint;
       if (rec.taskType === "txt2img") { p.options.txt2img = rec.txt2img; p.options.allowEmptyPrompt = false; }
       else delete p.options.txt2img;
+      if (rec.taskType === "upscale") { p.options.upscale = rec.upscale; p.options.allowEmptyPrompt = true; }
+      else delete p.options.upscale;
       return p;
     };
     const old = profiles.find(p => p.name === name);
@@ -814,7 +929,7 @@ export function mountApp(root: HTMLElement, svc: Services) {
     const options = newProfile(name, api, []).options;
     const auto = autoBindings(rec);
     if (auto) {
-      options.allowEmptyPrompt = rec.taskType === "outpaint" || (rec.taskType === "inpaint" && looksLikeRemoval(name, auto));
+      options.allowEmptyPrompt = rec.taskType === "outpaint" || rec.taskType === "upscale" || (rec.taskType === "inpaint" && looksLikeRemoval(name, auto));
       const choice = await openSummary(name, auto, options);
       if (!choice) return;
       if (choice === "ok") {
@@ -858,7 +973,7 @@ export function mountApp(root: HTMLElement, svc: Services) {
     const auto = !!profile && !profile.bindings.some(b => b.role === "reference");
     const tag = auto ? `图${slot + 1}` : `参考 ${slot}`;
     const set = (r: RefSlot) => { refs[slot] = r; sheet.remove(); renderRefs(); };
-    const layers = doc ? svc.host.listLayers(doc.id).filter(l => l.kind !== "group" && !l.name.startsWith(FILL_PREFIX) && !l.name.startsWith(EXPAND_PREFIX) && !l.name.startsWith(GENERATE_PREFIX)) : [];
+    const layers = doc ? svc.host.listLayers(doc.id).filter(l => l.kind !== "group" && !l.name.startsWith(FILL_PREFIX) && !l.name.startsWith(EXPAND_PREFIX) && !l.name.startsWith(GENERATE_PREFIX) && !l.name.startsWith(UPSCALE_PREFIX)) : [];
     const list = h("div", { class: "layer-list" }, ...layers.map(l => {
       const img = h("div", { class: "layer-thumb" }, icon("image", 14));
       const row = h("button", { class: "layer-row", title: l.name, onClick: () => {
@@ -946,6 +1061,11 @@ export function mountApp(root: HTMLElement, svc: Services) {
         if (!t) return "ComfyUI 中的工作流里找不到设置输出尺寸的节点了，请点「接口校准」重新确认";
         p.options.txt2img = t;
       }
+      if (modeOf(p) === "upscale") {
+        const u = recognize(api).upscale;
+        if (!u) return "ComfyUI 中的工作流里找不到放大节点了，请点「接口校准」重新确认";
+        p.options.upscale = u;
+      }
       if (!p.options.cropDefault) Object.assign(p.options, { sendScope: "crop", cropMargin: 1, cropDefault: true });
       refreshMaskLinks(p);
       store.saveProfiles(profiles);
@@ -978,7 +1098,7 @@ export function mountApp(root: HTMLElement, svc: Services) {
     if (!group || !v || run) return;
     // a fill is regenerated with a workflow of its own kind
     if (group.kind !== mode) setMode(group.kind);
-    if (!profile) { setStatus(group.kind === "outpaint" ? "请先导入扩图工作流" : group.kind === "txt2img" ? "请先导入文生图工作流" : "请先导入局部重绘工作流", "error"); return; }
+    if (!profile) { setStatus(group.kind === "outpaint" ? "请先导入扩图工作流" : group.kind === "txt2img" ? "请先导入文生图工作流" : group.kind === "upscale" ? "请先导入放大工作流" : "请先导入局部重绘工作流", "error"); return; }
     await generate({ addTo: group, prompt: v.prompt === "移除" ? "" : v.prompt });
   }
 
@@ -1002,6 +1122,8 @@ export function mountApp(root: HTMLElement, svc: Services) {
         addTo: again ? again.addTo : willAdd() ? group ?? undefined : undefined,
         pads: modeOf(p) === "outpaint" ? { ...pads } : undefined,
         size: modeOf(p) === "txt2img" ? t2iSize() : undefined,
+        scale: modeOf(p) === "upscale" ? upScale() : undefined,
+        layer: modeOf(p) === "upscale" && upLayerMode() ? (({ id, name }) => ({ id, name }))(upLayer()!) : undefined,
         references: Object.fromEntries(Object.entries(refs).map(([k, v]) => [k, v])),
         count: ps.count ?? 1,
         fullRun: !!ps.fullRun,
@@ -1021,7 +1143,8 @@ export function mountApp(root: HTMLElement, svc: Services) {
         debug: settings.debugFiles ? svc.debugSave : undefined,
       });
       if (ps.seedMode === "random") { ps.seed = res.seeds[res.seeds.length - 1]; store.saveState(p.id, ps); }
-      setStatus(`${res.continued ? "已加入" : modeOf(p) === "outpaint" ? "已扩展画布，" : modeOf(p) === "txt2img" ? "已生成，" : "已新建 AI 填充，"}变体 ${res.variations.map(v => v.number).join("、")} · seed ${res.seeds.join("、")}`, "ok");
+      if (!res.group) setStatus("已放大图层，结果是上方的智能对象，原图层已隐藏", "ok");
+      else setStatus(`${res.continued ? "已加入" : modeOf(p) === "outpaint" ? "已扩展画布，" : modeOf(p) === "txt2img" ? "已生成，" : modeOf(p) === "upscale" ? "已放大到新文档，" : "已新建 AI 填充，"}变体 ${res.variations.map(v => v.number).join("、")} · seed ${res.seeds.join("、")}`, "ok");
     } catch (e) {
       log("error", "generate failed", e);
       if (e instanceof StashedResult) { stash = e.png; setStatus(e.message, "error"); }
@@ -1061,7 +1184,8 @@ export function mountApp(root: HTMLElement, svc: Services) {
   window.addEventListener("unhandledrejection", e => { log("error", "unhandled", (e as PromiseRejectionEvent).reason); setStatus("插件内部错误：" + String((e as PromiseRejectionEvent).reason?.message ?? (e as PromiseRejectionEvent).reason), "error"); });
   log("info", "start", svc.version, svc.host.kind, settings.comfyUrl);
   renderAll();
-  svc.host.onChange(() => void refresh());
+  svc.host.onChange(() => { void refresh(); if (toolsMode()) void toolsView.refresh(); });
   void refresh();
+  if (toolsMode()) void toolsView.refresh();
   void checkConn();
 }

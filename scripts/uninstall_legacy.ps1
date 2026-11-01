@@ -6,7 +6,7 @@
 # Kept on purpose:
 #   - WavePlug Studio (com.waveplug.studio / .dev) and F:\waveplug\studio
 #   - ComfyUI custom_nodes\waveplug_author_compat (provides nodes Gu Hai's workflows use)
-#   - J:\AI things\OpenLayer\Adobe-UPIA-Extract (the installer WavePlug Studio uses)
+#   - D:\App\Adobe-UPIA-Extract (the installer WavePlug Studio uses)
 
 $ErrorActionPreference = "Continue"
 $stamp = Get-Date -Format "yyyyMMdd_HHmm"
@@ -18,7 +18,7 @@ if (Get-Process -Name Photoshop -ErrorAction SilentlyContinue) { Write-Host "Pho
 $comfy = Get-CimInstance Win32_Process -Filter "Name='python.exe'" | Where-Object { $_.CommandLine -match "ComfyUI" }
 if ($comfy) { Write-Host "ComfyUI is running. Close it, and run this again."; Stop-Transcript | Out-Null; exit 1 }
 
-$UPIA = "J:\AI things\OpenLayer\Adobe-UPIA-Extract\UPI64-unpacked\UnifiedPluginInstallerAgent\UnifiedPluginInstallerAgent.exe"
+$UPIA = "D:\App\Adobe-UPIA-Extract\UPI64-unpacked\UnifiedPluginInstallerAgent\UnifiedPluginInstallerAgent.exe"
 $COMFY = "J:\AI things\ComfyUI\ComfyUI_windows_portable\ComfyUI"
 $LEGACY = '^(com\.waveplug\.psai(_.*)?|1e827d3d(_.*)?|.*sd-?ppp.*)$'   # never matches com.waveplug.studio
 

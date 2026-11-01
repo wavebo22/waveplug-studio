@@ -2,12 +2,13 @@
 
 import type { Comfy } from "../core/comfy/client.ts";
 import type { Profile, TaskType } from "../core/workflow/profile.ts";
-import type { PsHost } from "../ps/host.ts";
+import type { LayerTools, PsHost } from "../ps/host.ts";
 
 export interface PickedImage { name: string; bytes: Uint8Array; url: string }
 
 export interface Services {
   host: PsHost;
+  tools: LayerTools;
   /** Created on demand from the configured address. */
   comfy(base: string): Comfy;
   pickJson(): Promise<{ name: string; text: string } | null>;
@@ -34,16 +35,25 @@ export interface Settings {
   debugFiles: boolean;
   /** ComfyUI start script / executable for one-click start (e.g. run_nvidia_gpu.bat) */
   comfyLaunch: string;
+  /** 生成 (the AI modes) or 工具 */
+  view?: "generate" | "tools";
   /** panel mode and the workflow last used in each mode */
   mode?: TaskType;
   activeByMode?: Partial<Record<TaskType, string>>;
   /** text-to-image size: "跟随" (selection / canvas aspect) or "w:h", and the long side in px */
   t2iRatio?: string;
   t2iLong?: number;
+  /** 放大 factor */
+  upScale?: number;
+  /** 放大: whole canvas / selection into a new document, or the active layer into a smart object */
+  upTarget?: "canvas" | "layer";
 }
 export interface ProfileState { prompt: string; params: Record<string, number | boolean>; seedMode: "random" | "fixed"; seed: number; count?: number; fullRun?: boolean }
 
-const KEY = { settings: "wp.settings", profiles: "wp.profiles", state: "wp.state.", thumb: "wp.thumb." };
+const KEY = { settings: "wp.settings", profiles: "wp.profiles", state: "wp.state.", thumb: "wp.thumb.", favorites: "wp.favorites" };
+
+/** Saved prompts per place they are typed in: inpaint, outpaint, txt2img. */
+export type Favorites = Record<string, string[]>;
 
 function read<T>(k: string, fallback: T): T {
   try { const v = localStorage.getItem(k); return v ? (JSON.parse(v) as T) : fallback; } catch { return fallback; }
@@ -59,6 +69,8 @@ export const store = {
   saveProfiles: (p: Profile[]) => write(KEY.profiles, p),
   state: (id: string): ProfileState => ({ prompt: "", params: {}, seedMode: "random", seed: 0, ...read<Partial<ProfileState>>(KEY.state + id, {}) }),
   saveState: (id: string, s: ProfileState) => write(KEY.state + id, s),
+  favorites: (): Favorites => read<Favorites>(KEY.favorites, {}),
+  saveFavorites: (f: Favorites) => write(KEY.favorites, f),
   thumb: (taskId: string, label: string): string | null => { try { return localStorage.getItem(KEY.thumb + taskId + "." + label); } catch { return null; } },
   saveThumb: (taskId: string, label: string, url: string) => { try { localStorage.setItem(KEY.thumb + taskId + "." + label, url); } catch { /* quota */ } },
 };

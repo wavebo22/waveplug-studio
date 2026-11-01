@@ -113,9 +113,8 @@ export function openCalibration(host: HTMLElement, g: ApiGraph, rec: Recognition
         if (b) bindings.push({ ...b, role: r.role });
       }
       bindings.push(...params);
-      // 扩图: the four extension amounts are always the canvas node's own sources
-      // 扩图 / 文生图: extension amounts and output size are set by the panel, always the recognised sources
-      for (const role of ["pad", "size"] as const) {
+      // 扩图 / 文生图 / 放大: extension amounts, output size and factor are set by the panel, always the recognised sources
+      for (const role of ["pad", "size", "scale"] as const) {
         const own = init.bindings.filter(b => b.role === role);
         bindings.push(...(own.length ? own : rec.suggestions.filter(x => x.binding.role === role).map(x => x.binding)));
       }

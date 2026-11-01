@@ -3,8 +3,8 @@
 
 import { type ApiGraph, isLink, title } from "./api.ts";
 
-export type TaskType = "inpaint" | "outpaint" | "txt2img";
-export type Role = "image" | "mask" | "prompt" | "negative" | "seed" | "reference" | "param" | "output" | "pad" | "size";
+export type TaskType = "inpaint" | "outpaint" | "txt2img" | "upscale";
+export type Role = "image" | "mask" | "prompt" | "negative" | "seed" | "reference" | "param" | "output" | "pad" | "size" | "scale";
 export type Side = "left" | "right" | "top" | "bottom";
 export const SIDES: Side[] = ["left", "right", "top", "bottom"];
 
@@ -30,10 +30,17 @@ export interface Txt2ImgSize {
   max: number;
 }
 
+/** Upscale workflows: the factors the scale input accepts. */
+export interface UpscaleOptions {
+  /** factors offered in the panel (1 = restore at the original size) */
+  factors: number[];
+}
+
 export const ROLE_LABEL: Record<Role, string> = {
   image: "主画面（当前画面）",
   pad: "扩展尺寸",
   size: "输出尺寸",
+  scale: "放大倍数",
   mask: "选区遮罩",
   prompt: "提示词",
   negative: "负面提示词",
@@ -99,6 +106,8 @@ export interface Profile {
     outpaint?: OutpaintCanvas;
     /** text-to-image workflows: how the output size is set */
     txt2img?: Txt2ImgSize;
+    /** upscale workflows: the factors offered */
+    upscale?: UpscaleOptions;
     /** free encoder image inputs for reference images (execution copy only), see references.ts */
     refSlots?: { nodes: { nodeId: string; inputs: string[] }[] };
     /** links that make the sampler respect the selection (execution copy only), see localMask.ts */
@@ -141,6 +150,10 @@ export function validateProfile(p: Profile): string[] {
   }
   if (!has("image")) problems.push("未绑定主画面");
   if (!has("output")) problems.push("未绑定输出图片");
+  if (p.taskType === "upscale") {
+    if (!has("scale")) problems.push("未绑定放大倍数");
+    return problems;
+  }
   if (p.taskType === "outpaint") {
     for (const side of SIDES) if (!p.bindings.some(b => b.role === "pad" && b.side === side)) problems.push(`未绑定扩展尺寸（${side}）`);
     return problems;
