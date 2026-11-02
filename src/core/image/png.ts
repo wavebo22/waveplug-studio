@@ -1,5 +1,7 @@
-// Minimal PNG encoder (8-bit gray / RGB / RGBA). Uses stored (uncompressed) deflate blocks:
-// localhost upload size doesn't matter, encode speed does, and UXP has no CompressionStream.
+// Minimal PNG encoder (8-bit gray / RGB / RGBA). Rows are filtered and deflate-compressed
+// (deflate.ts): uncompressed, a large crop passed ComfyUI's 100 MB upload limit.
+
+import { filterRows, zlibDeflate } from "./deflate.ts";
 
 const CRC_TABLE = (() => {
   const t = new Uint32Array(256);
@@ -25,21 +27,16 @@ export interface Pixels {
   data: Uint8Array;
 }
 
+/** PNG (8-bit gray / RGB / RGBA) with filtered, deflate-compressed rows. */
 export function encodePng(p: Pixels): Uint8Array {
   const { width: w, height: h, channels: ch, data } = p;
   if (data.length !== w * h * ch) throw new Error(`像素数据长度 ${data.length} 与 ${w}×${h}×${ch} 不符`);
   const colorType = ch === 1 ? 0 : ch === 3 ? 2 : 6;
-  const rowLen = w * ch + 1;
-  const rawLen = rowLen * h;
-  const MAX_BLOCK = 65535;
-  const blocks = Math.max(1, Math.ceil(rawLen / MAX_BLOCK));
-  const zlibLen = 2 + rawLen + blocks * 5 + 4;
-  const total = 8 + (12 + 13) + (12 + zlibLen) + 12;
-  const out = new Uint8Array(total);
+  const z = zlibDeflate(filterRows(data, w, h, ch));
+  const out = new Uint8Array(8 + (12 + 13) + (12 + z.length) + 12);
   const dv = new DataView(out.buffer);
-  let o = 0;
-  out.set([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a], 0); o = 8;
-
+  out.set([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a], 0);
+  let o = 8;
   const chunk = (type: string, len: number, write: () => void) => {
     dv.setUint32(o, len); o += 4;
     const start = o;
@@ -47,34 +44,12 @@ export function encodePng(p: Pixels): Uint8Array {
     write();
     dv.setUint32(o, crc32(out, start, o)); o += 4;
   };
-
   chunk("IHDR", 13, () => {
     dv.setUint32(o, w); dv.setUint32(o + 4, h);
     out[o + 8] = 8; out[o + 9] = colorType; out[o + 10] = 0; out[o + 11] = 0; out[o + 12] = 0;
     o += 13;
   });
-
-  chunk("IDAT", zlibLen, () => {
-    out[o++] = 0x78; out[o++] = 0x01;
-    let a = 1, b = 0; // adler32
-    let row = 0, col = 0; // position in the virtual filtered stream
-    let remaining = rawLen;
-    while (remaining > 0) {
-      const len = Math.min(MAX_BLOCK, remaining);
-      remaining -= len;
-      out[o++] = remaining === 0 ? 1 : 0;
-      out[o++] = len & 0xff; out[o++] = len >>> 8;
-      out[o++] = ~len & 0xff; out[o++] = (~len >>> 8) & 0xff;
-      for (let i = 0; i < len; i++) {
-        const byte = col === 0 ? 0 : data[row * w * ch + col - 1];
-        out[o++] = byte;
-        a = (a + byte) % 65521; b = (b + a) % 65521;
-        if (++col === rowLen) { col = 0; row++; }
-      }
-    }
-    dv.setUint32(o, ((b << 16) | a) >>> 0); o += 4;
-  });
-
+  chunk("IDAT", z.length, () => { out.set(z, o); o += z.length; });
   chunk("IEND", 0, () => {});
   return out;
 }

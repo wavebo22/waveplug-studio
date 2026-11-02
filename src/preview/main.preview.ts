@@ -9,7 +9,8 @@ import { recognize } from "../core/workflow/recognize.ts";
 import { newProfile } from "../core/workflow/profile.ts";
 import type { Services } from "../app/services.ts";
 import type { ActiveLayer, Capture, DocInfo, FillGroup, LayerInfo, LayerTools, Pads, PsHost, Variation, VariationMask } from "../ps/host.ts";
-import { type ToolLayer, sameSourceIds, selectedContents, uniquePlan } from "../core/layers/smart.ts";
+import { type ToolLayer, editablePlan, sameSourceIds, selectedContents, uniquePlan } from "../core/layers/smart.ts";
+import type { DocScan, SlimKind } from "../core/layers/slim.ts";
 import { mountApp } from "../ui/app.ts";
 
 const HUES = [168, 24, 210, 280, 96, 340];
@@ -54,6 +55,7 @@ class MockHost implements PsHost {
     return { doc: this.doc, rect, image: { width: w, height: h, channels: 3, data: new Uint8Array(w * h * 3).fill(128) }, selection: { width: w, height: h, channels: 1, data: sel } };
   }
   activeLayer(): ActiveLayer | null { return this.docOpen ? { id: 7, name: "产品参考", kind: "pixel", rect: { left: 300, top: 200, right: 700, bottom: 650 } } : null; }
+  activeLayers(): ActiveLayer[] { return this.docOpen ? [this.activeLayer()!, { id: 8, name: "瓶子", kind: "smartObject", rect: { left: 900, top: 300, right: 1300, bottom: 900 } }, { id: 9, name: "装饰组", kind: "group", rect: { left: 0, top: 0, right: 100, bottom: 100 } }] : []; }
   async layerImage() { const w = 400, h = 450, data = new Uint8Array(w * h * 4); for (let i = 0; i < w * h; i++) { data[i * 4] = 200; data[i * 4 + 1] = 120; data[i * 4 + 2] = 60; data[i * 4 + 3] = (i % w) > 40 ? 255 : 0; } await sleep(100); return { pixels: { width: w, height: h, channels: 4 as const, data }, rect: { left: 300, top: 200, right: 700, bottom: 650 } }; }
   async placeUpscaledLayer(_d: number, _l: number, _png: Uint8Array, _r: Rect, name: string) { console.log("placed smart object", name); await sleep(150); return 99; }
   listLayers(): LayerInfo[] { return [{ id: 1, name: "标题文字", depth: 0, kind: "text" }, { id: 42, name: "AI填充 · 橘子汁", depth: 0, kind: "group" }, { id: 7, name: "产品参考", depth: 0, kind: "pixel" }, { id: 3, name: "背景", depth: 0, kind: "pixel" }]; }
@@ -62,6 +64,7 @@ class MockHost implements PsHost {
   async clipboardImage(): Promise<Pixels | null> { const w = 40, h = 30; return { width: w, height: h, channels: 3, data: new Uint8Array(w * h * 3).map((_, i) => (i * 37) & 255) }; }
   async variations() { return this.list.map(v => ({ ...v })); }
   async setFillVisible() {}
+  async placeBelow() {}
   async showVariation(_g: FillGroup, layerId: number) { this.list.forEach(v => { v.visible = v.layerId === layerId; }); }
   async deleteVariation(_g: FillGroup, layerId: number) { this.list = this.list.filter(v => v.layerId !== layerId); if (!this.list.some(v => v.visible) && this.list.length) this.list[this.list.length - 1].visible = true; }
   async createFillGroup(d: number, rect: Rect, prompt: string, pads?: Pads, kind?: FillGroup["kind"]): Promise<FillGroup> { this.groupSelected = true; this.list = []; this.group = { ...this.group, docId: d, kind: pads ? "outpaint" : kind ?? "inpaint", pads, layerId: this.group.layerId + 1, rect, name: pads ? `←${pads.left} →${pads.right} ↑${pads.top} ↓${pads.bottom}` : prompt.slice(0, 24) }; return this.group; }
@@ -101,6 +104,7 @@ class MockTools implements LayerTools {
   async convert(separately: boolean) { const n = this.layers.filter(l => l.selected).length; return this.done({ done: separately ? n : 1, skipped: [] }); }
   private smart() { const sel = this.layers.filter(l => l.selected); return { done: sel.filter(l => l.kind === "smartObject").length, skipped: sel.filter(l => l.kind !== "smartObject").map(l => l.name + "：不是智能对象") }; }
   async unpack() { return this.done(this.smart()); }
+  async makeEditable() { const r = editablePlan(this.layers); return this.done({ done: r.targets.length, skipped: r.skipped }); }
   async resetTransform() { return this.done(this.smart()); }
   async replaceContents() { const r = selectedContents(this.layers); return this.done({ done: r.layers.length, skipped: r.skipped }); }
   async exportContents() { const r = selectedContents(this.layers); return this.done({ done: r.layers.length, skipped: r.skipped }); }
@@ -108,6 +112,21 @@ class MockTools implements LayerTools {
   async trimEdges() { const sel = this.layers.filter(l => l.selected && (l.kind === "pixel" || l.kind === "smartObject")); return this.done({ done: sel.length, skipped: [], note: sel.some(l => l.kind === "smartObject") ? "1 个智能对象的内容不是 PNG，用图层蒙版隐藏了杂色" : undefined }); }
   async countIslands() { await sleep(200); return this.layers.some(l => l.selected && (l.kind === "pixel" || l.kind === "smartObject")) ? 26 : 0; }
   async splitTextLines() { return this.done({ done: this.layers.filter(l => l.selected && l.kind === "text").length, skipped: [] }); }
+  private slimmed = false;
+  async scanDoc(): Promise<DocScan> {
+    await sleep(300);
+    const px = (id: number, name: string, r: [number, number, number, number], extra = {}) => ({ id, name, kind: "pixel", visible: true, bounds: { left: r[0], top: r[1], right: r[2], bottom: r[3] }, ...extra });
+    const so = (id: number, name: string, shown: number, content: number, extra = {}) => ({ id, name, kind: "smartObject", visible: true, bounds: { left: 0, top: 0, right: shown, bottom: shown },
+      smart: { file: "背景.jpg", linked: false, filters: false, shared: false, styled: false, quad: [0, 0, shown, 0, shown, shown, 0, shown] as [number, number, number, number, number, number, number, number], width: content, height: content, ...extra } });
+    if (this.slimmed) return { width: 2480, height: 3508, bytesPerPixel: 5, bits: 8, layers: [], alphaChannels: [], maxCompatibility: true };
+    return { width: 2480, height: 3508, bytesPerPixel: 5, bits: 8, maxCompatibility: true, alphaChannels: ["Alpha 1"], layers: [
+      ...[1, 2, 3].map(i => px(200 + i, "v" + i, [0, 0, 1200, 900], { variationOf: 300, visible: i === 3 })),
+      so(210, "背景大图", 1600, 7952), so(211, "产品图", 300, 4000, { shared: true }), so(212, "LOGO", 200, 3000, { file: "logo.psb" }),
+      px(220, "旧版本", [0, 0, 2480, 3508], { visible: false }), px(221, "移出画布的图", [-1500, 0, 1500, 2000]), px(222, "图层 5", [0, 0, 0, 0]),
+    ] };
+  }
+  async slim(kinds: SlimKind[]) { this.slimmed = true; return this.done({ done: kinds.length, skipped: [], unit: "项", note: "约 180 MB，保存后文件才会变小" }); }
+  async purgeMemory() { await sleep(200); }
   async splitIslands() { const so = this.layers.filter(l => l.selected && l.kind === "smartObject").length; return this.done({ done: this.pixels().done + so, skipped: [], note: so ? `${so} 个智能对象已栅格化` : undefined }); }
 }
 

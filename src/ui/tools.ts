@@ -3,6 +3,7 @@
 
 import { log } from "../app/log.ts";
 import { type ToolLayer, type ToolResult, isSmart, resultText } from "../core/layers/smart.ts";
+import { type DocScan, type SlimItem, type SlimKind, planSlim, sizeText, slimWarnings } from "../core/layers/slim.ts";
 import type { LayerTools } from "../ps/host.ts";
 import { h, replace } from "./dom.ts";
 
@@ -45,6 +46,8 @@ export function createToolsView(tools: LayerTools, status: Status) {
       tip: "把选中的图层合在一起转换成一个智能对象" },
     { label: "分别转换", verb: "已转换", needs: "any", run: () => tools.convert(true),
       tip: "选中的每个图层各自转换成一个智能对象" },
+    { label: "转为可编辑", verb: "已转换", needs: "smart", run: () => tools.makeEditable(),
+      tip: "内容是图片、矢量文件（AI/PDF/SVG）或外部链接的智能对象，转成内容为 PSB、能在 PS 里直接编辑的智能对象。原分辨率不变，位置、缩放、旋转、翻转继承在新智能对象的变换上；带透视/变形的整个套进新智能对象，原样保留" },
     { label: "解包图层", verb: "已解包", needs: "smart", run: () => tools.unpack(),
       tip: "把智能对象展开回里面的图层（Photoshop「转换为图层」）" },
     { label: "重置变换", verb: "已重置", needs: "smart", run: () => tools.resetTransform(),
@@ -67,7 +70,7 @@ export function createToolsView(tools: LayerTools, status: Status) {
     status(t.label.replace("…", "") + "中…");
     try {
       const r = await t.run();
-      if (r) status(r.done && t.after ? resultText(t.verb, r).replace(/^(\S+ \d+ 个)/, "$1" + t.after) : resultText(t.verb, r), r.done ? "ok" : "error");
+      if (r) status(r.done && t.after ? resultText(t.verb, r).replace(/^(\S+ \d+ [^\s（；]+)/, "$1" + t.after) : resultText(t.verb, r), r.done ? "ok" : "error");
       else status("已取消");
     } catch (e) {
       log("error", "tool", t.label, e);
@@ -94,6 +97,7 @@ export function createToolsView(tools: LayerTools, status: Status) {
     buttons.forEach((b, i) => { (b as any).disabled = busy || (list[i].needs === "smart" ? !smart.length : !sel.length); });
     renderPixel();
     renderText();
+    renderSlim();
   }
 
   async function refresh() {
@@ -163,6 +167,49 @@ export function createToolsView(tools: LayerTools, status: Status) {
     (textBtn as any).disabled = busy || !n;
   };
 
+  // ── 文档瘦身 ──
+  let scan: DocScan | null = null, slimItems: SlimItem[] = [];
+  const picked = new Set<SlimKind>();
+  const slimBody = h("div");
+  const scanBtn = h("button", { class: "btn tool-btn wide", title: "找出文件里占空间又没用的东西，先列出来，勾选后再清理" }, "扫描文档");
+  const cleanBtn = h("button", { class: "btn tool-btn wide primary", title: "清理勾选的项目，可以 Ctrl+Z 一步撤销；保存后文件才会变小" }, "清理已选");
+  const purgeBtn = h("button", { class: "btn tool-btn wide", title: "Photoshop「编辑 → 清理 → 全部」：清空历史记录、剪贴板和缓存，PS 会变快，但之前的操作不能再撤销" }, "释放 PS 内存（清空历史记录）");
+  scanBtn.addEventListener("click", () => void doScan());
+  cleanBtn.addEventListener("click", () => void use({ label: "文档瘦身", verb: "已清理", run: async () => { const r = await tools.slim([...picked]); await doScan(true); return r; } }));
+  purgeBtn.addEventListener("click", () => void use({ label: "释放内存", verb: "已释放", run: async () => { await tools.purgeMemory(); return { done: 1, skipped: [], note: "历史记录已清空" }; } }));
+  async function doScan(quiet = false) {
+    if (busy && !quiet) return;
+    if (!quiet) { busy = true; render(); status("扫描文档…"); }
+    try {
+      scan = await tools.scanDoc();
+      slimItems = scan ? planSlim(scan) : [];
+      picked.clear();
+      for (const i of slimItems) if (i.on) picked.add(i.kind);
+      const total = slimItems.reduce((n, i) => n + i.bytes, 0);
+      if (!quiet) status(!scan ? "未打开文档" : slimItems.length ? `找到 ${slimItems.length} 项可以清理${total ? "，" + sizeText(total) : ""}` : "没有找到可以清理的东西", "ok");
+    } catch (e) { log("error", "scan", e); status(`扫描失败：${(e as Error).message ?? e}`, "error"); }
+    finally { if (!quiet) { busy = false; render(); } }
+  }
+  const renderSlim = () => {
+    const warn = scan ? slimWarnings(scan) : [];
+    replace(slimBody, !scan ? h("div", { class: "tool-info muted" }, "文件做久了会变大变卡，扫描后可以勾选要清理的项目")
+      : !slimItems.length ? h("div", { class: "tool-info" }, "没有找到可以清理的东西")
+      : h("div", { class: "slim-list" }, ...slimItems.map(i => {
+        const box = h("input", { type: "checkbox", checked: picked.has(i.kind), disabled: !i.ids.length && (i.kind === "bigSmart" || i.kind === "variations" || i.kind === "hidden" || i.kind === "empty"),
+          onChange: (e: Event) => { if ((e.target as HTMLInputElement).checked) picked.add(i.kind); else picked.delete(i.kind); render(); } });
+        return h("div", { class: "slim-item" },
+          h("label", { class: "check-row slim-head" }, box, h("span", { class: "slim-label" }, i.label), h("span", { class: "slim-size" }, sizeText(i.bytes))),
+          h("div", { class: "muted small slim-detail" }, i.detail),
+          i.skipped.length ? h("div", { class: "muted small slim-detail", title: i.skipped.join("\n") }, `跳过 ${i.skipped.length} 个：${i.skipped[0]}${i.skipped.length > 1 ? " 等" : ""}`) : null);
+      })),
+      ...warn.map(w => h("div", { class: "small slim-warn" }, w)));
+    (scanBtn as any).disabled = busy || !layers;
+    replace(scanBtn, scan ? "重新扫描" : "扫描文档");
+    cleanBtn.hidden = !slimItems.length;
+    (cleanBtn as any).disabled = busy || !picked.size;
+    (purgeBtn as any).disabled = busy || !layers;
+  };
+
   const [unique, same, ...rest] = buttons;
   const el = h("div", { class: "tools" },
     h("section", { class: "card" },
@@ -183,7 +230,10 @@ export function createToolsView(tools: LayerTools, status: Status) {
       splitBtn),
     h("section", { class: "card" },
       h("div", { class: "card-head" }, h("span", { class: "label" }, "文字")),
-      textInfo, textBtn));
+      textInfo, textBtn),
+    h("section", { class: "card" },
+      h("div", { class: "card-head" }, h("span", { class: "label" }, "文档瘦身")),
+      slimBody, scanBtn, cleanBtn, purgeBtn));
   render();
   return { el, refresh };
 }

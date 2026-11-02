@@ -73,7 +73,7 @@ test("放大 · 当前图层: smart object over the layer's own rect, transparen
   host.layerImage = async () => ({ pixels: { width: 20, height: 10, channels: 4, data: px }, rect: { left: 5, top: 6, right: 25, bottom: 16 } });
   let placed: any = null;
   host.placeUpscaledLayer = async (d: number, l: number, png: Uint8Array, rect: Rect, name: string) => { placed = { d, l, png, rect, name }; return 99; };
-  const res = await runInpaint(host, comfy, { profile: profile(), prompt: "", seed: 1, params: {}, references: {}, count: 3, scale: 2, layer: { id: 7, name: "产品" } }, hooks());
+  const res = await runInpaint(host, comfy, { profile: profile(), prompt: "", seed: 1, params: {}, references: {}, count: 3, scale: 2, layers: [{ id: 7, name: "产品" }] }, hooks());
   assert.equal(calls.doc, undefined, "no new document");
   assert.equal(calls.queued["4"].inputs.value, 2);
   assert.deepEqual([placed.d, placed.l, placed.rect, placed.name], [1, 7, { left: 5, top: 6, right: 25, bottom: 16 }, "产品 ×2"]);
@@ -82,4 +82,44 @@ test("放大 · 当前图层: smart object over the layer's own rect, transparen
   assert.equal(out.data[3], 0, "transparent corner stays transparent");
   assert.equal(out.data[(39) * 4 + 3], 255, "opaque side stays opaque");
   assert.equal(res.group, undefined);
+});
+
+test("批量放大: selected layers in turn; one failing doesn't stop the others", async () => {
+  const { host, comfy } = fakes(null, { width: 40, height: 20 });
+  host.layerImage = async (_d: number, id: number) => {
+    if (id === 8) return { pixels: { width: 1, height: 1, channels: 3, data: new Uint8Array(3) }, rect: { left: 0, top: 0, right: 1, bottom: 1 } };
+    return { pixels: { width: 20, height: 10, channels: 3, data: new Uint8Array(600) }, rect: { left: id, top: 0, right: id + 20, bottom: 10 } };
+  };
+  const placed: string[] = [], stages: string[] = [];
+  host.placeUpscaledLayer = async (_d: number, _l: number, _png: Uint8Array, _r: Rect, name: string) => { placed.push(name); return 99; };
+  const h = { ...hooks(), stage: (t: string) => stages.push(t) };
+  const res = await runInpaint(host, comfy, { profile: profile(), prompt: "", seed: 1, params: {}, references: {}, count: 1, scale: 2,
+    layers: [{ id: 7, name: "产品" }, { id: 8, name: "空图层" }, { id: 9, name: "瓶子" }] }, h);
+  assert.deepEqual(placed, ["产品 ×2", "瓶子 ×2"]);
+  assert.equal(res.upscaled, 2);
+  assert.equal(res.failed!.length, 1);
+  assert.match(res.failed![0], /^空图层：/);
+  assert.ok(stages.some(s => s.endsWith("（3/3「瓶子」）")));
+});
+
+test("output aspect check allows multiple-of-32 rounding but not a crop", async () => {
+  const { sameAspect } = await import("../src/app/generate.ts");
+  assert.ok(sameAspect({ width: 992, height: 1056 }, { width: 1040, height: 1131 }), "the reported case");
+  assert.ok(sameAspect({ width: 2264, height: 4096 }, { width: 2692, height: 4870 }));
+  assert.ok(!sameAspect({ width: 1024, height: 1024 }, { width: 1040, height: 1500 }), "a square crop of a tall picture");
+  assert.ok(!sameAspect({ width: 3000, height: 2000 }, { width: 3000, height: 2200 }));
+});
+
+test("拆图: the cut-out's shape, grown a little, is the removal mask", async () => {
+  const { cutoutMask } = await import("../src/app/generate.ts");
+  const w = 100, h = 60, data = new Uint8Array(w * h * 4);
+  for (let y = 20; y < 40; y++) for (let x = 30; x < 70; x++) data.set([9, 9, 9, 255], (y * w + x) * 4);
+  // the PNG is at half size; the mask comes back at the covered area's size
+  const small = { width: 50, height: 30, channels: 4 as const, data: new Uint8Array(50 * 30 * 4) };
+  for (let y = 10; y < 20; y++) for (let x = 15; x < 35; x++) small.data.set([9, 9, 9, 255], (y * 50 + x) * 4);
+  const m = cutoutMask(encodePng(small), w, h);
+  assert.deepEqual([m.width, m.height, m.channels], [w, h, 1]);
+  assert.equal(m.data[30 * w + 50], 255, "inside the object");
+  assert.equal(m.data[30 * w + 26], 255, "grown past its edge");
+  assert.equal(m.data[30 * w + 5], 0, "away from it");
 });

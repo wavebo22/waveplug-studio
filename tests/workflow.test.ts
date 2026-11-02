@@ -235,3 +235,53 @@ test("an inpaint workflow with a scale node is still inpaint", () => {
   assert.equal(recognize(api("guhai_inpaint_ps")).taskType, "inpaint");
   assert.equal(recognize(api("guhai_remove_inpaint_outpaint")).taskType, "outpaint");
 });
+
+test("融图: an inpaint workflow with a blend LoRA (or the pengyu trigger) is its own mode, run like 局部重绘", async () => {
+  const { uiToApi } = await import("../src/core/workflow/uiToApi.ts");
+  const { recognize, isBlendGraph } = await import("../src/core/workflow/recognize.ts");
+  const { inpaintLike } = await import("../src/core/workflow/profile.ts");
+  const { readFileSync } = await import("node:fs");
+  const g = uiToApi(JSON.parse(readFileSync(new URL("./fixtures/ui/guhai_inpaint_turbo.json", import.meta.url), "utf8"))).api;
+  assert.equal(recognize(g).taskType, "inpaint");
+  const lora = Object.keys(g).find(id => /lora/i.test(g[id].class_type))!;
+  const blend = structuredClone(g);
+  blend[lora].inputs.lora_name = "Qwen\\Qwen2.1_融图_c2-st2000.safetensors";
+  assert.ok(isBlendGraph(blend));
+  assert.equal(recognize(blend).taskType, "blend");
+  assert.ok(inpaintLike("blend") && inpaintLike("inpaint") && !inpaintLike("outpaint"));
+});
+
+test("抠图 without a mask: a {el} template names the object; the name is the prompt, the RGBA save the output", async () => {
+  const { recognize } = await import("../src/core/workflow/recognize.ts");
+  const g: any = {
+    "1": { class_type: "LoadImage", inputs: { image: "a.png", upload: "image" } },
+    "2": { class_type: "PrimitiveString", inputs: { value: "主体" }, _meta: { title: "物件名" } },
+    "3": { class_type: "PrimitiveStringMultiline", inputs: { value: "Xinbao，抠出【{el}】，输出透明背景PNG。" } },
+    "4": { class_type: "StringReplace", inputs: { string: ["3", 0], find: "{el}", replace: ["2", 0] } },
+    "5": { class_type: "TextEncodeQwenImage21", inputs: { prompt: ["4", 0], negative_prompt: "", resolution: 1024, clip: ["9", 0], "images.image_1": ["1", 0] } },
+    "6": { class_type: "KSampler", inputs: { seed: 1, steps: 25, cfg: 1, sampler_name: "euler", scheduler: "simple", denoise: 1, positive: ["5", 0], negative: ["5", 1], latent_image: ["5", 2], model: ["8", 0] } },
+    "7": { class_type: "VAEDecode", inputs: { samples: ["6", 0], vae: ["10", 0] } },
+    "8": { class_type: "UNETLoader", inputs: { unet_name: "q.safetensors", weight_dtype: "default" } },
+    "9": { class_type: "CLIPLoader", inputs: { clip_name: "c.safetensors", type: "qwen_image" } },
+    "10": { class_type: "VAELoader", inputs: { vae_name: "v.safetensors" } },
+    "11": { class_type: "SaveImage", inputs: { filename_prefix: "抠图", images: ["7", 0] } },
+    "12": { class_type: "MaskToImage", inputs: { mask: ["7", 0] } },
+    "13": { class_type: "SaveImage", inputs: { filename_prefix: "mask", images: ["12", 0] } },
+  };
+  const r = recognize(g);
+  assert.equal(r.taskType, "extract");
+  assert.deepEqual(r.blockers, []);
+  const role = (x: string) => r.suggestions.find(s => s.binding.role === x)!.binding;
+  assert.deepEqual([role("image").nodeId, role("image").encoding], ["1", "rgb"]);
+  assert.deepEqual([role("prompt").nodeId, role("prompt").input], ["2", "value"]);
+  assert.equal(role("output").nodeId, "11");
+});
+
+test("抠图 profiles don't need a mask binding", async () => {
+  const { newProfile, validateProfile } = await import("../src/core/workflow/profile.ts");
+  const g: any = { "1": { class_type: "LoadImage", inputs: { image: "a.png" } }, "2": { class_type: "SaveImage", inputs: { images: ["1", 0] } } };
+  const p = newProfile("x", g, [{ role: "image", nodeId: "1", input: "image", classType: "LoadImage", encoding: "rgb" }, { role: "output", nodeId: "2", input: "images", classType: "SaveImage" }]);
+  assert.match(validateProfile(p).join(), /选区遮罩/);
+  p.taskType = "extract";
+  assert.deepEqual(validateProfile(p), []);
+});

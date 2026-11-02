@@ -2,12 +2,14 @@
 // layer in one undo step. Which layers a tool touches is decided in core/layers/smart.ts.
 
 import { log } from "../app/log.ts";
-import { type FreeTransform, type Quad, type ToolLayer, type ToolResult, centredQuad, freeName, isAffineQuad, isSmart, sameSourceIds, selectedContents, subQuad, transformBetween, uniquePlan } from "../core/layers/smart.ts";
+import { type FreeTransform, type Quad, type ToolLayer, type ToolResult, centredQuad, editablePlan, freeName, isAffineQuad, isSmart, sameSourceIds, selectedContents, subQuad, transformBetween, uniquePlan } from "../core/layers/smart.ts";
 import type { LayerTools } from "./host.ts";
 import { findLayer, grayInto, modal, play, step } from "./uxpHost.ts";
 import { cleanMask, cleanRgba, cleanSettings, findIslands } from "../core/layers/islands.ts";
 import { decodePng } from "../core/image/decode.ts";
 import { lineName, onlyLine, textLines } from "../core/layers/text.ts";
+import { type DocScan, type ScanLayer, type SlimKind, planSlim, sizeText } from "../core/layers/slim.ts";
+import { BLEND_PREFIX, EXPAND_PREFIX, EXTRACT_PREFIX, FILL_PREFIX, GENERATE_PREFIX, UPSCALE_PREFIX } from "./host.ts";
 import { encodePng } from "../core/image/png.ts";
 import type { Pixels } from "../core/image/png.ts";
 import type { Rect } from "../core/image/region.ts";
@@ -52,11 +54,12 @@ async function each(layers: ToolLayer[], skipped: string[], fn: (l: ToolLayer) =
 }
 
 /** A smart object's corners in the document and its content size. */
-async function placement(docId: number, layerId: number): Promise<{ quad: Quad; width: number; height: number }> {
+async function placement(docId: number, layerId: number): Promise<{ quad: Quad; width: number; height: number; warped: boolean }> {
   const [r] = await play([{ _obj: "get", _target: [{ _property: "smartObjectMore" }, layerRef(layerId), { _ref: "document", _id: docId }] }]);
   const m = r?.smartObjectMore, q = (m?.transform ?? []).map(Number);
   if (q.length !== 8 || q.some((v: number) => !Number.isFinite(v))) throw new Error("读不到智能对象的变换");
-  return { quad: q as Quad, width: Number(m.size?.width ?? 0), height: Number(m.size?.height ?? 0) };
+  const warp = String(m.warp?.warpStyle?._value ?? m.warp?.warpStyle ?? "warpNone");
+  return { quad: q as Quad, width: Number(m.size?.width ?? 0), height: Number(m.size?.height ?? 0), warped: warp !== "warpNone" };
 }
 
 const px = (v: number) => ({ _unit: "pixelsUnit", _value: v });
@@ -196,6 +199,7 @@ async function trimSmartByMask(doc: any, l: ToolLayer, opts: { alpha: number; mi
   log("info", "trim smart mask", l.name, JSON.stringify({ ...opts, cleared: c.cleared }));
 }
 
+const AI_PREFIXES = [FILL_PREFIX, EXPAND_PREFIX, GENERATE_PREFIX, UPSCALE_PREFIX, BLEND_PREFIX, EXTRACT_PREFIX];
 const isPng = (b: Uint8Array) => b.length > 8 && b[0] === 0x89 && b[1] === 0x50 && b[2] === 0x4e && b[3] === 0x47;
 
 /** 像素岛: selected pixel layers and smart objects (rasterized only once they really split). */
@@ -343,6 +347,60 @@ export class UxpTools implements LayerTools {
       return n;
     });
     return { done, skipped };
+  }
+
+  /**
+   * 转为可编辑: linked content is embedded, then the content is unpacked at its own resolution and
+   * wrapped into a new smart object (content = PSB) that takes over the old transform — position,
+   * scale, rotation and flips, still editable as a transform. A perspective / warp, or content
+   * Photoshop can't unpack, is kept by nesting instead: the smart object itself goes inside a new
+   * PSB smart object, with everything it had (resolution, warp, smart filters).
+   */
+  async makeEditable(): Promise<ToolResult> {
+    const { doc, layers } = await this.layers();
+    const { targets, skipped } = editablePlan(layers);
+    if (!targets.length) return { done: 0, skipped };
+    const made: number[] = [];
+    let nested = 0;
+    const done = await step("WavePlug 转为可编辑智能对象", doc.id, async () => {
+      const n = await each(targets, skipped, async l => {
+        await selectLayers([l.id]);
+        let id = l.id;
+        if (l.linked) {
+          try { await act({ _obj: "placedLayerConvertToEmbedded" }); id = doc.activeLayers[0]?.id ?? id; }
+          catch (e) { log("warn", "embed linked", l.name, e); }
+        }
+        const shown = await placement(doc.id, id);
+        const nest = async () => { await selectLayers([id]); await act({ _obj: "newPlacedLayer" }); nested++; return doc.activeLayers[0]; };
+        let fresh: any = null;
+        if (shown.warped || !isAffineQuad(shown.quad)) fresh = await nest();
+        else {
+          let plain: Quad | null = null;
+          try {
+            await act({ _obj: "placedLayerResetTransforms" });
+            plain = (await placement(doc.id, id)).quad;
+            await act({ _obj: "placedLayerConvertToLayers" });
+            await act({ _obj: "newPlacedLayer" });
+            fresh = doc.activeLayers[0];
+            const t = transformBetween(plain, shown.quad);
+            if (fresh && t) await act({ _obj: "transform", _target: [layerRef(fresh.id)], ...transformDesc(t) });
+          } catch (e) {
+            // can't be unpacked: put the transform back if it was reset, then nest it as it is
+            log("warn", "editable nest", l.name, e);
+            const back = plain ? transformBetween(plain, shown.quad) : null;
+            if (back) await act({ _obj: "transform", _target: [layerRef(id)], ...transformDesc(back) }).catch(x => log("warn", "restore transform", x));
+            fresh = await nest();
+          }
+        }
+        if (!fresh) throw new Error("没有生成新的智能对象");
+        fresh.name = l.name;
+        made.push(fresh.id);
+      });
+      if (made.length) await selectLayers(made).catch(e => log("warn", "reselect", e));
+      return n;
+    });
+    log("info", "make editable", done, "nested", nested);
+    return { done, skipped, note: nested ? `${nested} 个带透视/变形或内容无法展开，整个套进了新的可编辑智能对象，原样保留` : undefined };
   }
 
   resetTransform(): Promise<ToolResult> {
@@ -548,5 +606,112 @@ export class UxpTools implements LayerTools {
     }));
     if (made.length) await modal("WavePlug 选中拆分结果", () => selectLayers(made)).catch(e => log("warn", "reselect", e));
     return { done, skipped, note: mixed ? `${mixed} 个图层原来混用了多种样式，拆分后每行统一成该行开头的样式` : undefined };
+  }
+
+  async scanDoc(): Promise<DocScan | null> {
+    const d = ps().app.activeDocument;
+    if (!d) return null;
+    const mode = String(d.mode), bits = Number(String(d.bitsPerChannel).replace(/\D/g, "")) || 8;
+    const colour = /CMYK/i.test(mode) ? 4 : /Gray|Bitmap|Duotone|Indexed/i.test(mode) ? 1 : 3;
+    const layers: ScanLayer[] = [], smart: { layer: ScanLayer; id: number }[] = [];
+    const aiGroup = (g: any) => !!g && String(g.kind) === "group" && AI_PREFIXES.some(p => String(g.name).startsWith(p));
+    const walk = (ls: any[]) => {
+      for (const l of ls) {
+        const b = l.boundsNoEffects ?? l.bounds, kind = String(l.kind);
+        const rect = b && b.right > b.left && b.bottom > b.top ? layerRect(l) : null;
+        const s: ScanLayer = { id: l.id, name: String(l.name), kind, visible: !!l.visible, bounds: rect };
+        if (aiGroup(l.parent) && /^v\d+/.test(String(l.name))) s.variationOf = l.parent.id;
+        if (kind === "group") s.children = l.layers?.length ?? 0;
+        layers.push(s);
+        if (kind === "smartObject") smart.push({ layer: s, id: l.id });
+        if (l.layers?.length) walk(l.layers);
+      }
+    };
+    walk(d.layers);
+    if (smart.length) {
+      const res = await play(smart.map(x => ({ _obj: "get", _target: [layerRef(x.id), { _ref: "document", _id: d.id }] })));
+      const contentIds = res.map((r: any) => String(r?.smartObjectMore?.ID ?? ""));
+      smart.forEach((x, i) => {
+        const r = res[i], so = r?.smartObject, more = r?.smartObjectMore, q = (more?.transform ?? []).map(Number);
+        if (!so || !more || q.length !== 8) return;
+        x.layer.smart = {
+          file: String(so.fileReference ?? ""), linked: !!so.linked || !!so.link, filters: !!so.filterFX,
+          shared: !!contentIds[i] && contentIds.filter((c: string) => c === contentIds[i]).length > 1,
+          styled: !!r.layerEffects || !!r.hasUserMask, quad: q as Quad,
+          width: Number(more.size?.width ?? 0), height: Number(more.size?.height ?? 0),
+        };
+      });
+    }
+    const alphaChannels = (d.channels ?? []).filter((c: any) => /maskedArea|selectedArea/i.test(String(c.kind))).map((c: any) => String(c.name));
+    let maxCompatibility: boolean | undefined;
+    try {
+      const [r] = await play([{ _obj: "get", _target: [{ _property: "fileSavePrefs" }, { _ref: "application", _enum: "ordinal", _value: "targetEnum" }] }]);
+      const v = r?.fileSavePrefs?.maximizeCompatibility;
+      if (v !== undefined) maxCompatibility = v === true || /always/i.test(String(v?._value ?? v));
+    } catch (e) { log("warn", "max compatibility", e); }
+    return { width: Math.round(d.width), height: Math.round(d.height), bytesPerPixel: (colour + 1) * bits / 8, bits, layers, alphaChannels, maxCompatibility };
+  }
+
+  async slim(kinds: SlimKind[]): Promise<ToolResult> {
+    const doc = activeDoc(), scan = await this.scanDoc();
+    if (!scan) return { done: 0, skipped: [] };
+    const items = planSlim(scan).filter(i => kinds.includes(i.kind));
+    const skipped: string[] = [];
+    let saved = 0;
+    const order: SlimKind[] = ["variations", "hidden", "bigSmart", "empty", "offCanvas", "channels"];
+    const done = await step("WavePlug 文档瘦身", doc.id, async () => {
+      const restore = await saveSelection(doc.id);
+      let n = 0;
+      try {
+        for (const kind of order) {
+          const item = items.find(i => i.kind === kind);
+          if (!item) continue;
+          try {
+            await this.slimItem(doc, kind, item.ids, skipped);
+            n++; saved += item.bytes;
+          } catch (e) { skipped.push(`${item.label}：${message(e)}`); log("warn", "slim", kind, e); }
+        }
+      } finally { await restore().catch(e => log("warn", "restore selection", e)); }
+      return n;
+    });
+    log("info", "slim", JSON.stringify(kinds), "saved ≈", saved);
+    return { done, skipped, unit: "项", note: (saved ? sizeText(saved) + "，" : "") + "保存后文件才会变小" };
+  }
+
+  private async slimItem(doc: any, kind: SlimKind, ids: number[], skipped: string[]): Promise<void> {
+    const del = (id: number) => act({ _obj: "delete", _target: [layerRef(id)] });
+    if (kind === "variations" || kind === "hidden" || kind === "empty") {
+      for (const id of ids) if (findLayer(doc.layers, id)) await del(id).catch(e => skipped.push(`#${id}：${message(e)}`));
+    } else if (kind === "bigSmart") {
+      // rasterized at the size it's shown, then made a smart object again (content = what's on screen)
+      for (const id of ids) {
+        const layer = findLayer(doc.layers, id);
+        if (!layer) continue;
+        try {
+          await selectLayers([id]);
+          await act({ _obj: "rasterizeLayer", _target: [layerRef(id)], what: { _enum: "rasterizeItem", _value: "placed" } });
+          await act({ _obj: "newPlacedLayer" });
+        } catch (e) { skipped.push(`${layer.name}：${message(e)}`); }
+      }
+    } else if (kind === "offCanvas") {
+      // 全选 + 图像 → 裁剪: every pixel layer loses what lies outside the canvas
+      await act({ _obj: "set", _target: [{ _ref: "channel", _property: "selection" }], to: { _enum: "ordinal", _value: "allEnum" } });
+      await act({ _obj: "crop", delete: true });
+    } else if (kind === "channels") {
+      for (const c of [...(doc.channels ?? [])].filter((c: any) => /maskedArea|selectedArea/i.test(String(c.kind)))) await c.remove();
+    }
+  }
+
+  async purgeMemory(): Promise<void> {
+    await modal("WavePlug 释放 PS 内存", async () => {
+      // 编辑 → 清理 → 全部; if that one isn't available, the parts it is made of
+      try { await act({ _obj: "purge", null: { _enum: "purgeItem", _value: "allEnum" } }); return; }
+      catch (e) { log("warn", "purge all", e); }
+      let ok = 0;
+      for (const item of ["history", "clipboard", "snapshot"]) {
+        try { await act({ _obj: "purge", null: { _enum: "purgeItem", _value: item } }); ok++; } catch (e) { log("warn", "purge", item, e); }
+      }
+      if (!ok) throw new Error("Photoshop 现在不能清理内存，可以手动用「编辑 → 清理 → 全部」");
+    });
   }
 }

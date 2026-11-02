@@ -5,7 +5,7 @@ import { encodePng, type Pixels, withPlacementHints } from "../core/image/png.ts
 import { type Rect, nonZeroBounds, rectH, rectW } from "../core/image/region.ts";
 import { placeGray } from "../core/image/compose.ts";
 import { flushLog, log } from "../app/log.ts";
-import { type ActiveLayer, type Capture, type DocInfo, EXPAND_PREFIX, FILL_PREFIX, GENERATE_PREFIX, UPSCALE_PREFIX, type FillGroup, type LayerInfo, type Pads, type PsHost, type Variation, type VariationMask, padsLabel, parsePads } from "./host.ts";
+import { type ActiveLayer, type Capture, type DocInfo, BLEND_PREFIX, EXPAND_PREFIX, EXTRACT_PREFIX, FILL_PREFIX, GENERATE_PREFIX, UPSCALE_PREFIX, type FillGroup, type LayerInfo, type Pads, type PsHost, type Variation, type VariationMask, padsLabel, parsePads } from "./host.ts";
 
 declare const require: (m: string) => any;
 
@@ -51,12 +51,14 @@ export function findLayer(layers: any[], id: number): any | null {
   return null;
 }
 
-const PREFIXES = [FILL_PREFIX, EXPAND_PREFIX, GENERATE_PREFIX, UPSCALE_PREFIX];
+const PREFIXES = [FILL_PREFIX, EXPAND_PREFIX, GENERATE_PREFIX, UPSCALE_PREFIX, BLEND_PREFIX, EXTRACT_PREFIX];
 const isFillGroup = (l: any) => !!l && String(l.kind) === "group" && PREFIXES.some(p => String(l.name).startsWith(p));
 const isExpandGroup = (l: any) => String(l?.name ?? "").startsWith(EXPAND_PREFIX);
 const isGenerateGroup = (l: any) => String(l?.name ?? "").startsWith(GENERATE_PREFIX);
 const isUpscaleGroup = (l: any) => String(l?.name ?? "").startsWith(UPSCALE_PREFIX);
-const groupKind = (l: any) => isExpandGroup(l) ? "outpaint" as const : isGenerateGroup(l) ? "txt2img" as const : isUpscaleGroup(l) ? "upscale" as const : "inpaint" as const;
+const isBlendGroup = (l: any) => String(l?.name ?? "").startsWith(BLEND_PREFIX);
+const isExtractGroup = (l: any) => String(l?.name ?? "").startsWith(EXTRACT_PREFIX);
+const groupKind = (l: any) => isExpandGroup(l) ? "outpaint" as const : isGenerateGroup(l) ? "txt2img" as const : isUpscaleGroup(l) ? "upscale" as const : isBlendGroup(l) ? "blend" as const : isExtractGroup(l) ? "extract" as const : "inpaint" as const;
 const groupName = (l: any) => String(l.name).slice((PREFIXES.find(p => String(l.name).startsWith(p)) ?? "").length);
 
 /** The outermost AI group containing `l` (itself included), or null. */
@@ -143,6 +145,16 @@ function variationLayers(group: any): { layer: any; n: number; prompt: string }[
 function boundsRect(l: any): Rect {
   const b = l.boundsNoEffects ?? l.bounds;
   return { left: Math.round(b.left), top: Math.round(b.top), right: Math.round(b.right), bottom: Math.round(b.bottom) };
+}
+
+/** The full frame of a placed smart object in document pixels (its corners), or null. */
+async function placedFrame(docId: number, layerId: number): Promise<Rect | null> {
+  try {
+    const [r] = await play([{ _obj: "get", _target: [{ _property: "smartObjectMore" }, { _ref: "layer", _id: layerId }, { _ref: "document", _id: docId }], _options: DONT }]);
+    const q = (r?.smartObjectMore?.transform ?? []).map(Number);
+    if (q.length !== 8 || q.some((v: number) => !Number.isFinite(v))) return null;
+    return { left: Math.min(q[0], q[6]), top: Math.min(q[1], q[3]), right: Math.max(q[2], q[4]), bottom: Math.max(q[5], q[7]) };
+  } catch (e) { log("warn", "placed frame", e); return null; }
 }
 
 export class UxpHost implements PsHost {
@@ -278,6 +290,11 @@ export class UxpHost implements PsHost {
     return modal("WavePlug 读取参考图层", () => readPixels(opts));
   }
 
+  activeLayers(docId: number): ActiveLayer[] {
+    if (!this.docExists(docId)) return [];
+    return (docById(docId).activeLayers ?? []).map((l: any) => ({ id: l.id, name: String(l.name), kind: String(l.kind), rect: boundsRect(l) }));
+  }
+
   activeLayer(docId: number): ActiveLayer | null {
     if (!this.docExists(docId)) return null;
     const l = docById(docId).activeLayers?.[0];
@@ -402,11 +419,13 @@ export class UxpHost implements PsHost {
   }
 
   async createFillGroup(docId: number, rect: Rect, prompt: string, pads?: Pads, kind?: FillGroup["kind"]): Promise<FillGroup> {
-    const gen = kind === "txt2img", up = kind === "upscale";
-    return step(pads ? "WavePlug 新建 AI 扩图" : gen ? "WavePlug 新建 AI 生成" : up ? "WavePlug 新建 AI 放大" : "WavePlug 新建 AI 填充", docId, async () => {
+    const gen = kind === "txt2img", up = kind === "upscale", blend = kind === "blend", ex = kind === "extract";
+    return step(pads ? "WavePlug 新建 AI 扩图" : gen ? "WavePlug 新建 AI 生成" : up ? "WavePlug 新建 AI 放大" : blend ? "WavePlug 新建 AI 融图" : ex ? "WavePlug 新建 AI 抠图" : "WavePlug 新建 AI 填充", docId, async () => {
       const doc = docById(docId);
       ps().app.activeDocument = doc;
       const name = pads ? EXPAND_PREFIX + padsLabel(pads) : up ? UPSCALE_PREFIX + prompt
+        : blend ? BLEND_PREFIX + (prompt.trim().slice(0, 24) || "默认光影")
+        : ex ? EXTRACT_PREFIX + (prompt.trim().slice(0, 24) || "主体")
         : (gen ? GENERATE_PREFIX : FILL_PREFIX) + (prompt.trim().slice(0, 24) || (gen ? "无提示词" : "移除"));
       const group = await doc.createLayerGroup({ name });
       const moved = await unnestFillGroups(doc);
@@ -423,6 +442,14 @@ export class UxpHost implements PsHost {
       const doc = await app.documents.add({ width, height, resolution: 72, mode: "RGBColorMode", fill: constants.DocumentFill.WHITE, name });
       log("info", "document created", doc.id, width, height);
       return info(doc);
+    });
+  }
+
+  async placeBelow(docId: number, layerId: number, belowId: number): Promise<void> {
+    await step("WavePlug 移到抠图下方", docId, async () => {
+      const doc = docById(docId), layer = findLayer(doc.layers, layerId), ref = findLayer(doc.layers, belowId);
+      if (!layer || !ref) return;
+      await layer.move(ref, ps().constants.ElementPlacement.PLACEAFTER);
     });
   }
 
@@ -475,12 +502,30 @@ export class UxpHost implements PsHost {
       }]);
       const layer = doc.activeLayers[0];
       const b = boundsRect(layer);
-      await trace(`scale ${rectW(b)}x${rectH(b)} -> ${rectW(placement)}x${rectH(placement)}`);
-      if (rectW(b) !== rectW(placement) || rectH(b) !== rectH(placement)) {
-        await layer.scale(rectW(placement) / rectW(b) * 100, rectH(placement) / rectH(b) * 100, constants.AnchorPosition.TOPLEFT);
+      // A transparent PNG's bounds are only its visible pixels: size it by the placed picture's own
+      // frame instead (the smart object's corners), about that frame's corner.
+      const frame = await placedFrame(doc.id, layer.id);
+      if (frame && (Math.abs(rectW(frame) - rectW(b)) > 1 || Math.abs(rectH(frame) - rectH(b)) > 1)) {
+        await trace(`scale frame ${Math.round(rectW(frame))}x${Math.round(rectH(frame))} -> ${rectW(placement)}x${rectH(placement)}`);
+        const px = (v: number) => ({ _unit: "pixelsUnit", _value: v });
+        await play([{
+          _obj: "transform", _target: [{ _ref: "layer", _id: layer.id }],
+          freeTransformCenterState: { _enum: "quadCenterState", _value: "QCSIndependent" },
+          position: { _obj: "paint", horizontal: px(frame.left), vertical: px(frame.top) },
+          offset: { _obj: "offset", horizontal: px(placement.left - frame.left), vertical: px(placement.top - frame.top) },
+          width: { _unit: "percentUnit", _value: rectW(placement) / rectW(frame) * 100 },
+          height: { _unit: "percentUnit", _value: rectH(placement) / rectH(frame) * 100 },
+          interfaceIconFrameDimmed: { _enum: "interpolationType", _value: "bicubic" },
+          _options: DONT,
+        }]);
+      } else {
+        await trace(`scale ${rectW(b)}x${rectH(b)} -> ${rectW(placement)}x${rectH(placement)}`);
+        if (rectW(b) !== rectW(placement) || rectH(b) !== rectH(placement)) {
+          await layer.scale(rectW(placement) / rectW(b) * 100, rectH(placement) / rectH(b) * 100, constants.AnchorPosition.TOPLEFT);
+        }
+        const nb = boundsRect(layer);
+        if (nb.left !== placement.left || nb.top !== placement.top) await layer.translate(placement.left - nb.left, placement.top - nb.top);
       }
-      const nb = boundsRect(layer);
-      if (nb.left !== placement.left || nb.top !== placement.top) await layer.translate(placement.left - nb.left, placement.top - nb.top);
       await trace("rasterize");
       await layer.rasterize(constants.RasterizeType.ENTIRELAYER);
       // the full prompt lives in the layer name (PS allows 255 chars) so 再生成 can reuse it

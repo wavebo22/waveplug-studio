@@ -3,7 +3,10 @@
 
 import { type ApiGraph, isLink, title } from "./api.ts";
 
-export type TaskType = "inpaint" | "outpaint" | "txt2img" | "upscale";
+export type TaskType = "inpaint" | "outpaint" | "txt2img" | "upscale" | "extract" | "blend";
+
+/** 融图 / 抠图 run like 局部重绘 (selection → variations in a group); only their workflows and write-back differ. */
+export const inpaintLike = (t: TaskType | undefined) => !t || t === "inpaint" || t === "blend" || t === "extract";
 export type Role = "image" | "mask" | "prompt" | "negative" | "seed" | "reference" | "param" | "output" | "pad" | "size" | "scale";
 export type Side = "left" | "right" | "top" | "bottom";
 export const SIDES: Side[] = ["left", "right", "top", "bottom"];
@@ -158,8 +161,9 @@ export function validateProfile(p: Profile): string[] {
     for (const side of SIDES) if (!p.bindings.some(b => b.role === "pad" && b.side === side)) problems.push(`未绑定扩展尺寸（${side}）`);
     return problems;
   }
+  // 抠图 workflows may name the object instead of taking a mask
   const img = p.bindings.find(b => b.role === "image");
-  if (img && img.encoding !== "rgba-alpha-mask" && !has("mask")) problems.push("未绑定选区遮罩");
+  if (p.taskType !== "extract" && img && img.encoding !== "rgba-alpha-mask" && !has("mask")) problems.push("未绑定选区遮罩");
   return problems;
 }
 

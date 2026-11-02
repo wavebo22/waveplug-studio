@@ -172,3 +172,156 @@ export function withAlpha(color: Pixels, alpha: Pixels): Pixels {
   }
   return { width: color.width, height: color.height, channels: 4, data: out };
 }
+
+/** Area-average downscale (each output pixel is the mean of the source pixels it covers). */
+export function downscale(p: Pixels, width: number, height: number): Pixels {
+  const { width: sw, height: sh, channels: ch } = p;
+  if (width >= sw && height >= sh) return p;
+  const out = new Uint8Array(width * height * ch), acc = new Float64Array(width * ch), wsum = new Float64Array(width);
+  const fx = sw / width, fy = sh / height;
+  // horizontal spans of every output column: [first source x, weights…]
+  const spans = Array.from({ length: width }, (_, x) => {
+    const a = x * fx, b = a + fx, xs: number[] = [], ws: number[] = [];
+    for (let s = Math.floor(a); s < Math.min(sw, Math.ceil(b)); s++) { xs.push(s); ws.push(Math.min(b, s + 1) - Math.max(a, s)); }
+    return { xs, ws };
+  });
+  for (let y = 0; y < height; y++) {
+    acc.fill(0); wsum.fill(0);
+    const a = y * fy, b = a + fy;
+    for (let sy = Math.floor(a); sy < Math.min(sh, Math.ceil(b)); sy++) {
+      const wy = Math.min(b, sy + 1) - Math.max(a, sy), row = sy * sw;
+      for (let x = 0; x < width; x++) {
+        const { xs, ws } = spans[x];
+        for (let k = 0; k < xs.length; k++) {
+          const w = wy * ws[k], i = (row + xs[k]) * ch;
+          for (let c = 0; c < ch; c++) acc[x * ch + c] += p.data[i + c] * w;
+          wsum[x] += w;
+        }
+      }
+    }
+    for (let x = 0; x < width; x++) for (let c = 0; c < ch; c++) out[(y * width + x) * ch + c] = Math.round(acc[x * ch + c] / wsum[x]);
+  }
+  return { width, height, channels: ch, data: out };
+}
+
+/** Bilinear resize of any channel count. */
+export function resize(p: Pixels, width: number, height: number): Pixels {
+  const { width: sw, height: sh, channels: ch } = p;
+  if (width === sw && height === sh) return p;
+  const out = new Uint8Array(width * height * ch), fx = sw / width, fy = sh / height;
+  for (let y = 0; y < height; y++) {
+    const sy = Math.max(0, Math.min(sh - 1, (y + 0.5) * fy - 0.5)), y0 = Math.floor(sy), y1 = Math.min(sh - 1, y0 + 1), ty = sy - y0;
+    for (let x = 0; x < width; x++) {
+      const sx = Math.max(0, Math.min(sw - 1, (x + 0.5) * fx - 0.5)), x0 = Math.floor(sx), x1 = Math.min(sw - 1, x0 + 1), tx = sx - x0;
+      const a = (y0 * sw + x0) * ch, b = (y0 * sw + x1) * ch, c = (y1 * sw + x0) * ch, d = (y1 * sw + x1) * ch, o = (y * width + x) * ch;
+      for (let k = 0; k < ch; k++) {
+        const top = p.data[a + k] + (p.data[b + k] - p.data[a + k]) * tx, bottom = p.data[c + k] + (p.data[d + k] - p.data[c + k]) * tx;
+        out[o + k] = Math.round(top + (bottom - top) * ty);
+      }
+    }
+  }
+  return { width, height, channels: ch, data: out };
+}
+
+/** ≈ gaussian blur of `sigma` px: three passes of a box blur in each direction (integer arithmetic). */
+export function blur(p: Pixels, sigma: number): Pixels {
+  const r = Math.max(1, Math.round((Math.sqrt(4 * sigma * sigma + 1) - 1) / 2));
+  const { width: w, height: h, channels: ch } = p;
+  // two scratch buffers of its own: the input is never written to
+  let src: Uint8Array = new Uint8Array(p.data), dst: Uint8Array = new Uint8Array(p.data.length);
+  const pass = (len: number, count: number, step: number, lineStep: number) => {
+    const win = 2 * r + 1;
+    for (let line = 0; line < count; line++) for (let k = 0; k < ch; k++) {
+      const base = line * lineStep + k;
+      let sum = 0;
+      for (let i = -r; i <= r; i++) sum += src[base + Math.min(len - 1, Math.max(0, i)) * step];
+      for (let i = 0; i < len; i++) {
+        dst[base + i * step] = (sum + (win >> 1)) / win | 0;
+        sum += src[base + Math.min(len - 1, i + r + 1) * step] - src[base + Math.max(0, i - r) * step];
+      }
+    }
+    [src, dst] = [dst, src];
+  };
+  for (let n = 0; n < 3; n++) { pass(w, h, ch, w * ch); pass(h, w, w * ch, ch); }
+  return { width: w, height: h, channels: ch, data: src };
+}
+
+/**
+ * Light and colour from `result`, fine detail from `original` (same size, RGB/RGBA → RGB):
+ * blur(result) + original − blur(original). A relit result that was sampled smaller than the
+ * document keeps the original's sharpness this way.
+ */
+export function transferDetail(result: Pixels, original: Pixels, sigma: number): Pixels {
+  const rgb = (p: Pixels): Pixels => p.channels === 3 ? p : { width: p.width, height: p.height, channels: 3, data: toRgb(p) };
+  const r = rgb(result), o = rgb(original);
+  if (r.width !== o.width || r.height !== o.height) throw new Error("图像尺寸不一致");
+  const br = blur(r, sigma).data, bo = blur(o, sigma).data, out = new Uint8Array(o.data.length);
+  for (let i = 0; i < out.length; i++) { const v = br[i] + o.data[i] - bo[i]; out[i] = v < 0 ? 0 : v > 255 ? 255 : v; }
+  return { width: o.width, height: o.height, channels: 3, data: out };
+}
+
+/**
+ * The selection (255 = selected) faded to 0 over `width` px inside its edge (smoothstep), so a
+ * result blends into the original instead of stopping at a hard line. The canvas border is not an
+ * edge. Distance is a 3-4 chamfer approximation.
+ */
+export function featherInside(sel: Pixels, width: number): Pixels {
+  const { width: w, height: h } = sel, n = w * h, BIG = 1 << 29, d = new Int32Array(n);
+  for (let i = 0; i < n; i++) d[i] = sel.data[i] > 127 ? BIG : 0;
+  const at = (x: number, y: number) => x < 0 || y < 0 || x >= w || y >= h ? BIG : d[y * w + x];
+  for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) {
+    const i = y * w + x;
+    if (d[i]) d[i] = Math.min(d[i], at(x - 1, y) + 3, at(x, y - 1) + 3, at(x - 1, y - 1) + 4, at(x + 1, y - 1) + 4);
+  }
+  for (let y = h - 1; y >= 0; y--) for (let x = w - 1; x >= 0; x--) {
+    const i = y * w + x;
+    if (d[i]) d[i] = Math.min(d[i], at(x + 1, y) + 3, at(x, y + 1) + 3, at(x + 1, y + 1) + 4, at(x - 1, y + 1) + 4);
+  }
+  const out = new Uint8Array(n);
+  for (let i = 0; i < n; i++) {
+    if (!d[i]) continue;
+    const t = Math.min(1, d[i] / 3 / Math.max(1, width));
+    out[i] = Math.round(sel.data[i] * t * t * (3 - 2 * t));
+  }
+  return { width: w, height: h, channels: 1, data: out };
+}
+
+/**
+ * 抠图 detail: like transferDetail, but the original's fine detail is used only where the result
+ * still shows the same thing. The light/colour difference is taken as the largest within ~2 blur
+ * radii, so even a thin stroke the model removed (an occluder's edge, lettering) marks its
+ * surroundings as changed; there the result keeps its own pixels. Full use below `near`, none
+ * above `far`.
+ */
+export function transferDetailWhereSame(result: Pixels, original: Pixels, sigma: number, near = 8, far = 20): Pixels {
+  const rgb = (p: Pixels): Pixels => p.channels === 3 ? p : { width: p.width, height: p.height, channels: 3, data: toRgb(p) };
+  const r = rgb(result), o = rgb(original), { width: w, height: h } = o, n = w * h;
+  if (r.width !== w || r.height !== h) throw new Error("图像尺寸不一致");
+  const br = blur(r, sigma).data, bo = blur(o, sigma).data;
+  // per-pixel difference, then its maximum over a square of radius `reach` (two separable passes)
+  const diff = new Uint8Array(n);
+  for (let i = 0; i < n; i++) {
+    const j = i * 3;
+    diff[i] = Math.min(255, Math.max(Math.abs(br[j] - bo[j]), Math.abs(br[j + 1] - bo[j + 1]), Math.abs(br[j + 2] - bo[j + 2])));
+  }
+  const reach = Math.max(2, Math.ceil(sigma * 2)), tmp = new Uint8Array(n), wide = new Uint8Array(n);
+  for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) {
+    let m = 0;
+    for (let k = Math.max(0, x - reach); k <= Math.min(w - 1, x + reach); k++) if (diff[y * w + k] > m) m = diff[y * w + k];
+    tmp[y * w + x] = m;
+  }
+  for (let x = 0; x < w; x++) for (let y = 0; y < h; y++) {
+    let m = 0;
+    for (let k = Math.max(0, y - reach); k <= Math.min(h - 1, y + reach); k++) if (tmp[k * w + x] > m) m = tmp[k * w + x];
+    wide[y * w + x] = m;
+  }
+  const out = new Uint8Array(n * 3);
+  for (let i = 0; i < n; i++) {
+    const d = wide[i], t = d <= near ? 1 : d >= far ? 0 : (far - d) / (far - near);
+    for (let k = 0; k < 3; k++) {
+      const j = i * 3 + k, v = br[j] + t * (o.data[j] - bo[j]) + (1 - t) * (r.data[j] - br[j]);
+      out[j] = v < 0 ? 0 : v > 255 ? 255 : Math.round(v);
+    }
+  }
+  return { width: w, height: h, channels: 3, data: out };
+}

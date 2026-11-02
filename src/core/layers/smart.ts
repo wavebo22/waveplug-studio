@@ -21,6 +21,8 @@ export interface ToolResult {
   skipped: string[];
   /** extra remark for the status line */
   note?: string;
+  /** counting word, "个" by default */
+  unit?: string;
 }
 
 export const isSmart = (l: ToolLayer) => l.kind === "smartObject";
@@ -46,6 +48,22 @@ export function uniquePlan(layers: ToolLayer[]): { copy: ToolLayer[]; skipped: s
     copy.push(...(sel.length === all.length ? sel.slice(1) : sel));
   }
   return { copy, skipped };
+}
+
+/** Content Photoshop edits as layers: such smart objects are already editable. */
+const EDITABLE_FILE = /\.(psb|psd)$/i;
+
+/** 转为可编辑: the selected smart objects whose content isn't an embedded PSB / PSD (an image, a
+ *  vector file, or a link); the rest are reported. */
+export function editablePlan(layers: ToolLayer[]): { targets: ToolLayer[]; skipped: string[] } {
+  const targets: ToolLayer[] = [], skipped: string[] = [];
+  for (const l of layers.filter(x => x.selected)) {
+    if (!isSmart(l)) skipped.push(`${l.name}：不是智能对象`);
+    else if (l.locked) skipped.push(`${l.name}：图层已锁定`);
+    else if (!l.linked && EDITABLE_FILE.test(l.file ?? "")) skipped.push(`${l.name}：已经可以编辑`);
+    else targets.push(l);
+  }
+  return { targets, skipped };
 }
 
 /** 查找同源: ids of every smart object sharing content with a selected one. */
@@ -78,7 +96,7 @@ export function freeName(name: string, taken: Iterable<string>): string {
 
 /** One status line for a finished tool. */
 export function resultText(verb: string, r: ToolResult): string {
-  const head = (r.done ? `${verb} ${r.done} 个` : "没有可处理的图层") + (r.note ? `（${r.note}）` : "");
+  const head = (r.done ? `${verb} ${r.done} ${r.unit ?? "个"}` : "没有可处理的图层") + (r.note ? `（${r.note}）` : "");
   return r.skipped.length ? `${head}；跳过 ${r.skipped.length} 个（${r.skipped.slice(0, 2).join("；")}${r.skipped.length > 2 ? "…" : ""}）` : head;
 }
 

@@ -1,7 +1,7 @@
 // Builds the execution copy of a profile's workflow. The stored template is never mutated.
 
 import { type ApiGraph, cloneGraph } from "./api.ts";
-import { type Binding, type Profile, type Side, checkBinding, validateProfile } from "./profile.ts";
+import { type Binding, type Profile, type Side, checkBinding, inpaintLike, validateProfile } from "./profile.ts";
 import { applyMaskLinks } from "./localMask.ts";
 import { MAX_REFERENCES, applyReferences } from "./references.ts";
 
@@ -97,7 +97,7 @@ export function prepareRun(p: Profile, v: RunValues): Prepared {
     }
   }
   // "只重绘选区内" is an inpaint feature: an outpaint / text-to-image encoder must keep its own mask
-  if (p.taskType === "inpaint" && p.options.localMask?.enabled) applyMaskLinks(api, p.options.localMask.links);
+  if (inpaintLike(p.taskType) && p.options.localMask?.enabled) applyMaskLinks(api, p.options.localMask.links);
   // outpaint canvas: pads are exact pixels; ignore any ratio / layout chosen in ComfyUI's editor
   const op = p.options.outpaint;
   if (op && api[op.nodeId]) {

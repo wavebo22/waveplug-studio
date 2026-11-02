@@ -92,6 +92,8 @@ const PROMPT_TITLE = /提示词|prompt|正向|positive|描述/i;
 const NEGATIVE_TITLE = /负面|反向|negative/i;
 const EXPOSED_TITLE = /^\s*#\s*\d+/;
 const LORA = /lora/i;
+const EXTRACT_LORA = /fg[-_ ]?extract|chaitu|拆图/i;
+const BLEND_LORA = /融图|blend|relight|光影融合/i;
 
 function numberedTitle(t: string): number | null {
   const m = /^\s*#\s*(\d+)/.exec(t);
@@ -216,6 +218,16 @@ export function recognize(g: ApiGraph): Recognition {
       reason: `独立的加载遮罩节点（通道：${channel}）`,
       alternatives: maskLoaders.slice(1).map(id => bindingFor(g, "mask", id, "image", { encoding: "mask-gray" })),
     });
+  } else if (loaders.length && !op && !sz && !up && findExtract(g)) {
+    // 抠图 workflows that name the object instead of taking a mask: the selection's area is sent as is
+    const sorted = [...loaders].sort((a, b) => rankImage(b) - rankImage(a));
+    mainImage = sorted[0];
+    suggestions.push({
+      binding: bindingFor(g, "image", mainImage, "image", { encoding: "rgb" }),
+      confidence: loaders.length === 1 ? "certain" : "ambiguous",
+      reason: "抠图工作流的原图输入（按物件名抠图，不需要遮罩）",
+      alternatives: sorted.slice(1).map(id => bindingFor(g, "image", id, "image", { encoding: "rgb" })),
+    });
   } else {
     blockers.push(loaders.length
       ? "工作流有加载图像节点，但没有任何遮罩入口（未使用 MASK 输出，也没有加载遮罩节点），不能用于局部重绘"
@@ -312,5 +324,53 @@ export function recognize(g: ApiGraph): Recognition {
     }
   }
 
+  // ── 拆图: an inpaint-shaped workflow (selection in the image's alpha) whose prompt names one element,
+  // e.g. FG Extract's template with {el}. The element name is the prompt; the RGBA result is the output.
+  const ex = taskType === "inpaint" && !!mainImage ? findExtract(g) : null;
+  if (ex) {
+    taskType = "extract";
+    if (ex.name) {
+      const i = suggestions.findIndex(s => s.binding.role === "prompt");
+      if (i >= 0) suggestions.splice(i, 1);
+      suggestions.push({ binding: bindingFor(g, "prompt", ex.name.nodeId, ex.name.input, { label: "物件名" }), confidence: "certain", reason: "提示词模板里 {el} 的来源（要拆的物件名，可留空）" });
+    }
+    // the cut-out, not a mask preview made from it
+    const o = suggestions.findIndex(s => s.binding.role === "output");
+    const cut = saves.find(id => !upstreamHas(g, id, "MaskToImage"));
+    if (o >= 0 && cut) suggestions[o] = { binding: bindingFor(g, "output", cut, "images", { imageIndex: 0 }), confidence: "certain", reason: "拆出的透明图（不是遮罩预览）" };
+  }
+
+  // ── 融图: an inpaint workflow built around a relight / blend LoRA ──
+  if (taskType === "inpaint" && isBlendGraph(g)) taskType = "blend";
+
   return { suggestions, blockers, notes, taskType, outpaint, txt2img, upscale };
+}
+
+/** A 融图 (product relight / blend) workflow: a blend LoRA, or the 融图 LoRA's trigger word. */
+export function isBlendGraph(g: ApiGraph): boolean {
+  return Object.values(g).some(n =>
+    (LORA.test(n.class_type) && BLEND_LORA.test(String(n.inputs.lora_name ?? ""))) ||
+    Object.values(n.inputs).some(v => typeof v === "string" && /\bpengyu\b/.test(v)));
+}
+
+/** An element-extraction workflow: a StringReplace filling "{el}" into a template, or an extraction LoRA. */
+function findExtract(g: ApiGraph): { name: { nodeId: string; input: string } | null } | null {
+  for (const [id, n] of Object.entries(g)) {
+    if (n.class_type !== "StringReplace" || !/\{el\}/.test(String(n.inputs.find ?? ""))) continue;
+    const src = literalSource(g, id, "replace", "string");
+    return { name: src ? { nodeId: src.nodeId, input: src.input } : null };
+  }
+  const lora = Object.values(g).some(n => LORA.test(n.class_type) && EXTRACT_LORA.test(String(n.inputs.lora_name ?? "")));
+  return lora ? { name: null } : null;
+}
+
+/** Whether a node of `classType` feeds `id`, directly or further up. */
+function upstreamHas(g: ApiGraph, id: string, classType: string, seen = new Set<string>()): boolean {
+  if (seen.has(id)) return false;
+  seen.add(id);
+  for (const v of Object.values(g[id]?.inputs ?? {})) {
+    if (!isLink(v)) continue;
+    if (g[v[0]]?.class_type === classType || upstreamHas(g, v[0], classType, seen)) return true;
+  }
+  return false;
 }

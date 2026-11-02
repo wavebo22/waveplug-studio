@@ -3,8 +3,9 @@
 // group is hidden while reading), and every write-back targets the document captured at the start.
 
 import { encodePng, type Pixels } from "../core/image/png.ts";
-import { bleedTransparent, fullSelection, hasTransparency, imageFile, isEmptySelection, maskFile, onWhite, outpaintSeam, resizeAlpha, withAlpha } from "../core/image/compose.ts";
+import { bleedTransparent, downscale, featherInside, fullSelection, hasTransparency, resize, transferDetail, transferDetailWhereSame, imageFile, isEmptySelection, maskFile, onWhite, outpaintSeam, resizeAlpha, withAlpha } from "../core/image/compose.ts";
 import { decodePng } from "../core/image/decode.ts";
+import { dilate, keepInside } from "../core/layers/islands.ts";
 import { MAX_REFERENCES } from "../core/workflow/references.ts";
 import { type Rect, clampRect, expandBy, rectH, rectW } from "../core/image/region.ts";
 import { type Comfy, type JobEvent, outputImage, pngSize, utf8 } from "../core/comfy/client.ts";
@@ -28,6 +29,8 @@ export interface RunInput {
   count: number;
   /** clear ComfyUI's cache before each variation so every node runs (slower: models reload) */
   fullRun?: boolean;
+  /** 融图: keep the original's fine detail under the new light */
+  keepDetail?: boolean;
   /** add variations to this fill, using its own mask (the current selection is ignored);
    *  without it a new fill is created from the current selection */
   addTo?: FillGroup;
@@ -38,9 +41,46 @@ export interface RunInput {
   size?: { width: number; height: number };
   /** upscale profiles: factor. The selection (else the whole canvas) is upscaled into a new document. */
   scale?: number;
-  /** upscale profiles: upscale this layer instead, into a smart object above it */
-  layer?: { id: number; name: string };
+  /** upscale profiles: upscale these layers instead, one after another, each into a smart object above it */
+  layers?: { id: number; name: string }[];
+  /** use this mask (255 = repaint, covering `rect`) instead of Photoshop's selection */
+  selectionMask?: { pixels: Pixels; rect: Rect };
+  /** hide this fill while reading the canvas (e.g. a cut-out lying over what is being removed) */
+  hide?: FillGroup;
 }
+
+/**
+ * Whether a workflow's output is the whole sent picture, resized: same aspect ratio, allowing for
+ * workflows that round each side to a multiple of 32 px (up to ~16 px per side, a few percent on
+ * small images). An output of only the selection's crop differs far more.
+ */
+export function sameAspect(out: { width: number; height: number }, sent: { width: number; height: number }): boolean {
+  const a = out.width / out.height, b = sent.width / sent.height;
+  return Math.abs(a - b) / b <= Math.max(0.01, 48 / Math.min(out.width, out.height));
+}
+
+/**
+ * 抠图 → removal: where the cut-out is (alpha > 16), at the size of the area it covers, grown by
+ * ~1 % of that area (≥ 6 px) so the removal also takes the object's soft edge and shadow line.
+ */
+export function cutoutMask(png: Uint8Array, width: number, height: number): Pixels {
+  const a = resizeAlpha(decodePng(png), width, height), n = width * height, solid = new Uint8Array(n);
+  for (let i = 0; i < n; i++) solid[i] = a.data[i] > 16 ? 1 : 0;
+  const grown = dilate(solid, width, height, Math.max(6, Math.round(Math.min(width, height) * 0.01)));
+  const out = new Uint8Array(n);
+  for (let i = 0; i < n; i++) out[i] = grown[i] ? 255 : 0;
+  return { width, height, channels: 1, data: out };
+}
+
+/** 抠图: context sent around the selection, in multiples of its shorter side. */
+const EXTRACT_MARGIN = 0.15;
+/** Longest side these workflows sample at (孤海 最大采样尺寸); used to size the detail transfer. */
+const SAMPLE_EDGE = 2048;
+/** Width (px) of the band inside the selection where a 融图 result fades into the original. */
+export const blendFeather = (w: number, h: number) => Math.max(8, Math.min(96, Math.round(Math.min(w, h) * 0.06)));
+
+/** Longest side of the image sent for 局部重绘 / 融图; larger crops are scaled down before upload. */
+export const MAX_SEND_EDGE = 4096;
 
 /** Longest side an upscale result may have (larger PNGs make placing in Photoshop very heavy). */
 export const MAX_UPSCALE_EDGE = 12288;
@@ -56,7 +96,13 @@ export interface RunHooks {
   signal: { aborted: boolean };
 }
 
-export interface RunResult { group?: FillGroup; variations: Variation[]; seeds: number[]; continued: boolean }
+export interface RunResult {
+  group?: FillGroup; variations: Variation[]; seeds: number[]; continued: boolean;
+  /** 放大 · 当前图层: layers upscaled, and "name：reason" for those that failed */
+  upscaled?: number; failed?: string[];
+  /** 抠图: the cut-out's shape (255 = object, grown a little) over `rect`, for removing it from the original */
+  cutout?: { pixels: Pixels; rect: Rect };
+}
 
 /** A finished result that could not be written back (document closed, group deleted …). */
 export class StashedResult extends Error {
@@ -98,8 +144,12 @@ export async function runInpaint(host: PsHost, comfy: Comfy, input: RunInput, ho
   if (!/RGB|CMYK/i.test(doc.mode) || doc.bits !== 8) throw new Error(`目前支持 RGB / CMYK 8 位文档（当前：${doc.mode} ${doc.bits} 位）`);
   if (profile.taskType === "outpaint") return runOutpaint(host, comfy, input, hooks, doc);
   if (profile.taskType === "upscale") return runUpscale(host, comfy, input, hooks, doc);
+  const blend = profile.taskType === "blend", extract = profile.taskType === "extract";
+  // 抠图: an empty name keeps the workflow's own (e.g. 「主体」)
+  const promptB = profile.bindings.find(b => b.role === "prompt");
+  const prompt = extract && !input.prompt.trim() && promptB ? String(profile.api[promptB.nodeId]?.inputs[promptB.input] ?? "主体") : input.prompt;
   const target = input.addTo ? await host.refreshFillGroup(input.addTo) : null;
-  const selBounds = input.addTo ? null : await host.selectionBounds(doc.id);
+  const selBounds = input.selectionMask ? input.selectionMask.rect : input.addTo ? null : await host.selectionBounds(doc.id);
   if (!target && !selBounds) throw new Error("请先用选区框出要重绘的区域");
 
   const groupRect = target ? target.rect : clampRect(selBounds!, doc.width, doc.height);
@@ -113,14 +163,26 @@ export async function runInpaint(host: PsHost, comfy: Comfy, input: RunInput, ho
   // Crop: the selection plus a margin of `cropMargin` × its shorter side (≥ what crop-and-restore
   // workflows such as 孤海遮罩裁剪V2 expand by), so the workflow sees the same context while
   // files stay small — a full 3508×4959 canvas made write-back heavy enough to crash Photoshop.
-  const sendRect = profile.options.sendScope === "canvas" ? canvas
-    : expandBy(focus, Math.ceil(Math.min(rectW(focus), rectH(focus)) * profile.options.cropMargin), doc.width, doc.height);
+  // The margin shrinks on very large selections so the crop stays within MAX_SEND_EDGE.
+  // 抠图 sends little context so the object fills the picture the model sees
+  const margin = Math.min(Math.ceil(Math.min(rectW(focus), rectH(focus)) * (extract ? EXTRACT_MARGIN : profile.options.cropMargin)),
+    Math.max(0, Math.floor((MAX_SEND_EDGE - Math.max(rectW(focus), rectH(focus))) / 2)));
+  const sendRect = profile.options.sendScope === "canvas" ? canvas : expandBy(focus, margin, doc.width, doc.height);
 
   let selection: "active" | Pixels = "active";
-  if (!selBounds && target) selection = paste(await host.groupMask(target), sendRect, target.rect);
-  const cap = await host.capture(doc.id, sendRect, selection, target ?? undefined);
+  if (input.selectionMask) selection = paste(input.selectionMask.pixels, sendRect, input.selectionMask.rect);
+  else if (!selBounds && target) selection = paste(await host.groupMask(target), sendRect, target.rect);
+  const cap = await host.capture(doc.id, sendRect, selection, target ?? input.hide);
   if (isEmptySelection(cap.selection)) throw new Error("选区为空");
   check();
+
+  // Larger crops are sent scaled down (ComfyUI accepts at most 100 MB per upload, and these workflows
+  // sample at ≤ 2048 px anyway); the result is still placed over the full sendRect.
+  const sendScale = Math.min(1, MAX_SEND_EDGE / Math.max(rectW(sendRect), rectH(sendRect)));
+  const sw = Math.max(1, Math.round(rectW(sendRect) * sendScale)), sh = Math.max(1, Math.round(rectH(sendRect) * sendScale));
+  const sentImage = sendScale < 1 ? downscale(cap.image, sw, sh) : cap.image;
+  const sentSel = sendScale < 1 ? downscale(cap.selection, sw, sh) : cap.selection;
+  log("info", "send", `${rectW(sendRect)}x${rectH(sendRect)}`, sendScale < 1 ? `scaled to ${sw}x${sh}` : "");
 
   // ── 2. upload ──
   hooks.stage("上传到 ComfyUI…");
@@ -133,12 +195,12 @@ export async function runInpaint(host: PsHost, comfy: Comfy, input: RunInput, ho
   const t0 = Date.now();
   const img = profile.bindings.find(b => b.role === "image")!;
   const values = {
-    image: await upload(imageFile(cap.image, img.encoding ?? "rgb", cap.selection), "image"),
+    image: await upload(imageFile(sentImage, img.encoding ?? "rgb", sentSel), "image"),
     mask: undefined as string | undefined,
     references: {} as Record<number, string>,
   };
   const maskB = profile.bindings.find(b => b.role === "mask");
-  if (maskB) values.mask = await upload(maskFile(cap.selection, maskB.encoding === "mask-alpha" ? "mask-alpha" : "mask-gray"), "mask");
+  if (maskB) values.mask = await upload(maskFile(sentSel, maskB.encoding === "mask-alpha" ? "mask-alpha" : "mask-gray"), "mask");
   // reference bytes are kept so every variation can upload its own copy (see below)
   const refBytes: Record<number, { bytes: Uint8Array; ext: string }> = {};
   const uploadRef = async (slot: number, src: RefSource, k = 0) => {
@@ -166,6 +228,7 @@ export async function runInpaint(host: PsHost, comfy: Comfy, input: RunInput, ho
   // ── 3. run, once per variation ──
   let group: FillGroup | null = target;
   const variations: Variation[] = [], seeds: number[] = [];
+  let cutout: RunResult["cutout"];
   const count = Math.max(1, Math.min(4, Math.floor(input.count) || 1));
   for (let k = 0; k < count; k++) {
     const tag = count > 1 ? `（${k + 1}/${count}）` : "";
@@ -176,7 +239,7 @@ export async function runInpaint(host: PsHost, comfy: Comfy, input: RunInput, ho
       const src = input.references[slot];
       if (src) values.references[slot] = await uploadRef(slot, src, k);
     }
-    const run = prepareRun(profile, { ...values, prompt: input.prompt, negative: input.negative, seed: input.seed === null ? null : input.seed + k, params: input.params, variant: k });
+    const run = prepareRun(profile, { ...values, prompt, negative: input.negative, seed: input.seed === null ? null : input.seed + k, params: input.params, variant: k });
     log("info", "run", JSON.stringify({ prompt: input.prompt, seed: run.seed, profile: profile.name, localMask: !!profile.options.localMask?.enabled, continued: !!target }));
     if (input.fullRun) { hooks.stage("清空 ComfyUI 缓存" + tag); await comfy.freeCache(); }
     // the exact execution copy — can be dragged into ComfyUI to inspect or re-run it there
@@ -192,17 +255,45 @@ export async function runInpaint(host: PsHost, comfy: Comfy, input: RunInput, ho
     }, { signal: hooks.signal });
     const out = run.outputs[0];
     hooks.stage("取回结果" + tag);
-    const png = await comfy.view(outputImage(history, out.nodeId, out.imageIndex ?? 0));
+    let png = await comfy.view(outputImage(history, out.nodeId, out.imageIndex ?? 0));
     hooks.debug?.(`${stamp}_output${k ? "_" + k : ""}.png`, png);
     const outSize = pngSize(png);
     log("info", "run timing", `upload ${(tUpload / 1000).toFixed(1)}s`, `comfy ${((Date.now() - tQueued) / 1000).toFixed(1)}s`,
       "sent", `${rectW(sendRect)}x${rectH(sendRect)}`, "output", outSize ? `${outSize.width}x${outSize.height}` : "?");
     // A workflow that returns only its crop (not the full sent image) can't be placed by stretching.
     if (outSize) {
-      const a = outSize.width / outSize.height, b = rectW(sendRect) / rectH(sendRect);
-      if (Math.abs(a - b) / b > 0.01) {
+      if (!sameAspect(outSize, { width: rectW(sendRect), height: rectH(sendRect) })) {
         throw new StashedResult(`工作流输出 ${outSize.width}×${outSize.height} 与发送的画面 ${rectW(sendRect)}×${rectH(sendRect)} 比例不同，为避免错位未写入`, png);
       }
+    }
+    // 抠图, like 局部重绘: keep only what the selection takes in whole (the model sometimes cuts out
+    // neighbours too, or things the selection only touches)
+    if (extract && outSize) {
+      const cut = decodePng(png);
+      if (cut.channels !== 4) throw new StashedResult("这个工作流没有输出透明图（PNG 没有透明通道），请确认用的是抠图工作流", png);
+      const sel = resize(sentSel, cut.width, cut.height);
+      const r = keepInside(cut, sel, Math.round(Math.min(cut.width, cut.height) * 0.03));
+      log("info", "extract islands", `kept ${r.kept}`, `dropped ${r.dropped}`);
+      if (!r.kept) throw new StashedResult("选区里没有被完整框住的东西：把要抠的物件整个框进去（可以框大一点），或者写上物件名", png);
+      // 保留原图细节: at full resolution, the original's detail where the cut-out still shows the same
+      // thing; the model's own pixels where it completed or changed something
+      if (input.keepDetail) {
+        hooks.stage("保留原图细节" + tag);
+        const W = cap.image.width, H = cap.image.height;
+        const sigma = Math.max(1.5, Math.max(W, H) / Math.max(cut.width, cut.height) * 1.2);
+        png = encodePng(withAlpha(transferDetailWhereSame(resize(r.pixels, W, H), cap.image, sigma), resizeAlpha(r.pixels, W, H)));
+        log("info", "extract keep detail", `sigma ${sigma.toFixed(1)}`, `${W}x${H}`);
+      } else png = encodePng(r.pixels);
+      cutout = { pixels: cutoutMask(png, rectW(sendRect), rectH(sendRect)), rect: sendRect };
+    }
+    // 融图 · 保留原图细节: light, shadow and colour from the result, fine detail from the original at
+    // full resolution (the workflow samples at ≤ 2048 px, so a large selection came back soft)
+    if (blend && input.keepDetail && outSize) {
+      hooks.stage("保留原图细节" + tag);
+      const factor = Math.max(cap.image.width, cap.image.height) / Math.min(SAMPLE_EDGE, Math.max(outSize.width, outSize.height));
+      const sigma = Math.max(1.5, factor * 1.2);
+      png = encodePng(transferDetail(resize(decodePng(png), cap.image.width, cap.image.height), cap.image, sigma));
+      log("info", "blend keep detail", `sigma ${sigma.toFixed(1)}`);
     }
     check();
 
@@ -212,16 +303,23 @@ export async function runInpaint(host: PsHost, comfy: Comfy, input: RunInput, ho
     try {
       group = group
         ? await host.refreshFillGroup(group)
-        : await host.createFillGroup(doc.id, groupRect, input.prompt);
+        : await host.createFillGroup(doc.id, groupRect, extract ? prompt : input.prompt, undefined, blend ? "blend" : extract ? "extract" : undefined);
     } catch (e) {
       throw new StashedResult((e as Error).message + "，结果未写入", png);
     }
-    const v = await host.addVariation(group, png, sendRect, input.prompt, { pixels: crop(cap.selection, sendRect, groupRect), rect: groupRect, outside: "hide" });
+    // 融图 changes the light around the subject too: fade it into the original inside the selection's edge
+    // (a fill's own mask, used when adding variations without a new selection, is already soft)
+    const selMask = crop(cap.selection, sendRect, groupRect);
+    const mask = blend && selection === "active" ? featherInside(selMask, blendFeather(rectW(groupRect), rectH(groupRect))) : selMask;
+    // 抠图: the cut-out's own transparency is the shape; the layer isn't masked by the selection
+    const v = await host.addVariation(group, png, sendRect, extract ? prompt : input.prompt, extract
+      ? { pixels: fullSelection(rectW(groupRect), rectH(groupRect)), rect: groupRect, outside: "reveal" }
+      : { pixels: mask, rect: groupRect, outside: "hide" });
     variations.push(v); seeds.push(run.seed);
     hooks.variationAdded?.(group, v, run.seed);
     check();
   }
-  return { group: group!, variations, seeds, continued: !!target };
+  return { group: group!, variations, seeds, continued: !!target, cutout };
 }
 
 /** Uploads the run's references; `forVariation(k)` re-uploads them under new names for variation k
@@ -431,7 +529,7 @@ async function runUpscale(host: PsHost, comfy: Comfy, input: RunInput, hooks: Ru
   const { profile } = input;
   const check = () => { if (hooks.signal.aborted) throw new Error("已取消"); };
   const scale = input.scale ?? 2;
-  if (input.layer) return runUpscaleLayer(host, comfy, input, hooks, doc, input.layer, scale);
+  if (input.layers?.length) return runUpscaleLayers(host, comfy, input, hooks, doc, input.layers, scale);
   const sel = await host.selectionBounds(doc.id);
   const rect: Rect = sel ? clampRect(sel, doc.width, doc.height) : { left: 0, top: 0, right: doc.width, bottom: doc.height };
   const w = rectW(rect), h = rectH(rect);
@@ -502,6 +600,25 @@ async function runUpscale(host: PsHost, comfy: Comfy, input: RunInput, hooks: Ru
  * placed as a smart object above it at the same size, with the upscaled pixels inside; the original
  * layer is hidden. Transparent layers: the colour is upscaled by the workflow, the alpha locally.
  */
+/** 放大 · 当前图层 for every selected layer in turn; one failing doesn't stop the others. */
+async function runUpscaleLayers(host: PsHost, comfy: Comfy, input: RunInput, hooks: RunHooks, doc: { id: number }, layers: { id: number; name: string }[], scale: number): Promise<RunResult> {
+  if (layers.length === 1) return runUpscaleLayer(host, comfy, input, hooks, doc, layers[0], scale);
+  const seeds: number[] = [], failed: string[] = [];
+  for (const [k, layer] of layers.entries()) {
+    if (hooks.signal.aborted) throw new Error("已取消");
+    const tag = `（${k + 1}/${layers.length}「${layer.name}」）`;
+    const sub: RunHooks = { ...hooks, stage: t => hooks.stage(t + tag), progress: (f, t) => hooks.progress(f === null ? null : (k + f) / layers.length, t && t + tag) };
+    try { seeds.push(...(await runUpscaleLayer(host, comfy, input, sub, doc, layer, scale)).seeds); }
+    catch (e) {
+      if (hooks.signal.aborted) throw e;
+      failed.push(`${layer.name}：${(e as Error).message}`);
+      log("warn", "upscale layer failed", layer.name, e);
+    }
+  }
+  if (!seeds.length) throw new Error(`${layers.length} 个图层都没能放大：${failed[0]}`);
+  return { variations: [], seeds, continued: false, upscaled: seeds.length, failed };
+}
+
 async function runUpscaleLayer(host: PsHost, comfy: Comfy, input: RunInput, hooks: RunHooks, doc: { id: number }, layer: { id: number; name: string }, scale: number): Promise<RunResult> {
   const { profile } = input;
   const check = () => { if (hooks.signal.aborted) throw new Error("已取消"); };
@@ -555,5 +672,5 @@ async function runUpscaleLayer(host: PsHost, comfy: Comfy, input: RunInput, hook
   } catch (e) {
     throw new StashedResult((e as Error).message + "，结果未写入", png);
   }
-  return { variations: [], seeds: [run.seed], continued: false };
+  return { variations: [], seeds: [run.seed], continued: false, upscaled: 1 };
 }

@@ -47,8 +47,10 @@ export interface Settings {
   upScale?: number;
   /** 放大: whole canvas / selection into a new document, or the active layer into a smart object */
   upTarget?: "canvas" | "layer";
+  /** 抠图: afterwards remove the object from the original with the 局部重绘 workflow (拆图) */
+  extractRemove?: boolean;
 }
-export interface ProfileState { prompt: string; params: Record<string, number | boolean>; seedMode: "random" | "fixed"; seed: number; count?: number; fullRun?: boolean }
+export interface ProfileState { prompt: string; params: Record<string, number | boolean>; seedMode: "random" | "fixed"; seed: number; count?: number; fullRun?: boolean; keepDetail?: boolean }
 
 const KEY = { settings: "wp.settings", profiles: "wp.profiles", state: "wp.state.", thumb: "wp.thumb.", favorites: "wp.favorites" };
 

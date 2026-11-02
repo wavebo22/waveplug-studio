@@ -5,8 +5,8 @@ import { type Comfy, ComfyError } from "../core/comfy/client.ts";
 import type { Rect } from "../core/image/region.ts";
 import { asApiGraph } from "../core/workflow/api.ts";
 import { MAX_SEED, randomSeed } from "../core/workflow/inject.ts";
-import { type Binding, type Profile, type TaskType, ROLE_LABEL, carryOver, newProfile, validateProfile } from "../core/workflow/profile.ts";
-import { recognize } from "../core/workflow/recognize.ts";
+import { type Binding, type Profile, type TaskType, ROLE_LABEL, carryOver, inpaintLike, newProfile, validateProfile } from "../core/workflow/profile.ts";
+import { isBlendGraph, recognize } from "../core/workflow/recognize.ts";
 import { uiToApi } from "../core/workflow/uiToApi.ts";
 import { findLocalMaskLinks } from "../core/workflow/localMask.ts";
 import { MAX_REFERENCES, findReferenceSlots } from "../core/workflow/references.ts";
@@ -18,7 +18,7 @@ import { openCalibration } from "./calibrate.ts";
 import { h, icon, replace } from "./dom.ts";
 import { encodePng } from "../core/image/png.ts";
 import { onWhite } from "../core/image/compose.ts";
-import { EXPAND_PREFIX, FILL_PREFIX, GENERATE_PREFIX, UPSCALE_PREFIX } from "../ps/host.ts";
+import { BLEND_PREFIX, EXPAND_PREFIX, EXTRACT_PREFIX, FILL_PREFIX, GENERATE_PREFIX, UPSCALE_PREFIX } from "../ps/host.ts";
 import { RATIOS, createExpandEditor } from "./expandEditor.ts";
 import { createToolsView } from "./tools.ts";
 
@@ -65,8 +65,13 @@ type RefSlot = RefSource & { thumb?: string };
 export function mountApp(root: HTMLElement, svc: Services) {
   let settings: Settings = store.settings();
   let profiles: Profile[] = store.profiles();
-  // Two modes (局部重绘 / 扩图), each with its own current workflow.
+  // Each mode (局部重绘 / 融图 / 扩图 / 文生图 / 放大) has its own current workflow.
   const modeOf = (p: Profile): TaskType => p.taskType ?? "inpaint";
+  // 融图 workflows imported under 局部重绘 before the 融图 mode existed move over
+  if (profiles.some(p => modeOf(p) === "inpaint" && isBlendGraph(p.api))) {
+    for (const p of profiles) if (modeOf(p) === "inpaint" && isBlendGraph(p.api)) { p.taskType = "blend"; p.options.allowEmptyPrompt = true; }
+    store.saveProfiles(profiles);
+  }
   const pickFor = (m: TaskType) => {
     const id = settings.activeByMode?.[m] ?? (m === "inpaint" ? settings.activeProfile : null);
     return profiles.find(p => p.id === id && modeOf(p) === m) ?? profiles.find(p => modeOf(p) === m) ?? null;
@@ -116,7 +121,7 @@ export function mountApp(root: HTMLElement, svc: Services) {
   const targetEl = h("span", { class: "target" });
   targetEl.addEventListener("click", () => {
     // inpaint: only with a selection (without one there is nothing new to fill); 文生图: always
-    if (!group || group.kind !== mode || mode === "outpaint" || mode === "upscale" || (mode === "inpaint" && !sel)) return;
+    if (!group || group.kind !== mode || mode === "outpaint" || mode === "upscale" || (inpaintLike(mode) && !sel)) return;
     choice = { sel: selKey(sel), add: !willAdd() };
     renderHistory(); renderSelection(); renderAction();
   });
@@ -142,7 +147,7 @@ export function mountApp(root: HTMLElement, svc: Services) {
   const statusEl = h("div", { class: "status" });
   const sheetHost = h("div", { class: "sheet-host" });
 
-  const MODES = [["inpaint", "局部重绘"], ["outpaint", "扩图"], ["txt2img", "文生图"], ["upscale", "放大"]] as const;
+  const MODES = [["inpaint", "局部重绘"], ["blend", "融图"], ["extract", "抠图"], ["outpaint", "扩图"], ["txt2img", "文生图"], ["upscale", "放大"]] as const;
   const modeBtns = MODES.map(([m, label]) => h("button", { class: "seg-btn", onClick: () => setMode(m) }, label));
   const modeEl = h("div", { class: "seg" }, ...modeBtns);
   // 生成 (the AI modes above) | 工具 (Photoshop layer tools, no ComfyUI)
@@ -180,13 +185,13 @@ export function mountApp(root: HTMLElement, svc: Services) {
   const upFactors = () => profile?.options.upscale?.factors ?? [1, 2, 3, 4];
   const upScale = () => { const f = upFactors(); return f.includes(settings.upScale ?? 2) ? settings.upScale ?? 2 : f[Math.min(1, f.length - 1)]; };
   const upLayerMode = () => settings.upTarget === "layer";
-  /** 放大 · 当前图层: the active layer, if it has pixels of its own (not a group / adjustment layer) */
-  const upLayer = () => {
-    const l = doc ? svc.host.activeLayer(doc.id) : null;
-    return l && /^(pixel|smartObject|text|solidColor|gradientFill|pattern)$/i.test(l.kind) ? l : null;
-  };
-  /** 放大: the active layer, or the selection's bounds, else the whole canvas */
-  const upSource = () => !doc ? null : upLayerMode() ? upLayer()?.rect ?? null : sel ?? { left: 0, top: 0, right: doc.width, bottom: doc.height };
+  /** 放大 · 当前图层: the selected layers that have pixels of their own (not groups / adjustment layers) */
+  const upLayers = () => (doc ? svc.host.activeLayers(doc.id) : []).filter(l => /^(pixel|smartObject|text|solidColor|gradientFill|pattern)$/i.test(l.kind));
+  /** 放大 · 当前图层: the selected layer whose upscale would be largest */
+  const upLargest = () => upLayers().reduce<ReturnType<typeof upLayers>[number] | null>((m, l) =>
+    !m || Math.max(l.rect.right - l.rect.left, l.rect.bottom - l.rect.top) > Math.max(m.rect.right - m.rect.left, m.rect.bottom - m.rect.top) ? l : m, null);
+  /** 放大: the (largest) selected layer, or the selection's bounds, else the whole canvas */
+  const upSource = () => !doc ? null : upLayerMode() ? upLargest()?.rect ?? null : sel ?? { left: 0, top: 0, right: doc.width, bottom: doc.height };
 
   // prompt favorites, one list per place a prompt is typed (重绘 / 扩图 / 文生图)
   const MAX_FAVORITES = 40;
@@ -206,6 +211,11 @@ export function mountApp(root: HTMLElement, svc: Services) {
   favToggle.addEventListener("click", () => { favOpen = !favOpen; renderFav(); });
   /** Puts `text` into the prompt box as if typed (saved with the workflow's state). */
   const setPromptText = (text: string) => { prompt.value = text; prompt.dispatchEvent(new Event("input")); };
+
+  // 抠图 → 拆图: remove the cut-out object from the original afterwards (局部重绘's removal)
+  const exRemoveBox = h("input", { type: "checkbox", onChange: (e: Event) => { settings.extractRemove = (e.target as HTMLInputElement).checked; store.saveSettings(settings); } }) as HTMLInputElement;
+  const exRemoveRow = h("label", { class: "param check-row ex-remove", title: "抠出来之后，用「局部重绘」模式里的移除工作流（提示词留空 = 移除）把原图里的这个物件去掉，结果放在抠图下面一层，相当于把它拆成单独的一层" },
+    exRemoveBox, h("span", null, "抠完后从原图移除（拆图）"));
 
   const mainEl = h("main", { class: "scroll" });
   const footEl = h("footer", { class: "foot" });
@@ -238,7 +248,7 @@ export function mountApp(root: HTMLElement, svc: Services) {
       t2iCard,
       upCard,
       h("section", { class: "card" },
-        prompt, promptHint, favEl, refsEl,
+        prompt, promptHint, favEl, exRemoveRow, refsEl,
         h("div", { class: "ctx-row" }, targetEl, selEl),
         h("div", { class: "gen-row" }, countSel, genBtn),
         progEl),
@@ -292,7 +302,7 @@ export function mountApp(root: HTMLElement, svc: Services) {
 
   function renderHistory() {
     const add = willAdd();
-    targetEl.textContent = add ? `添加到「${group!.name}」` : mode === "outpaint" ? "新建扩图" : mode === "txt2img" ? "新建生成" : mode === "upscale" ? (upLayerMode() ? "智能对象" : "新文档") : "新建填充";
+    targetEl.textContent = add ? `添加到「${group!.name}」` : mode === "outpaint" ? "新建扩图" : mode === "txt2img" ? "新建生成" : mode === "upscale" ? (upLayerMode() ? "智能对象" : "新文档") : mode === "blend" ? "新建融图" : mode === "extract" ? "新建抠图" : "新建填充";
     targetEl.title = mode === "upscale" ? (upLayerMode() ? "结果放在原图层上方，是同样大小的智能对象（里面是放大后的图片），原图层隐藏" : "放大结果放进一个新文档，原文档不改动")
       : mode === "txt2img"
       ? (add ? `新变体加入「${group!.name}」，放在它原来的位置。点击改为新建` : group?.kind === "txt2img" ? `新建一组生成结果。点击改为添加到「${group.name}」` : "生成结果放进选区；没有选区时铺满画布；没有打开文档时新建文档")
@@ -301,7 +311,7 @@ export function mountApp(root: HTMLElement, svc: Services) {
       : !group ? "用当前选区新建一个 AI 填充"
       : add ? `新变体加入「${group.name}」，使用它原来的遮罩${sel ? "。点击改为用当前选区新建填充" : ""}`
       : `当前选区和「${group.name}」不同，将新建填充。点击改为添加到「${group.name}」`;
-    targetEl.className = "target " + (add ? "cont" : "new") + (group && group.kind === mode && (mode === "txt2img" || (sel && mode === "inpaint")) ? " switchable" : "");
+    targetEl.className = "target " + (add ? "cont" : "new") + (group && group.kind === mode && (mode === "txt2img" || (sel && inpaintLike(mode))) ? " switchable" : "");
     replace(fillSel, ...fills.map(f => h("option", { value: String(f.layerId) }, f.name)));
     fillSel.hidden = fills.length < 1;
     fillSel.value = group ? String(group.layerId) : "";
@@ -356,14 +366,16 @@ export function mountApp(root: HTMLElement, svc: Services) {
     replace(upBtns, ...upFactors().map(f => h("button", { class: "seg-btn" + (f === factor ? " on" : ""), title: f === 1 ? "原尺寸修复（不放大）" : `放大 ${f} 倍`,
       onClick: () => { settings.upScale = f; store.saveSettings(settings); renderFlows(); renderSelection(); renderAction(); } }, f === 1 ? "修复" : `${f}×`)));
     const scope = upLayerMode() ? "layer" : "canvas";
-    replace(upScope, ...([["canvas", "整个画面", "选区或整个画面（所有可见图层）放大到新文档"], ["layer", "当前图层", "放大选中的图层，结果是同样大小的智能对象，里面是放大后的图片"]] as const).map(([k, label, tip]) =>
+    replace(upScope, ...([["canvas", "整个画面", "选区或整个画面（所有可见图层）放大到新文档"], ["layer", "当前图层", "放大选中的图层（可多选，依次处理），结果是同样大小的智能对象，里面是放大后的图片"]] as const).map(([k, label, tip]) =>
       h("button", { class: "seg-btn" + (k === scope ? " on" : ""), title: tip, onClick: () => { settings.upTarget = k; store.saveSettings(settings); renderFlows(); renderHistory(); renderSelection(); renderAction(); } }, label)));
     // the upscale workflow has no prompt; one layer gives one result
     prompt.hidden = mode === "upscale";
+    exRemoveRow.hidden = mode !== "extract";
+    exRemoveBox.checked = settings.extractRemove !== false;
     countSel.hidden = mode === "upscale" && upLayerMode();
     t2iRatio.value = settings.t2iRatio ?? T2I_FOLLOW;
     t2iLong.value = String(settings.t2iLong ?? 1536);
-    flowName.textContent = profile ? profile.name : mode === "outpaint" ? "导入扩图工作流" : mode === "txt2img" ? "导入文生图工作流" : mode === "upscale" ? "导入放大工作流" : "导入工作流";
+    flowName.textContent = profile ? profile.name : mode === "outpaint" ? "导入扩图工作流" : mode === "txt2img" ? "导入文生图工作流" : mode === "upscale" ? "导入放大工作流" : mode === "blend" ? "导入融图工作流" : mode === "extract" ? "导入抠图工作流" : "导入工作流";
     flowBtn.title = profile ? `工作流：${profile.name}（点击切换、导入或校准）` : "导入 ComfyUI 工作流";
     flowBtn.classList.toggle("warn", !!profile && validateProfile(profile).length > 0);
     countSel.value = String(pstate?.count ?? 1);
@@ -371,7 +383,9 @@ export function mountApp(root: HTMLElement, svc: Services) {
     // UXP's native textarea can merge its placeholder into the typed text, so the hint lives outside it
     promptHint.textContent = mode === "txt2img" ? "描述想要生成的画面"
       : mode === "outpaint" ? "描述扩展出来的内容（可留空，自动延续画面）"
-      : allowEmpty ? "描述要画进选区的内容；留空 = 移除选区内的内容" : "描述要画进选区的内容";
+      : mode === "extract" ? "可选：要抠的东西，例如 护肤品、红色价格牌；留空 = 抠选区里的主体"
+      : mode === "blend" ? `可选：补充光影要求，例如 夕阳暖光、木桌上的倒影；留空 = ${(profile && emptyMeaning(profile)) || "默认融图提示词"}`
+      : allowEmpty ? `描述要画进选区的内容；留空 = ${(profile && emptyMeaning(profile)) || "移除选区内的内容"}` : "描述要画进选区的内容";
     prompt.title = promptHint.textContent;
     prompt.value = pstate?.prompt ?? "";
     promptHint.hidden = !!prompt.value || mode === "upscale";
@@ -437,12 +451,12 @@ export function mountApp(root: HTMLElement, svc: Services) {
     }
     if (!doc) { selEl.textContent = "未打开文档"; if (mode === "upscale") replace(upInfo); return; }
     if (mode === "upscale" && upLayerMode()) {
-      const l = upLayer(), f = upScale();
-      if (!l) { selEl.textContent = "未选中图层"; selEl.className = "sel-state warn"; replace(upInfo, h("span", { class: "muted" }, "在图层面板选中要放大的图层")); return; }
+      const ls = upLayers(), l = upLargest(), f = upScale();
+      if (!l) { selEl.textContent = "未选中图层"; selEl.className = "sel-state warn"; replace(upInfo, h("span", { class: "muted" }, "在图层面板选中要放大的图层（可多选）")); return; }
       const w = l.rect.right - l.rect.left, hh = l.rect.bottom - l.rect.top;
-      selEl.textContent = `内容 ${w * f} × ${hh * f}`;
+      selEl.textContent = ls.length > 1 ? `${ls.length} 个图层` : `内容 ${w * f} × ${hh * f}`;
       selEl.className = "sel-state" + (Math.max(w, hh) * f > MAX_UPSCALE_EDGE ? " warn" : "");
-      replace(upInfo, h("span", { class: "muted" }, "放大："), `图层「${l.name}」 ${w} × ${hh}`, h("span", { class: "muted" }, "（放大后变成智能对象，原图层隐藏）"));
+      replace(upInfo, h("span", { class: "muted" }, "放大："), ls.length > 1 ? `${ls.length} 个图层，依次放大` : `图层「${l.name}」 ${w} × ${hh}`, h("span", { class: "muted" }, "（放大后变成智能对象，原图层隐藏）"));
       return;
     }
     if (mode === "upscale") {
@@ -464,7 +478,7 @@ export function mountApp(root: HTMLElement, svc: Services) {
   }
 
   function blockedReason(text = prompt.value, regenerating = false): string | null {
-    if (!profile) return mode === "outpaint" ? "请先导入扩图工作流（含「外补画板」节点）" : mode === "txt2img" ? "请先导入文生图工作流" : mode === "upscale" ? "请先导入放大工作流" : "请先导入工作流";
+    if (!profile) return mode === "outpaint" ? "请先导入扩图工作流（含「外补画板」节点）" : mode === "txt2img" ? "请先导入文生图工作流" : mode === "upscale" ? "请先导入放大工作流" : mode === "blend" ? "请先导入融图工作流（含融图 LoRA）" : mode === "extract" ? "请先导入抠图工作流（如心宝强化抠图）" : "请先导入工作流";
     const problems = validateProfile(profile);
     if (problems.length) return "工作流需要校准：" + problems[0];
     if (conn.state !== "ok") return "未连接 ComfyUI";
@@ -475,12 +489,13 @@ export function mountApp(root: HTMLElement, svc: Services) {
     if (!doc) return "请先打开 PSD";
     if (mode === "upscale") {
       const r = upSource();
-      if (!r) return "请在图层面板选中一个图层（不能是图层组或调整图层）";
-      return Math.max(r.right - r.left, r.bottom - r.top) * upScale() > MAX_UPSCALE_EDGE ? `放大后超过 ${MAX_UPSCALE_EDGE} 像素，请框选一部分或降低倍数` : null;
+      if (!r) return "请在图层面板选中要放大的图层（不能是图层组或调整图层）";
+      return Math.max(r.right - r.left, r.bottom - r.top) * upScale() <= MAX_UPSCALE_EDGE ? null
+        : upLayerMode() ? `图层「${upLargest()!.name}」放大后超过 ${MAX_UPSCALE_EDGE} 像素，请降低倍数或不选它` : `放大后超过 ${MAX_UPSCALE_EDGE} 像素，请框选一部分或降低倍数`;
     }
     if (mode === "outpaint" && !regenerating && !willAdd() && !padTotal()) return "拖动上面画布的边缘，设定要扩展的尺寸";
-    if (mode === "inpaint" && !regenerating && !sel && !willAdd()) return "请先建立选区";
-    if (modeOf(profile) === "inpaint" && !profile.options.allowEmptyPrompt && profile.bindings.some(b => b.role === "prompt") && !text.trim()) return "请输入提示词（留空移除可在「接口校准」里开启）";
+    if (inpaintLike(mode) && !regenerating && !sel && !willAdd()) return mode === "blend" ? "请先框选要融合的产品和它周围一圈" : mode === "extract" ? "请先框选要抠的东西" : "请先建立选区";
+    if (inpaintLike(modeOf(profile)) && !profile.options.allowEmptyPrompt && profile.bindings.some(b => b.role === "prompt") && !text.trim()) return "请输入提示词（留空移除可在「接口校准」里开启）";
     return null;
   }
 
@@ -498,7 +513,7 @@ export function mountApp(root: HTMLElement, svc: Services) {
     genBtn.className = "generate";
     genBtn.disabled = !!why;
     genBtn.title = why ?? "";
-    replace(genBtn, icon("spark"), h("span", null, willAdd() ? "生成更多变体" : mode === "outpaint" ? "扩图" : mode === "upscale" ? "放大" : "生成"));
+    replace(genBtn, icon("spark"), h("span", null, willAdd() ? "生成更多变体" : mode === "outpaint" ? "扩图" : mode === "upscale" ? "放大" : mode === "blend" ? "融图" : mode === "extract" ? "抠图" : "生成"));
     progEl.hidden = !why;
     replace(progEl, why ? h("div", { class: "stage muted" }, why,
       conn.state === "down" && svc.launch ? h("button", { class: "link", onClick: () => void launchComfy() }, settings.comfyLaunch ? "  一键启动" : "  设置启动文件") : null) : null);
@@ -550,6 +565,11 @@ export function mountApp(root: HTMLElement, svc: Services) {
         h("span", { class: "param-label" }, "只重绘选区内")));
     }
     {
+      if (modeOf(profile) === "blend" || modeOf(profile) === "extract") rows.push(h("label", { class: "param check-row", title: modeOf(profile) === "extract"
+        ? "抠出来的物件在原图里看得见的部分，用原图的全分辨率细节（文字、纹理不走样）；被挡住、由 AI 补全的部分仍用 AI 画的。想完全用 AI 的结果就关掉"
+        : "光影、阴影和颜色用 AI 的结果，纹理和文字等细节用原图。人脸、文字、纹理保持原样，不会被 AI 重画走样（AI 只在 2048 像素内采样）。如果想让 AI 修掉原图的白边、毛边或者改变形状，就关掉" },
+        h("input", { type: "checkbox", checked: ps.keepDetail !== false, onChange: (e: Event) => { ps.keepDetail = (e.target as HTMLInputElement).checked; save(); } }),
+        h("span", null, "保留原图细节")));
       rows.push(h("label", { class: "param check-row", title: "生成前调用 ComfyUI 自带的「释放」接口，清空节点缓存并卸载模型，让工作流每个节点都重新执行。结果与使用缓存时相同，但每次都要重新加载模型，明显更慢" },
         h("input", { type: "checkbox", checked: !!ps.fullRun, onChange: (e: Event) => { ps.fullRun = (e.target as HTMLInputElement).checked; save(); } }),
         h("span", { class: "param-label" }, "每次完整运行（不使用 ComfyUI 缓存，较慢）")));
@@ -788,7 +808,7 @@ export function mountApp(root: HTMLElement, svc: Services) {
           return h("button", { class: "menu-item flow-item" + (p.id === profile?.id ? " on" : ""), onClick: () => { selectProfile(p.id); sheet.remove(); } },
             icon(p.id === profile?.id ? "check" : "flow"),
             h("span", { class: "grow" }, h("b", null, p.name), h("span", { class: "muted small block" },
-              (modeOf(p) === "outpaint" ? "扩图 · " : modeOf(p) === "txt2img" ? "文生图 · " : modeOf(p) === "upscale" ? "放大 · " : "局部重绘 · ") + (p.source?.kind === "comfy" ? "ComfyUI 已保存的工作流" : "API JSON") + (bad ? " · 需要校准" : ""))));
+              (modeOf(p) === "outpaint" ? "扩图 · " : modeOf(p) === "txt2img" ? "文生图 · " : modeOf(p) === "upscale" ? "放大 · " : modeOf(p) === "blend" ? "融图 · " : modeOf(p) === "extract" ? "抠图 · " : "局部重绘 · ") + (p.source?.kind === "comfy" ? "ComfyUI 已保存的工作流" : "API JSON") + (bad ? " · 需要校准" : ""))));
         })),
       h("div", { class: "sheet-foot" },
         profile ? h("button", { class: "btn", onClick: () => { sheet.remove(); void calibrate(); } }, "校准当前") : null,
@@ -854,8 +874,11 @@ export function mountApp(root: HTMLElement, svc: Services) {
     return rec.suggestions.filter(s => s.confidence === "certain").map(s => s.binding);
   }
 
+  /** An empty prompt is valid: a removal workflow, or a prompt box its author titled 「可留空」. */
   const looksLikeRemoval = (name: string, bindings: Binding[]) =>
-    /移除|清除|擦除|remove|erase/i.test(name + " " + bindings.filter(b => b.role === "prompt").map(b => b.title ?? "").join(" "));
+    /移除|清除|擦除|remove|erase|可留空|留空\s*[=＝]/i.test(name + " " + bindings.filter(b => b.role === "prompt").map(b => b.title ?? "").join(" "));
+  /** What an empty prompt does, from a prompt box titled e.g. 「提示词（可留空，留空=默认融图提示词）」. */
+  const emptyMeaning = (p: Profile) => /留空\s*[=＝]\s*([^）)，,]+)/.exec(p.bindings.find(b => b.role === "prompt")?.title ?? "")?.[1]?.trim();
 
   /** Short confirmation shown instead of the full calibration sheet when recognition is clear. */
   function openSummary(name: string, bindings: Binding[], options: Profile["options"]): Promise<"ok" | "adjust" | null> {
@@ -929,7 +952,7 @@ export function mountApp(root: HTMLElement, svc: Services) {
     const options = newProfile(name, api, []).options;
     const auto = autoBindings(rec);
     if (auto) {
-      options.allowEmptyPrompt = rec.taskType === "outpaint" || rec.taskType === "upscale" || (rec.taskType === "inpaint" && looksLikeRemoval(name, auto));
+      options.allowEmptyPrompt = rec.taskType === "outpaint" || rec.taskType === "upscale" || rec.taskType === "blend" || rec.taskType === "extract" || (rec.taskType === "inpaint" && looksLikeRemoval(name, auto));
       const choice = await openSummary(name, auto, options);
       if (!choice) return;
       if (choice === "ok") {
@@ -973,7 +996,7 @@ export function mountApp(root: HTMLElement, svc: Services) {
     const auto = !!profile && !profile.bindings.some(b => b.role === "reference");
     const tag = auto ? `图${slot + 1}` : `参考 ${slot}`;
     const set = (r: RefSlot) => { refs[slot] = r; sheet.remove(); renderRefs(); };
-    const layers = doc ? svc.host.listLayers(doc.id).filter(l => l.kind !== "group" && !l.name.startsWith(FILL_PREFIX) && !l.name.startsWith(EXPAND_PREFIX) && !l.name.startsWith(GENERATE_PREFIX) && !l.name.startsWith(UPSCALE_PREFIX)) : [];
+    const layers = doc ? svc.host.listLayers(doc.id).filter(l => l.kind !== "group" && !l.name.startsWith(FILL_PREFIX) && !l.name.startsWith(BLEND_PREFIX) && !l.name.startsWith(EXTRACT_PREFIX) && !l.name.startsWith(EXPAND_PREFIX) && !l.name.startsWith(GENERATE_PREFIX) && !l.name.startsWith(UPSCALE_PREFIX)) : [];
     const list = h("div", { class: "layer-list" }, ...layers.map(l => {
       const img = h("div", { class: "layer-thumb" }, icon("image", 14));
       const row = h("button", { class: "layer-row", title: l.name, onClick: () => {
@@ -1085,7 +1108,7 @@ export function mountApp(root: HTMLElement, svc: Services) {
     p.options.refSlots = slots ?? undefined;
     if (!!slots !== had) { log("info", "reference slots", JSON.stringify(slots)); renderRefs(); }
     // only inpaint: in 扩图 / 文生图 workflows such a link would feed e.g. an empty mask to the encoder
-    const links = modeOf(p) === "inpaint" ? findLocalMaskLinks(p.api, objectInfo) : [];
+    const links = inpaintLike(modeOf(p)) ? findLocalMaskLinks(p.api, objectInfo) : [];
     const was = p.options.localMask;
     p.options.localMask = links.length ? { enabled: was ? was.enabled : true, links } : undefined;
     store.saveProfiles(profiles);
@@ -1098,7 +1121,7 @@ export function mountApp(root: HTMLElement, svc: Services) {
     if (!group || !v || run) return;
     // a fill is regenerated with a workflow of its own kind
     if (group.kind !== mode) setMode(group.kind);
-    if (!profile) { setStatus(group.kind === "outpaint" ? "请先导入扩图工作流" : group.kind === "txt2img" ? "请先导入文生图工作流" : group.kind === "upscale" ? "请先导入放大工作流" : "请先导入局部重绘工作流", "error"); return; }
+    if (!profile) { setStatus(group.kind === "outpaint" ? "请先导入扩图工作流" : group.kind === "txt2img" ? "请先导入文生图工作流" : group.kind === "upscale" ? "请先导入放大工作流" : group.kind === "blend" ? "请先导入融图工作流" : group.kind === "extract" ? "请先导入抠图工作流" : "请先导入局部重绘工作流", "error"); return; }
     await generate({ addTo: group, prompt: v.prompt === "移除" ? "" : v.prompt });
   }
 
@@ -1123,10 +1146,11 @@ export function mountApp(root: HTMLElement, svc: Services) {
         pads: modeOf(p) === "outpaint" ? { ...pads } : undefined,
         size: modeOf(p) === "txt2img" ? t2iSize() : undefined,
         scale: modeOf(p) === "upscale" ? upScale() : undefined,
-        layer: modeOf(p) === "upscale" && upLayerMode() ? (({ id, name }) => ({ id, name }))(upLayer()!) : undefined,
+        layers: modeOf(p) === "upscale" && upLayerMode() ? upLayers().map(({ id, name }) => ({ id, name })) : undefined,
         references: Object.fromEntries(Object.entries(refs).map(([k, v]) => [k, v])),
         count: ps.count ?? 1,
         fullRun: !!ps.fullRun,
+        keepDetail: (modeOf(p) === "blend" || modeOf(p) === "extract") && ps.keepDetail !== false,
       }, {
         signal: current.signal,
         stage: t => { current.stage = t; current.detail = ""; renderAction(); },
@@ -1143,8 +1167,14 @@ export function mountApp(root: HTMLElement, svc: Services) {
         debug: settings.debugFiles ? svc.debugSave : undefined,
       });
       if (ps.seedMode === "random") { ps.seed = res.seeds[res.seeds.length - 1]; store.saveState(p.id, ps); }
-      if (!res.group) setStatus("已放大图层，结果是上方的智能对象，原图层已隐藏", "ok");
-      else setStatus(`${res.continued ? "已加入" : modeOf(p) === "outpaint" ? "已扩展画布，" : modeOf(p) === "txt2img" ? "已生成，" : modeOf(p) === "upscale" ? "已放大到新文档，" : "已新建 AI 填充，"}变体 ${res.variations.map(v => v.number).join("、")} · seed ${res.seeds.join("、")}`, "ok");
+      if (modeOf(p) === "extract" && !res.continued && res.cutout && res.group && settings.extractRemove !== false) {
+        const removed = await removeCutout(res.group, res.cutout, current);
+        if (removed !== true) { setStatus(`已抠出，变体 ${res.variations.map(v => v.number).join("、")}；${removed}`, removed.startsWith("从原图移除失败") ? "error" : "info"); return; }
+        setStatus(`已抠出并从原图移除（拆图），变体 ${res.variations.map(v => v.number).join("、")}`, "ok");
+        return;
+      }
+      if (!res.group) setStatus(`已放大 ${res.upscaled ?? 1} 个图层，结果是上方的智能对象，原图层已隐藏` + (res.failed?.length ? `；${res.failed.length} 个失败（${res.failed[0]}${res.failed.length > 1 ? " 等" : ""}）` : ""), res.failed?.length ? "error" : "ok");
+      else setStatus(`${res.continued ? "已加入" : modeOf(p) === "outpaint" ? "已扩展画布，" : modeOf(p) === "txt2img" ? "已生成，" : modeOf(p) === "upscale" ? "已放大到新文档，" : modeOf(p) === "blend" ? "已新建 AI 融图，" : modeOf(p) === "extract" ? "已抠出，" : "已新建 AI 填充，"}变体 ${res.variations.map(v => v.number).join("、")} · seed ${res.seeds.join("、")}`, "ok");
     } catch (e) {
       log("error", "generate failed", e);
       if (e instanceof StashedResult) { stash = e.png; setStatus(e.message, "error"); }
@@ -1154,6 +1184,37 @@ export function mountApp(root: HTMLElement, svc: Services) {
       renderAll();
       await refresh();
       void loadDocThumb(true);
+    }
+  }
+
+  /** 拆图: the 局部重绘 workflow removes the cut-out from the original (prompt left empty), its result
+   *  goes directly below the cut-out. Returns true, or why it didn't run. */
+  async function removeCutout(cut: FillGroup, mask: { pixels: import("../core/image/png.ts").Pixels; rect: Rect }, current: NonNullable<typeof run>): Promise<true | string> {
+    const rp = pickFor("inpaint");
+    if (!rp) return "要从原图移除，先在「局部重绘」模式导入移除工作流（留空提示词 = 移除）";
+    if (!rp.options.allowEmptyPrompt) return `「局部重绘」当前的工作流「${rp.name}」不支持留空移除，换成移除工作流后再试`;
+    const err = await syncProfile(rp);
+    if (err) return "从原图移除失败：" + err;
+    try {
+      const rps = store.state(rp.id);
+      const res = await runInpaint(svc.host, comfy, {
+        profile: rp, prompt: "", seed: null, params: effectiveParams(rp, rps), references: {}, count: 1,
+        selectionMask: mask, hide: cut,
+      }, {
+        signal: current.signal,
+        stage: t => { current.stage = "拆图 · " + t; current.detail = ""; renderAction(); },
+        progress: (f, t) => { current.progress = f; current.detail = t ?? ""; renderAction(); },
+        promptQueued: id => { current.promptId = id; },
+        debug: settings.debugFiles ? svc.debugSave : undefined,
+      });
+      if (res.group) await svc.host.placeBelow(cut.docId, res.group.layerId, cut.layerId);
+      log("info", "extract removed", res.group?.layerId ?? "");
+      return true;
+    } catch (e) {
+      if (current.signal.aborted) throw e;
+      log("error", "extract remove failed", e);
+      if (e instanceof StashedResult) stash = e.png;
+      return "从原图移除失败：" + (e as Error).message;
     }
   }
 

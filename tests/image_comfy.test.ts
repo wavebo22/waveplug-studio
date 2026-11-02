@@ -1,5 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
+import { decodePng } from "../src/core/image/decode.ts";
 import { inflateSync } from "node:zlib";
 import { encodePng } from "../src/core/image/png.ts";
 import { imageWithAlphaMask, maskFile } from "../src/core/image/compose.ts";
@@ -19,13 +20,12 @@ function decode(png: Uint8Array) {
   return { w, h, type, raw: inflateSync(Buffer.concat(idat)) };
 }
 
-test("PNG encoder output inflates to filtered rows (large image spans many stored blocks)", () => {
+test("PNG encoder output decodes back to the same pixels (large image spans many deflate blocks)", () => {
   const w = 300, h = 250, data = new Uint8Array(w * h * 4).map((_, i) => (i * 7) & 255);
   const d = decode(encodePng({ width: w, height: h, channels: 4, data }));
   assert.equal(d.w, w); assert.equal(d.h, h); assert.equal(d.type, 6);
   assert.equal(d.raw.length, (w * 4 + 1) * h);
-  assert.equal(d.raw[0], 0);
-  assert.equal(d.raw[(w * 4 + 1) * 10 + 1 + 5], data[w * 4 * 10 + 5]);
+  assert.deepEqual(decodePng(encodePng({ width: w, height: h, channels: 4, data })).data, data);
 });
 
 test("selection becomes transparency; RGB under transparent pixels is preserved", () => {

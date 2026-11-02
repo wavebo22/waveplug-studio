@@ -59,7 +59,7 @@ export function findIslands(alpha: Uint8Array, w: number, h: number, threshold: 
 }
 
 /** Square dilation by `r` px (separable running maximum). */
-function dilate(src: Uint8Array, w: number, h: number, r: number): Uint8Array {
+export function dilate(src: Uint8Array, w: number, h: number, r: number): Uint8Array {
   const tmp = new Uint8Array(w * h), out = new Uint8Array(w * h);
   for (let y = 0; y < h; y++) {
     let last = -Infinity;
@@ -131,4 +131,33 @@ export function contentBounds(alpha: Uint8Array, w: number, h: number, threshold
     if (x < l) l = x; if (x >= r) r = x + 1; if (y < t) t = y; if (y >= b) b = y + 1;
   }
   return r > l ? { left: l, top: t, right: r, bottom: b } : null;
+}
+
+/**
+ * 抠图, like 局部重绘: only what the selection takes in whole is kept. Each separate piece of the
+ * RGBA cut-out stays if at least `minInside` of it lies inside the selection grown by `grow` px
+ * (the selection may be drawn a little tight); a piece that is only partly selected is dropped
+ * entirely, never cut in two. `sel` is 1-channel, same size.
+ */
+export function keepInside(rgba: Pixels, sel: Pixels, grow: number, minInside = 0.9): { pixels: Pixels; kept: number; dropped: number } {
+  const { width: w, height: h } = rgba, n = w * h, alpha = new Uint8Array(n);
+  for (let i = 0; i < n; i++) alpha[i] = rgba.data[i * 4 + 3];
+  const inSel = new Uint8Array(n);
+  for (let i = 0; i < n; i++) inSel[i] = sel.data[i] > 127 ? 1 : 0;
+  const near = grow > 0 ? dilate(inSel, w, h, grow) : inSel;
+  const keep = new Uint8Array(n);
+  let kept = 0, dropped = 0;
+  // pieces are split at faint pixels (alpha ≤ 24) so a soft glow doesn't join two separate objects
+  for (const isl of findIslands(alpha, w, h, 24, 0)) {
+    const { left, top, right } = isl.bounds, bw = right - left;
+    let inside = 0;
+    for (let k = 0; k < isl.mask.length; k++) if (isl.mask[k] && near[(top + Math.floor(k / bw)) * w + left + k % bw]) inside++;
+    if (inside / isl.area < minInside) { dropped++; continue; }
+    kept++;
+    for (let k = 0; k < isl.mask.length; k++) if (isl.mask[k]) keep[(top + Math.floor(k / bw)) * w + left + k % bw] = 1;
+  }
+  // a thin halo keeps the soft edge pixels (below the island threshold) of what stays
+  const halo = dilate(keep, w, h, 2), out = new Uint8Array(rgba.data);
+  for (let i = 0; i < n; i++) if (!halo[i]) out[i * 4 + 3] = 0;
+  return { pixels: { ...rgba, data: out }, kept, dropped };
 }

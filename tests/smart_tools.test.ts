@@ -61,3 +61,22 @@ test("解包: the smart object's scale, rotation and position are measured for r
   assert.ok(!isAffineQuad([0, 0, 100, 10, 90, 60, 0, 50]));
   assert.deepEqual(centredQuad([0, 0, 200, 0, 200, 100, 0, 100], 20, 10), [90, 45, 110, 45, 110, 55, 90, 55]);
 });
+
+test("status line counting word", () => {
+  assert.equal(resultText("已清理", { done: 4, skipped: [], unit: "项", note: "约 1.0 MB" }), "已清理 4 项（约 1.0 MB）");
+});
+
+test("转为可编辑: images, vector files and links are converted; embedded PSB/PSD already are editable", async () => {
+  const { editablePlan } = await import("../src/core/layers/smart.ts");
+  const r = editablePlan([
+    so(1, "a", true, { file: "产品.png" }),
+    so(2, "b", true, { file: "logo.ai" }),
+    so(3, "c", true, { file: "图.psb", linked: true }),
+    so(4, "d", true, { file: "合成.psb" }),
+    so(5, "e", true, { file: "x.jpg", locked: true }),
+    { id: 6, name: "背景", kind: "pixel", selected: true },
+  ]);
+  assert.deepEqual(r.targets.map(l => l.id), [1, 2, 3]);
+  assert.equal(r.skipped.length, 3);
+  assert.match(r.skipped.join(), /已经可以编辑.*锁定.*不是智能对象/);
+});

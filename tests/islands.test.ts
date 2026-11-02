@@ -65,3 +65,23 @@ test("裁剪边缘 inside a smart object: cleared, cropped, and mapped back onto
   assert.deepEqual(subQuad([100, 100, 180, 100, 180, 140, 100, 140], w, h, r.crop), [120, 110, 160, 110, 160, 130, 120, 130]);
   assert.equal(cleanRgba({ width: 2, height: 1, channels: 3, data: new Uint8Array(6) }, { alpha: 20, minArea: 4 }), null);
 });
+
+test("抠图: only what the selection takes in whole is kept, like 局部重绘", async () => {
+  const { keepInside } = await import("../src/core/layers/islands.ts");
+  const w = 90, h = 30, data = new Uint8Array(w * h * 4);
+  const fill = (l: number, t: number, r: number, b: number) => { for (let y = t; y < b; y++) for (let x = l; x < r; x++) data.set([200, 50, 50, 255], (y * w + x) * 4); };
+  fill(5, 5, 20, 25);   // fully selected
+  fill(30, 5, 50, 25);  // half selected
+  fill(65, 5, 80, 25);  // not selected
+  const sel = { width: w, height: h, channels: 1 as const, data: new Uint8Array(w * h) };
+  for (let y = 2; y < 28; y++) for (let x = 2; x < 40; x++) sel.data[y * w + x] = 255;
+  const r = keepInside({ width: w, height: h, channels: 4, data }, sel, 2);
+  assert.deepEqual([r.kept, r.dropped], [1, 2]);
+  assert.equal(r.pixels.data[(10 * w + 10) * 4 + 3], 255, "the whole object stays");
+  assert.equal(r.pixels.data[(10 * w + 35) * 4 + 3], 0, "a half-selected one is dropped entirely, not cut");
+  assert.equal(r.pixels.data[(10 * w + 70) * 4 + 3], 0);
+  // drawn a little tight: still counts as taken in whole
+  const tight = { width: w, height: h, channels: 1 as const, data: new Uint8Array(w * h) };
+  for (let y = 6; y < 24; y++) for (let x = 6; x < 19; x++) tight.data[y * w + x] = 255;
+  assert.equal(keepInside({ width: w, height: h, channels: 4, data }, tight, 3).kept, 1);
+});

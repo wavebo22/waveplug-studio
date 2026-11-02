@@ -9,6 +9,7 @@ import type { Pixels } from "../core/image/png.ts";
 import type { Rect } from "../core/image/region.ts";
 import type { Side, TaskType } from "../core/workflow/profile.ts";
 import type { ToolLayer, ToolResult } from "../core/layers/smart.ts";
+import type { DocScan, SlimKind } from "../core/layers/slim.ts";
 
 export type Pads = Record<Side, number>;
 
@@ -60,6 +61,8 @@ export const FILL_PREFIX = "AI填充 · ";
 export const EXPAND_PREFIX = "AI扩图 · ";
 export const GENERATE_PREFIX = "AI生成 · ";
 export const UPSCALE_PREFIX = "AI放大 · ";
+export const BLEND_PREFIX = "AI融图 · ";
+export const EXTRACT_PREFIX = "AI抠图 · ";
 
 export const padsLabel = (p: Pads) => `←${p.left} →${p.right} ↑${p.top} ↓${p.bottom}`;
 export function parsePads(name: string): Pads | null {
@@ -94,6 +97,8 @@ export interface PsHost {
   layerThumbnail(docId: number, layerId: number, size: number): Promise<string>;
   /** The (first) selected layer of the document, or null. */
   activeLayer(docId: number): ActiveLayer | null;
+  /** All selected layers of the document (top to bottom as Photoshop lists them). */
+  activeLayers(docId: number): ActiveLayer[];
   /** A layer's own pixels at full resolution (RGBA when it has transparency) and where they are. */
   layerImage(docId: number, layerId: number): Promise<{ pixels: Pixels; rect: Rect }>;
   /** Places the PNG as an embedded smart object directly above `layerId`, scaled to cover `rect`,
@@ -115,6 +120,8 @@ export interface PsHost {
   /** Places the PNG (which covers `placement` in document pixels) as the next variation with the
    *  given layer mask, and shows it. */
   addVariation(g: FillGroup, png: Uint8Array, placement: Rect, prompt: string, mask: VariationMask): Promise<Variation>;
+  /** Moves layer `layerId` (e.g. a fill group) directly below layer `belowId`. */
+  placeBelow(docId: number, layerId: number, belowId: number): Promise<void>;
   /** Grows the canvas by `pads` (part of the document's history). */
   expandCanvas(docId: number, pads: Pads): Promise<DocInfo>;
   /** Small composite image of the whole document, for the expand editor. */
@@ -134,6 +141,9 @@ export interface LayerTools {
   selectSameSource(): Promise<ToolResult>;
   /** 转换为智能对象: all selected layers into one, or each into its own */
   convert(separately: boolean): Promise<ToolResult>;
+  /** 转为可编辑: smart objects with image / vector / linked content become embedded ones whose
+   *  content is a PSB, at full resolution, with their transform kept */
+  makeEditable(): Promise<ToolResult>;
   /** 解包图层: smart objects back into their layers */
   unpack(): Promise<ToolResult>;
   resetTransform(): Promise<ToolResult>;
@@ -148,4 +158,10 @@ export interface LayerTools {
   splitIslands(minArea: number, merge: number): Promise<ToolResult>;
   /** 按行拆分文字: each line of the selected text layers into its own text layer, in place */
   splitTextLines(): Promise<ToolResult>;
+  /** 文档瘦身: what the active document holds that could go, or null without a document */
+  scanDoc(): Promise<DocScan | null>;
+  /** 文档瘦身: removes the given kinds of items (one undo step) */
+  slim(kinds: SlimKind[]): Promise<ToolResult>;
+  /** Photoshop's 清理 → 全部 (history, clipboard, caches); can't be undone */
+  purgeMemory(): Promise<void>;
 }
