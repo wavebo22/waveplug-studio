@@ -420,18 +420,25 @@ async function runOutpaint(host: PsHost, comfy: Comfy, input: RunInput, hooks: R
 
     hooks.stage("写入 Photoshop" + tag);
     if (!host.docExists(doc.id)) throw new StashedResult("发起任务的 PSD 已关闭，结果未写入", png);
+    // expand, new group and the variation are separate undo steps: if a later one fails, keep the
+    // result and say which earlier steps already changed the PSD
+    let expanded = false, created = false, v: Variation;
     try {
       if (!group) {
         await host.expandCanvas(doc.id, pads);
+        expanded = true;
         group = await host.createFillGroup(doc.id, area, input.prompt, pads);
+        created = true;
       } else group = await host.refreshFillGroup(group);
+      const inner: Rect = { left: area.left + pads.left, top: area.top + pads.top, right: area.left + pads.left + w, bottom: area.top + pads.top + h };
+      const feather = Math.max(4, Math.min(32, Math.round(Math.min(w, h) * 0.01)));
+      v = await host.addVariation(group, png, area, input.prompt,
+        { pixels: outpaintSeam(w, h, pads, feather), rect: inner, outside: "reveal" });
     } catch (e) {
-      throw new StashedResult((e as Error).message + "，结果未写入", png);
+      const done = created ? "；画布已扩展并新建了空的扩图图层组，可在历史记录中撤销「WavePlug 新建 AI 扩图」「WavePlug 扩展画布」"
+        : expanded ? "；画布已扩展，可在历史记录中撤销「WavePlug 扩展画布」" : "";
+      throw new StashedResult((e as Error).message + "，结果未写入" + done, png);
     }
-    const inner: Rect = { left: area.left + pads.left, top: area.top + pads.top, right: area.left + pads.left + w, bottom: area.top + pads.top + h };
-    const feather = Math.max(4, Math.min(32, Math.round(Math.min(w, h) * 0.01)));
-    const v = await host.addVariation(group, png, area, input.prompt,
-      { pixels: outpaintSeam(w, h, pads, feather), rect: inner, outside: "reveal" });
     variations.push(v); seeds.push(run.seed);
     hooks.variationAdded?.(group, v, run.seed);
     check();

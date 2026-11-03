@@ -130,18 +130,39 @@ export class ComfyClient {
 
   // ── progress over WebSocket (falls back to polling /history when unavailable) ──
 
-  private connectWs(): Promise<void> {
+  /** Opens the progress socket. Always settles: a close before open, an error or no answer within
+   *  `timeoutMs` rejects, and waitFor then polls /history alone. */
+  private connectWs(timeoutMs = 5000): Promise<void> {
     if (this.wsReady) return this.wsReady;
     const WS = this.deps.WebSocket;
     if (!WS) return Promise.reject(new Error("WebSocket 不可用"));
-    this.wsReady = new Promise((resolve, reject) => {
-      const ws = new WS(this.base.replace(/^http/, "ws").replace(/\/$/, "") + "/ws?clientId=" + this.clientId);
-      ws.onopen = () => { this.ws = ws; resolve(); };
-      ws.onerror = () => { this.wsReady = null; reject(new Error("WebSocket 连接失败")); };
-      ws.onclose = () => { this.ws = null; this.wsReady = null; };
+    const ready: Promise<void> = new Promise((resolve, reject) => {
+      let ws: WebSocket;
+      try { ws = new WS(this.base.replace(/^http/, "ws").replace(/\/$/, "") + "/ws?clientId=" + this.clientId); }
+      catch (e) { reject(e); return; }
+      let opened = false, failed = false;
+      const fail = (why: string) => {
+        if (opened || failed) return;
+        failed = true;
+        clearTimeout(timer);
+        if (this.wsReady === ready) this.wsReady = null;
+        reject(new Error(why));
+      };
+      const timer = setTimeout(() => { fail("WebSocket 连接超时"); try { ws.close(); } catch { /* already gone */ } }, timeoutMs);
+      ws.onopen = () => {
+        if (failed) { try { ws.close(); } catch { /* already gone */ } return; }
+        opened = true; clearTimeout(timer); this.ws = ws; resolve();
+      };
+      ws.onerror = () => fail("WebSocket 连接失败");
+      ws.onclose = () => {
+        if (this.ws === ws) this.ws = null;
+        if (this.wsReady === ready) this.wsReady = null;
+        fail("WebSocket 连接前已关闭");
+      };
       ws.onmessage = ev => { if (typeof ev.data === "string") this.dispatch(ev.data); };
     });
-    return this.wsReady;
+    this.wsReady = ready;
+    return ready;
   }
 
   private dispatch(raw: string) {
@@ -172,7 +193,7 @@ export class ComfyClient {
       if (e.type === "done" || e.type === "error" || e.type === "interrupted") { settled = true; wake?.(); }
     });
     try {
-      await this.connectWs().catch(() => undefined);
+      await this.connectWs(Math.min(5000, opts.timeoutMs ?? 5000)).catch(() => undefined);
       for (;;) {
         if (opts.signal?.aborted) throw new ComfyError("已取消");
         const h = await this.history(promptId).catch(() => null);

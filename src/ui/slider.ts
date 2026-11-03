@@ -2,7 +2,7 @@
 // by the pointer's travel (mouse coordinates only ever compared with each other); a press on the
 // track first jumps to that spot. `onInput` follows the drag, `onChange` fires once when let go.
 
-import { h } from "./dom.ts";
+import { h, listen } from "./dom.ts";
 
 export function createSlider(opts: { title?: string; onInput: (v: number) => void; onChange: (v: number) => void }) {
   const fill = h("div", { class: "sl-fill" }), knob = h("div", { class: "sl-knob" });
@@ -24,12 +24,12 @@ export function createSlider(opts: { title?: string; onInput: (v: number) => voi
     }
     drag = { x0: m.clientX, v0: value };
   });
-  document.addEventListener("mousemove", e => {
+  listen(document, "mousemove", e => {
     if (!drag) return;
     show(drag.v0 + ((e as MouseEvent).clientX - drag.x0) / (track.clientWidth || 1) * 100);
     opts.onInput(value);
   });
-  document.addEventListener("mouseup", () => { if (!drag) return; drag = null; opts.onChange(value); });
+  listen(document, "mouseup", () => { if (!drag) return; drag = null; opts.onChange(value); });
 
   return {
     el,

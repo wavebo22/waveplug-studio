@@ -15,9 +15,9 @@ import { type ProfileState, type Services, type Settings, store } from "../app/s
 import type { DocInfo, FillGroup, Pads, Variation } from "../ps/host.ts";
 import { log, withTimeout } from "../app/log.ts";
 import { openCalibration } from "./calibrate.ts";
-import { h, icon, replace } from "./dom.ts";
+import { h, icon, listen, replace } from "./dom.ts";
 import { encodePng } from "../core/image/png.ts";
-import { onWhite } from "../core/image/compose.ts";
+import { downscale, onWhite } from "../core/image/compose.ts";
 import { BLEND_PREFIX, EXPAND_PREFIX, EXTRACT_PREFIX, FILL_PREFIX, GENERATE_PREFIX, UPSCALE_PREFIX } from "../ps/host.ts";
 import { RATIOS, createExpandEditor } from "./expandEditor.ts";
 import { createToolsView } from "./tools.ts";
@@ -417,7 +417,8 @@ export function mountApp(root: HTMLElement, svc: Services) {
       return h("button", { class: "ref" + (r ? " set" : " add"), title: r ? `${tag}：${r.name}（点击更换或移除）` : `添加参考图（${tag}）：PS 图层、图片文件或剪贴板（Ctrl+V）`, onClick: (e: Event) => refMenu(slot, e.currentTarget as HTMLElement) },
         r?.thumb ? h("img", { src: r.thumb, onError: (e: Event) => { const el = e.currentTarget as HTMLElement; el.replaceWith(h("span", { class: "ref-ext" }, (/\.(\w+)$/.exec(r.name)?.[1] ?? "图片").toUpperCase())); } })
           : r ? icon("image", 16) : icon("plus", 14),
-        h("span", { class: "ref-num" }, r ? tag : "参考图"));
+        h("span", { class: "ref-num" }, r ? tag : "参考图"),
+        r ? h("button", { class: "ref-del", title: `移除${tag}`, onClick: (e: Event) => { e.stopPropagation(); removeRef(slot); } }, icon("close", 10)) : null);
     }), refs[1] && auto ? h("div", { class: "ref-hint" }, "提示词里用「图2」指代参考图，例如：把选区里的杯子换成图2中的饮料")
       : mode === "txt2img" && slots.length && !refs[1] ? h("div", { class: "ref-hint" }, "可选：放一张参考图，工作流会按它来生成") : null);
   }
@@ -994,6 +995,12 @@ export function mountApp(root: HTMLElement, svc: Services) {
   }
 
   // ── references ──
+  /** empties a slot; the later references move up one */
+  function removeRef(slot: number) {
+    for (let s2 = slot; s2 < MAX_REFERENCES; s2++) refs[s2] = refs[s2 + 1];
+    refs[MAX_REFERENCES] = undefined;
+    renderRefs();
+  }
   /** Reference picker: clipboard, image file, or any layer of the document (with previews). */
   function refMenu(slot: number, _anchor?: HTMLElement) {
     const auto = !!profile && !profile.bindings.some(b => b.role === "reference");
@@ -1023,11 +1030,7 @@ export function mountApp(root: HTMLElement, svc: Services) {
         h("div", { class: "group-label" }, "文档中的图层"),
         layers.length ? list : h("div", { class: "muted small" }, "当前文档没有可用的图层")),
       refs[slot] ? h("div", { class: "sheet-foot" },
-        h("button", { class: "btn", onClick: () => {
-          for (let s2 = slot; s2 < MAX_REFERENCES; s2++) refs[s2] = refs[s2 + 1];
-          refs[MAX_REFERENCES] = undefined;
-          sheet.remove(); renderRefs();
-        } }, "移除这张参考图")) : null);
+        h("button", { class: "btn", onClick: () => { sheet.remove(); removeRef(slot); } }, "移除这张参考图")) : null);
     sheetHost.append(sheet);
     // thumbnails one by one so a long layer list stays responsive
     void (async () => { for (const row of Array.from(list.children)) { if (!sheet.parentNode) break; await (row as any)._load?.(); } })();
@@ -1042,8 +1045,12 @@ export function mountApp(root: HTMLElement, svc: Services) {
     try {
       const px = await svc.host.clipboardImage(1536);
       if (!px) { setStatus("剪贴板里没有图片", "error"); return; }
-      const bytes = encodePng(onWhite(px));
-      refs[target] = { kind: "file", name: "剪贴板.png", bytes, thumb: bytesToDataUrl(bytes, "image/png") };
+      const flat = onWhite(px);
+      const bytes = encodePng(flat);
+      // the slot shows a 128 px copy, not the uploaded picture as base64
+      const k = Math.min(1, 128 / Math.max(px.width, px.height));
+      const small = downscale(flat, Math.max(1, Math.round(px.width * k)), Math.max(1, Math.round(px.height * k)));
+      refs[target] = { kind: "file", name: "剪贴板.png", bytes, thumb: bytesToDataUrl(encodePng(small), "image/png") };
       renderRefs();
       const auto = !!profile && !profile.bindings.some(b => b.role === "reference");
       setStatus(`已从剪贴板添加参考图（${auto ? "图" + (target + 1) : "参考 " + target}）`, "ok");
@@ -1233,7 +1240,7 @@ export function mountApp(root: HTMLElement, svc: Services) {
     if (await svc.saveImage(stash, `waveplug_${Date.now()}.png`)) { stash = null; setStatus("结果已另存", "ok"); }
   }
 
-  document.addEventListener("keydown", e => {
+  listen(document, "keydown", e => {
     const k = e as KeyboardEvent;
     if (!(k.ctrlKey || k.metaKey) || k.key.toLowerCase() !== "v") return;
     const t = k.target as HTMLElement | null;
@@ -1244,8 +1251,8 @@ export function mountApp(root: HTMLElement, svc: Services) {
   });
 
   // ── start ──
-  window.addEventListener("error", e => { log("error", "uncaught", (e as ErrorEvent).error ?? (e as ErrorEvent).message); setStatus("插件内部错误：" + ((e as ErrorEvent).message ?? ""), "error"); });
-  window.addEventListener("unhandledrejection", e => { log("error", "unhandled", (e as PromiseRejectionEvent).reason); setStatus("插件内部错误：" + String((e as PromiseRejectionEvent).reason?.message ?? (e as PromiseRejectionEvent).reason), "error"); });
+  listen(window, "error", e => { log("error", "uncaught", (e as ErrorEvent).error ?? (e as ErrorEvent).message); setStatus("插件内部错误：" + ((e as ErrorEvent).message ?? ""), "error"); });
+  listen(window, "unhandledrejection", e => { log("error", "unhandled", (e as PromiseRejectionEvent).reason); setStatus("插件内部错误：" + String((e as PromiseRejectionEvent).reason?.message ?? (e as PromiseRejectionEvent).reason), "error"); });
   log("info", "start", svc.version, svc.host.kind, settings.comfyUrl);
   renderAll();
   svc.host.onChange(() => { void refresh(); if (toolsMode()) void toolsView.refresh(); });

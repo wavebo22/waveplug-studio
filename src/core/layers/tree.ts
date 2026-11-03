@@ -70,6 +70,89 @@ export interface Effect { key: string; multi: number; name: string; enabled: boo
 
 export type LayerKind = "pixel" | "adjustment" | "text" | "shape" | "smartObject" | "group" | "fill" | "background" | "other";
 
+/** Photoshop can refuse selectNoLayers (e.g. a document with only a Background layer).
+ *  Keep an intentional empty selection in our panel while Photoshop's selection has not changed;
+ *  resume following the host as soon as it selects a different set of layers. */
+export function selectionAfterLocalClear(
+  hostIds: readonly number[], heldHostIds: readonly number[] | null,
+): { selected: number[]; keepClear: boolean } {
+  if (heldHostIds === null) return { selected: [...hostIds], keepClear: false };
+  const ordered = (ids: readonly number[]) => [...ids].sort((a, b) => a - b).join(",");
+  const keepClear = ordered(hostIds) === ordered(heldHostIds);
+  return { selected: keepClear ? [] : [...hostIds], keepClear };
+}
+
+/** Delete the requested layers once each. A selected group already deletes its descendants, so
+ *  do not try to delete selected children again. Discard ids no longer in the live document. */
+export function deleteTargets(layers: readonly { id: number; parentId: number | null }[], ids: readonly number[]): number[] {
+  const parents = new Map(layers.map(l => [l.id, l.parentId]));
+  const selected = new Set(ids.filter(id => parents.has(id)));
+  return [...selected].filter(id => {
+    let parent = parents.get(id);
+    const visited = new Set<number>();
+    while (parent !== null && parent !== undefined && !visited.has(parent)) {
+      if (selected.has(parent)) return false;
+      visited.add(parent);
+      parent = parents.get(parent);
+    }
+    return true;
+  });
+}
+
+export interface DeleteSkip { id: number; name: string; reason: string }
+
+/** Preflight for deleting layers (not masks/effects). Parent groups subsume their children.
+ *  Never unlock Background or locked layers as an accidental side effect of pressing Delete. */
+export function planLayerDeletion(
+  layers: readonly { id: number; parentId: number | null; name?: string; locked?: boolean; background?: boolean }[],
+  ids: readonly number[],
+): { targets: number[]; skipped: DeleteSkip[] } {
+  const byId = new Map(layers.map(l => [l.id, l]));
+  const targets: number[] = [], skipped: DeleteSkip[] = [];
+  const unique = [...new Set(ids.filter(Number.isInteger))];
+  for (const id of unique) {
+    if (!byId.has(id)) skipped.push({ id, name: `#${id}`, reason: "图层已不存在" });
+  }
+  for (const id of deleteTargets(layers, unique)) {
+    const l = byId.get(id)!;
+    if (l.background) skipped.push({ id, name: l.name ?? `#${id}`, reason: "背景图层需先解锁" });
+    else if (l.locked) skipped.push({ id, name: l.name ?? `#${id}`, reason: "图层已锁定" });
+    else targets.push(id);
+  }
+  return { targets, skipped };
+}
+
+/** After deleting layers, select the first surviving row below the deleted block; if there is
+ *  none, use the nearest row above. A deleted group removes all of its descendants. `visibleIds`
+ *  keeps the selection on a row the panel actually shows (rather than inside a closed group). */
+export function nextLayerAfterDelete(
+  layers: readonly { id: number; parentId: number | null }[], ids: readonly number[], visibleIds?: readonly number[],
+): number | null {
+  const targets = new Set(deleteTargets(layers, ids));
+  if (!targets.size) return null;
+  const parents = new Map(layers.map(l => [l.id, l.parentId]));
+  const gone = new Set<number>();
+  for (const l of layers) {
+    let id: number | null | undefined = l.id;
+    const seen = new Set<number>();
+    while (id !== null && id !== undefined && !seen.has(id)) {
+      if (targets.has(id)) { gone.add(l.id); break; }
+      seen.add(id);
+      id = parents.get(id);
+    }
+  }
+  const find = (order: readonly number[]): number | null | undefined => {
+    let first = order.length, last = -1;
+    for (let i = 0; i < order.length; i++) if (gone.has(order[i])) { first = Math.min(first, i); last = i; }
+    if (last < 0) return undefined; // deleted layers were not in this view
+    for (let i = last + 1; i < order.length; i++) if (parents.has(order[i]) && !gone.has(order[i])) return order[i];
+    for (let i = first - 1; i >= 0; i--) if (parents.has(order[i]) && !gone.has(order[i])) return order[i];
+    return null;
+  };
+  const visible = visibleIds ? find(visibleIds) : undefined;
+  return visible !== undefined ? visible : find(layers.map(l => l.id)) ?? null;
+}
+
 export interface TreeLayer {
   id: number;
   name: string;

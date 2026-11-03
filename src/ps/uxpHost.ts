@@ -382,6 +382,30 @@ export class UxpHost implements PsHost {
     });
   }
 
+  /** A small picture of an image file (参考图), so the panel never holds the whole file as a data
+   *  URL: Photoshop opens it, reads a copy scaled to `maxEdge` and closes it again. A file that is
+   *  already open is read where it is and left open. */
+  async imageFileThumbnail(file: any, maxEdge: number): Promise<string> {
+    const px = await modal("WavePlug 参考图缩略图", async () => {
+      const { app } = ps();
+      const userDoc = app.activeDocument;
+      const path = String(file?.nativePath ?? "");
+      const open = path ? app.documents.find((d: any) => { try { return String(d.path ?? "") === path; } catch { return false; } }) : null;
+      const d = open ?? await app.open(file);
+      try {
+        const w = Math.round(d.width), h = Math.round(d.height);
+        return await readPixels({ documentID: d.id, targetSize: w >= h ? { width: Math.min(w, maxEdge) } : { height: Math.min(h, maxEdge) } });
+      } finally {
+        if (!open) await d.closeWithoutSaving();
+        if (userDoc && this.docExists(userDoc.id)) app.activeDocument = userDoc;
+      }
+    });
+    const bytes = encodePng(px);
+    let bin = "";
+    for (let i = 0; i < bytes.length; i += 0x8000) bin += String.fromCharCode(...bytes.subarray(i, i + 0x8000));
+    return "data:image/png;base64," + btoa(bin);
+  }
+
   async layerThumbnail(docId: number, layerId: number, size: number): Promise<string> {
     const px = await this.layerPixels(docId, layerId, size);
     const bytes = encodePng(px);
@@ -419,7 +443,12 @@ export class UxpHost implements PsHost {
       const layer = group && findLayer(group.layers, layerId);
       if (!layer) return;
       const wasVisible = layer.visible;
-      await layer.delete();
+      const [result] = await play([{
+        _obj: "delete", _target: [{ _ref: "layer", _id: layerId }, { _ref: "document", _id: g.docId }],
+        _options: { dialogOptions: "silent" },
+      }]);
+      if (result?._obj === "error") throw new Error(result?.message || "Photoshop 无法删除变体图层");
+      if (findLayer(doc.layers, layerId)) throw new Error("变体删除后仍存在，请重试");
       const rest = variationLayers(group);
       if (wasVisible && rest.length) rest[rest.length - 1].layer.visible = true;
     });

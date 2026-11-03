@@ -4,7 +4,7 @@ import type { Comfy } from "../core/comfy/client.ts";
 import type { Profile, TaskType } from "../core/workflow/profile.ts";
 import type { LayerTools, LayerTree, PsHost } from "../ps/host.ts";
 
-export interface PickedImage { name: string; bytes: Uint8Array; url: string }
+export interface PickedImage { name: string; bytes: Uint8Array; url?: string }
 
 export interface Services {
   host: PsHost;

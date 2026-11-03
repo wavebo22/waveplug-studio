@@ -7,11 +7,11 @@
 
 import { log } from "../app/log.ts";
 import { resultText } from "../core/layers/smart.ts";
-import { ThumbCache } from "../core/layers/thumbs.ts";
+import { ThumbCache, thumbRetryDelay } from "../core/layers/thumbs.ts";
 import { MULTI_EFFECTS } from "../core/layers/effects.ts";
-import { type Filter, type LayerAction, type LayerKind, type LockKey, type MoveStep, type Row, type SmartAction, type TreeLayer, type Where, BLEND_MODES, ancestors, queryActive, clickSelect, contentUsers, dropPlan, dropZone, filterCounts, isVariantLayer, layerMenu, layerTags, linkPeers, lockPlan, packChips, lockedByGroup, sharedColors, visibleRows } from "../core/layers/tree.ts";
+import { type Filter, type LayerAction, type LayerKind, type LockKey, type MoveStep, type Row, type SmartAction, type TreeLayer, type Where, BLEND_MODES, ancestors, queryActive, clickSelect, contentUsers, dropPlan, dropZone, filterCounts, isVariantLayer, layerMenu, nextLayerAfterDelete, layerTags, linkPeers, lockPlan, packChips, lockedByGroup, sharedColors, selectionAfterLocalClear, visibleRows } from "../core/layers/tree.ts";
 import { type LayerTools, type LayerTree, type RunOptions, type TargetPart, ADJUSTMENTS } from "../ps/host.ts";
-import { h, icon, isShown, replace, setShown } from "./dom.ts";
+import { every, h, icon, isShown, listen, replace, setShown } from "./dom.ts";
 import { type PopItem, createPopup } from "./popupMenu.ts";
 import { createSlider } from "./slider.ts";
 
@@ -151,7 +151,9 @@ export function createLayerTreeView(tree: LayerTree, status: Status, tools?: Lay
   const framed = (l: TreeLayer): TargetPart | null => selected.has(l.id) ? partOf(l.id) : null;
   /** a click on a thumbnail: that part becomes the one painted on (the layer selected alone) */
   function targetPart(id: number, part: TargetPart) {
+    if (deleting) return;
     const same = selected.size === 1 && selected.has(id) && partOf(id) === part;
+    localClear = null;
     selected = new Set([id]); anchor = id;
     focus = { id, part };
     for (const r of pool) if (r.id === id) r.key = "";
@@ -160,25 +162,96 @@ export function createLayerTreeView(tree: LayerTree, status: Status, tools?: Lay
     void run(part === "layer" ? "targetLayer" : part === "mask" ? "targetMask" : part === "vmask" ? "targetVectorMask" : "targetFilterMask", [id]);
   }
   /** 删除 (toolbar, menu, Delete key): the targeted mask when one is, else the selected layers */
-  function deleteSelected() {
-    const ids = [...selected], l = ids.length === 1 ? layers.find(x => x.id === ids[0]) : undefined;
+  let deleting = false, deletingAction: LayerAction | null = null, pendingKeyboardDelete = false;
+  function deleteSelected(source: "keyboard" | "toolbar" = "toolbar", repeat = false) {
+    // A keyboard repeat can arrive before the previous modal finishes. Record it explicitly
+    // rather than silently treating it as a Photoshop delete failure.
+    if (deleting) {
+      if (source === "keyboard" && !repeat && deletingAction === "delete") {
+        pendingKeyboardDelete = true; // coalesce one deliberate second press; ignore key auto-repeat
+        log("info", "layer keyboard delete queued", JSON.stringify({ doc: docId, selected: [...selected] }));
+      } else log("info", "layer delete request busy", source, JSON.stringify({ doc: docId, selected: [...selected], deletingAction, repeat }));
+      return;
+    }
+    // only layers still in the last read: a quick second Delete must not ask for the one just deleted
+    const ids = [...selected].filter(id => byId.has(id)), l = ids.length === 1 ? layers.find(x => x.id === ids[0]) : undefined;
     const part = l ? framed(l) : null;
+    if (!ids.length) {
+      if (selected.size) {
+        log("info", "layer delete stale selection", source, JSON.stringify([...selected]));
+        status("所选图层已发生变化，正在同步列表", "info");
+        void refresh();
+      }
+      return;
+    }
     if (l && part && part !== "layer") {
       focus = null;
       void run(part === "mask" ? "deleteMask" : part === "vmask" ? "deleteVectorMask" : "deleteFilterMask", ids);
-    } else if (ids.length) void run("delete", ids);
+    } else void run("delete", ids);
   }
   // Delete / Backspace: like the trash button, while the panel was the last thing clicked (the main
-  // panel shares this document) and no text field has the keys
-  let panelActive = false;
-  document.addEventListener("mousedown", e => { panelActive = el.contains(e.target as Node); }, true);
-  document.addEventListener("keydown", e => {
+  // panel shares this document) and no text field has the keys. UXP sends keys to a panel only
+  // while something in it has the focus, and the rows are plain divs: a press in the list focuses
+  // the panel's section (tabindex) so the keys come here instead of going to Photoshop.
+  // A Photoshop command (selecting the clicked rows, deleting …) can take the focus back to
+  // Photoshop: the panel takes it again afterwards, and whenever the pointer is over the list.
+  // pointerIn: the pointer is over this panel (a click on the canvas never reaches this document,
+  // so only this tells the panel is still the one being used)
+  let panelActive = false, pointerIn = false, keysLogged = 0, refocusLogged = 0;
+  const typing = (t: Element | null) => !!t && (t.tagName === "INPUT" || t.tagName === "TEXTAREA" || (t as HTMLElement).isContentEditable);
+  // After a Photoshop command UXP still reports the section as focused while Photoshop has the
+  // keys (only the first Delete arrived): blur first, so focus() really asks for the keyboard again.
+  const refocus = (why: string) => {
+    // Photoshop may reclaim UXP keyboard focus *after* the modal promise resolves. A synchronous
+    // blur/focus is therefore racy. Retry on the next turns, but only while the pointer remains
+    // over this panel and the user has not started typing or dragging.
+    const delays = why === "delete" || why === "select" ? [0, 80, 220] : [0];
+    for (const delay of delays) setTimeout(() => {
+      if (!el.isConnected) return;
+      const active = document.activeElement;
+      if (!panelActive || !pointerIn || renaming !== null || drag?.active || typing(active)) {
+        if (why === "delete" && delay === 0)
+          log("info", "layer panel focus restore skipped", why, JSON.stringify({ panelActive, pointerIn, active: active?.tagName ?? "none", typing: typing(active) }));
+        return;
+      }
+      try {
+        if (active && active !== el) (active as HTMLElement).blur();
+        el.focus();
+      } catch { /* host without focus on sections */ }
+      log("info", "layer panel focus restore", why, delay,
+        JSON.stringify({ focused: document.activeElement === el, active: document.activeElement?.tagName ?? "none", panelActive, pointerIn }));
+    }, delay);
+  };
+  // when the panel gains / loses the keyboard (evidence for the above)
+  let focusLogged = 0;
+  for (const type of ["focus", "blur"]) listen(window, type, () => { if (focusLogged < 40) { focusLogged++; log("info", "layer panel window", type); } });
+  listen(document, "mousedown", e => {
+    const t = e.target as HTMLElement | null;
+    panelActive = el.contains(t);
+    if (panelActive && !typing(t)) { try { el.focus(); } catch { /* host without focus on sections */ } }
+  }, true);
+  // Capture on Window rather than bubbling on Document: focused UXP child controls or host
+  // handlers must not swallow Delete before WaveLayer sees it. Keep this log uncapped so the
+  // failure after many successful shortcuts remains diagnosable.
+  listen(window, "keydown", e => {
     const k = (e as KeyboardEvent).key, t = e.target as HTMLElement | null;
-    if ((k !== "Delete" && k !== "Backspace") || !panelActive || docId === null || renaming !== null) return;
+    if (k !== "Delete" && k !== "Backspace") return;
+    const state = { panelActive, pointerIn, focused: document.activeElement === el,
+      activeElement: document.activeElement?.tagName ?? "none", target: t?.tagName ?? "none",
+      doc: docId, renaming, selected: [...selected], peek: peekHold, selecting, deleting,
+      repeat: (e as KeyboardEvent).repeat, phase: e.eventPhase };
+    log("info", "layer panel shortcut keydown", k, JSON.stringify(state));
+    if (!panelActive || docId === null || renaming !== null) return;
     if (t && (t.tagName === "INPUT" || t.tagName === "TEXTAREA" || t.isContentEditable)) return;
     e.preventDefault();
-    deleteSelected();
-  });
+    e.stopPropagation();
+    deleteSelected("keyboard", (e as KeyboardEvent).repeat);
+  }, true);
+  listen(window, "keyup", e => {
+    const k = (e as KeyboardEvent).key;
+    if (k === "Delete" || k === "Backspace")
+      log("info", "layer panel shortcut keyup", k, JSON.stringify({ panelActive, pointerIn, focused: document.activeElement === el, activeElement: document.activeElement?.tagName ?? "none", deleting }));
+  }, true);
   /** the open document across sessions (custom colours are kept by it) */
   let docKey = "";
   const customOf = (id: number): string | undefined => customColors[docKey]?.[id];
@@ -939,10 +1012,16 @@ export function createLayerTreeView(tree: LayerTree, status: Status, tools?: Lay
   // ── thumbnails: the rows in view, a few per Photoshop call, after scrolling settles ──
   /** thumbnails Photoshop failed to give: how often, and when to ask again */
   const failures = new Map<number, number>(), retryAt = new Map<number, number>();
-  let inView: TreeLayer[] = [], thumbTimer: ReturnType<typeof setTimeout> | null = null, fetching = false;
+  let inView: TreeLayer[] = [], thumbTimer: ReturnType<typeof setTimeout> | null = null, retryTimer: ReturnType<typeof setTimeout> | null = null, fetching = false;
   function queueThumbs(delay = 150) {
     if (thumbTimer) clearTimeout(thumbTimer);
     thumbTimer = setTimeout(() => { thumbTimer = null; void fetchThumbs(); }, delay);
+  }
+  /** wakes the queue when the next failed thumbnail is due again */
+  function scheduleRetry() {
+    const now = Date.now(), due = [...retryAt.values()].filter(t => t > now);
+    if (retryTimer) clearTimeout(retryTimer);
+    retryTimer = due.length ? setTimeout(() => { retryTimer = null; queueThumbs(0); }, Math.min(...due) - now + 100) : null;
   }
   async function fetchThumbs() {
     // nothing to do while the list isn't on screen (another page, a hidden panel) or a drag runs
@@ -952,7 +1031,7 @@ export function createLayerTreeView(tree: LayerTree, status: Status, tools?: Lay
     const variants = (l: TreeLayer) => !thumbsOn || !isVariantLayer(l) ? [] : openSubs().has(l.id) ? l.ai!.ids : l.ai!.shown !== null ? [l.ai!.shown] : [];
     const keys = [...new Set(inView.flatMap(l => [...hasThumb(l) ? [l.id] : [], ...variants(l), ...l.mask && thumbsOn ? [maskKey(l.id)] : [], ...l.vmask && thumbsOn ? [vmaskKey(l.id)] : []]))].filter(k => (retryAt.get(k) ?? 0) <= now);
     const want = thumbs().next(keys, THUMB_BATCH);
-    if (!want.length) return;
+    if (!want.length) { scheduleRetry(); return; }
     const doc = docId, cache = thumbs(), byId = new Map(layers.map(l => [l.id, l]));
     // a thumbnail shows the layer's artboard, or the canvas (core/layers/thumbs.ts thumbArea)
     const items = want.filter(k => byId.has(keyLayer(k))).map(k => {
@@ -965,13 +1044,17 @@ export function createLayerTreeView(tree: LayerTree, status: Status, tools?: Lay
       items.forEach((x, i) => {
         const url = urls[i];
         if (url !== undefined) { cache.put(x.key, url); failures.delete(x.key); retryAt.delete(x.key); return; }
-        // Photoshop was busy: try again in a few seconds, and give up after a few tries
+        // Photoshop was busy: keep any older picture, show none after a few tries, and keep asking
+        // less and less often (core thumbRetryDelay)
         const n = (failures.get(x.key) ?? 0) + 1;
         failures.set(x.key, n);
-        if (n >= 3) cache.put(x.key, null); else retryAt.set(x.key, Date.now() + 2500 * n);
+        if (n >= 3 && cache.get(x.key) === undefined) cache.put(x.key, null);
+        cache.invalidate([x.key]);
+        retryAt.set(x.key, Date.now() + thumbRetryDelay(n));
       });
-      if (retryAt.size) setTimeout(() => queueThumbs(0), 2600);
+      scheduleRetry();
       if (doc === docId) draw();
+      refocus("thumbnails");
     } catch (e) {
       // Photoshop is busy with something modal: try again a little later
       log("info", "layer thumbnails", e);
@@ -1012,13 +1095,13 @@ export function createLayerTreeView(tree: LayerTree, status: Status, tools?: Lay
     const m = e as MouseEvent;
     scrollRows((typeof m.offsetY === "number" && m.offsetY < sthumb.offsetTop ? -1 : 1) * fits());
   });
-  document.addEventListener("mousemove", e => {
+  listen(document, "mousemove", e => {
     if (!thumbDrag) return;
     const H = list.clientHeight || 1, th = sthumb.offsetHeight, room = Math.max(1, H - th);
     const n = thumbDrag.f0 + Math.round(((e as MouseEvent).clientY - thumbDrag.y0) / room * maxFirst());
     scrollRows(n - firstRow);
   });
-  document.addEventListener("mouseup", () => { thumbDrag = null; });
+  listen(document, "mouseup", () => { thumbDrag = null; });
 
 
   function render() {
@@ -1086,11 +1169,24 @@ export function createLayerTreeView(tree: LayerTree, status: Status, tools?: Lay
 
 
   let reading = false, again = false;
+  /** When Photoshop refuses to deselect (e.g. only Background is left), keep the panel blank
+   *  until the host selection actually changes or the user picks a row. */
+  let lastHostSelection: { docId: number; ids: number[] } | null = null;
+  let localClear: { docId: number; hostIds: number[] } | null = null;
+  function holdEmptySelection(before: number[]) {
+    if (docId === null) return;
+    localClear = { docId, hostIds: lastHostSelection?.docId === docId ? [...lastHostSelection.ids] : [...before] };
+  }
   /** the list's own selection on its way to Photoshop: `selecting` requests in flight, and a count of
    *  clicks, so a read that saw Photoshop's selection from before can't put it back (a flash of the
    *  old layer before the new one) */
   let selecting = 0, selectGen = 0;
+  /** Serialise Photoshop selection changes. Rapid Ctrl/Shift clicks must not overlap modal calls. */
+  let selectTail: Promise<void> = Promise.resolve();
   async function refresh() {
+    // Ignore intermediate selections and layer states during a batch delete. The delete command
+    // itself requests a fresh read after Photoshop commits its history step.
+    if (deleting) return;
     // while a row is previewed only the selection changes, and that is ours: read once it ends
     if (peekHold) return;
     if (reading) { again = true; return; }
@@ -1100,12 +1196,17 @@ export function createLayerTreeView(tree: LayerTree, status: Status, tools?: Lay
         again = false;
         const gen = selectGen;
         const r = await tree.read().catch(e => { log("warn", "layer tree read", e); return null; });
+        if (deleting) return; // a read started before deletion must not restore stale selection
         // the list chose layers while this was read: keep its selection and read again afterwards
         const stale = selecting > 0 || gen !== selectGen;
         const before = [...selected].sort().join(",");
-        if (!r) { docId = null; layers = []; byId = new Map(); selected = new Set(); users = new Map(); }
+        if (!r) { docId = null; layers = []; byId = new Map(); selected = new Set(); users = new Map(); localClear = null; lastHostSelection = null; }
         else {
           docKey = r.docKey;
+          lastHostSelection = { docId: r.docId, ids: [...r.selected] };
+          if (localClear) {
+            if (localClear.docId !== r.docId || !selectionAfterLocalClear(r.selected, localClear.hostIds).keepClear) localClear = null;
+          }
           if (r.docId !== docId) { firstRow = 0; anchor = null; }
           else {
             // a layer whose size changed was edited (transform, crop …), whatever the events said
@@ -1116,7 +1217,7 @@ export function createLayerTreeView(tree: LayerTree, status: Status, tools?: Lay
             // masks show the whole canvas: a new canvas size redraws the thumbnails
             if (r.width !== canvas.width || r.height !== canvas.height) thumbs().invalidate("all");
           }
-          if ((!peekHold && !stale) || r.docId !== docId) selected = new Set(r.selected);
+          if ((!peekHold && !stale) || r.docId !== docId) selected = localClear ? new Set() : new Set(r.selected);
           else if (stale && !peekHold) again = selecting === 0;
           docId = r.docId; layers = r.layers; byId = new Map(layers.map(l => [l.id, l])); users = contentUsers(layers); colors = sharedColors(layers, users); canvas = { width: r.width, height: r.height };
         }
@@ -1127,23 +1228,62 @@ export function createLayerTreeView(tree: LayerTree, status: Status, tools?: Lay
     } finally { reading = false; }
   }
 
-  async function clickRow(id: number, mods: { ctrl: boolean; shift: boolean }) {
-    if (docId === null) return;
-    const r = clickSelect(rows.filter(x => !x.filter).map(x => x.layer.id), layers.filter(l => selected.has(l.id)).map(l => l.id), anchor, id, mods);
-    anchor = r.anchor;
-    selected = new Set(r.ids);
-    if (focus && !(selected.size === 1 && selected.has(focus.id))) focus = null;
+  /** Commit the panel selection to Photoshop, including the empty selection. The generation
+   *  check prevents a previous Ctrl/Shift click from restoring layers after a blank-area click. */
+  async function commitSelection(why: "select" | "clear") {
+    if (docId === null || deleting) return;
     ownSelect = [...selected].sort().join(",");
-    selectGen++; selecting++;
+    const gen = ++selectGen, doc = docId, wanted = layers.filter(l => selected.has(l.id)).map(l => l.id);
+    selecting++;
     render();
-    try {
+    const job = selectTail.then(async () => {
+      if (gen !== selectGen || doc !== docId || deleting) return;
       await endPeek(false);
-      await tree.select(docId, layers.filter(l => selected.has(l.id)).map(l => l.id));
+      if (gen !== selectGen || doc !== docId || deleting) return;
+      await tree.select(doc, wanted);
+    });
+    selectTail = job.catch(() => undefined);
+    try {
+      await job;
     } catch (e) { log("warn", "layer tree select", e); status(`选择图层失败：${(e as Error).message ?? e}`, "error"); ownSelect = null; }
-    finally { selecting--; }
+    finally { selecting--; refocus(why); }
     // Photoshop has it now: one read brings the rest (shared contents, links …) up to date
     if (!selecting) void refresh();
   }
+
+  async function clickRow(id: number, mods: { ctrl: boolean; shift: boolean }) {
+    if (docId === null || deleting) return;
+    const before = [...selected];
+    const r = clickSelect(rows.filter(x => !x.filter).map(x => x.layer.id), layers.filter(l => selected.has(l.id)).map(l => l.id), anchor, id, mods);
+    anchor = r.anchor;
+    selected = new Set(r.ids);
+    if (selected.size) localClear = null; else holdEmptySelection(before);
+    if (focus && !(selected.size === 1 && selected.has(focus.id))) focus = null;
+    await commitSelection("select");
+  }
+
+  // Only the unused space of the layer list (below the last row or its empty-state label)
+  // clears selection. Don't let a row drag ending in that space, a scrollbar press, or a
+  // toolbar/search click accidentally deselect layers.
+  const blankListTarget = (target: EventTarget | null) => target === list || target === inner || target === empty;
+  let blankPress: { x: number; y: number } | null = null;
+  list.addEventListener("mousedown", e => {
+    const m = e as MouseEvent;
+    blankPress = blankListTarget(e.target) && m.button === 0 && !m.ctrlKey && !m.metaKey && !m.shiftKey && !m.altKey
+      ? { x: m.clientX, y: m.clientY } : null;
+  });
+  list.addEventListener("click", e => {
+    const press = blankPress, m = e as MouseEvent;
+    blankPress = null;
+    if (!press || !blankListTarget(e.target) || Math.abs(m.clientX - press.x) > 4 || Math.abs(m.clientY - press.y) > 4
+      || drag?.active || thumbDrag || deleting || docId === null || !selected.size) return;
+    holdEmptySelection([...selected]);
+    selected = new Set();
+    anchor = null;
+    focus = null;
+    log("info", "layer panel clear selection", "blank");
+    void commitSelection("clear");
+  });
 
   /** the switch being dragged, on layer `l` */
   const paintGet = (l: TreeLayer, col: "eye" | "position" | "pixels") =>
@@ -1173,7 +1313,7 @@ export function createLayerTreeView(tree: LayerTree, status: Status, tools?: Lay
     }
     render();
   }
-  document.addEventListener("mouseup", () => {
+  listen(document, "mouseup", () => {
     const d = paint, doc = docId;
     paint = null;
     if (!d || doc === null) return;
@@ -1213,18 +1353,77 @@ export function createLayerTreeView(tree: LayerTree, status: Status, tools?: Lay
   // ── layer commands (right-click menu, toolbar, mask / fx cells) ──
   async function run(action: LayerAction | SmartAction, ids: number[], arg?: string, opts?: RunOptions) {
     if (docId === null) return;
-    await endPeek();
+    // Delete from keyboard, toolbar, right-click menu and drag-to-trash must all use the same
+    // guard. Previously only the keyboard/toolbar had protection against concurrent deletes.
+    const destructive = action === "delete" || action === "deleteMask" || action === "applyMask"
+      || action === "deleteVectorMask" || action === "deleteFilterMask"
+      || action === "deleteVariant" || action === "deleteFilter"
+      || action === "deleteFilters" || action === "deleteEffect" || action === "clearStyle";
+    if (destructive && deleting) {
+      log("info", "layer delete busy", action, JSON.stringify(ids));
+      return;
+    }
+    if (destructive) { deleting = true; deletingAction = action as LayerAction; }
+    const doc = docId, generation = selectGen;
+    let deleteCompleted = false;
+    const afterDeleteSelect = action === "delete"
+      ? nextLayerAfterDelete(layers, ids, [...new Set(rows.filter(r => !r.filter).map(r => r.layer.id))]) : null;
     try {
+      // A quick succession of Ctrl/Shift clicks can leave selection modals in flight.
+      await selectTail;
+      // Delete targets explicit layer IDs, so a hover-preview restoration is unnecessary and
+      // may fail if the old previewed layer has already disappeared.
+      await endPeek(action !== "delete");
       if (isSmartAction(action)) {
         if (!tools) return;
         const r = await tools[action]();
         status(resultText(SMART_VERB[action], r), r.done ? "ok" : "error");
-      } else await tree.run(docId, action, ids, arg, opts);
+      } else {
+        const result = await tree.run(doc, action, ids, arg,
+          action === "delete" ? { ...opts, afterDeleteSelect } : opts);
+        if (action === "delete" && result && result.kind === "delete") {
+          deleteCompleted = result.deleted.length > 0 && result.selected !== null;
+          if (result.skipped.length) {
+            const reasons = result.skipped.slice(0, 3).map(s => s.name + "：" + s.reason).join("；");
+            status("已删除 " + result.deleted.length + " 个图层，跳过 " + result.skipped.length + " 个。" + reasons
+              + (result.skipped.length > 3 ? "…" : ""), result.deleted.length ? "info" : "error");
+          } else if (!result.deleted.length) status("没有可删除的图层", "error");
+          if (docId === doc && selectGen === generation) {
+            // Use Photoshop's confirmed post-delete selection, not the predicted next row.
+            selected = result.selected === null ? new Set() : new Set([result.selected]);
+            anchor = result.selected;
+            focus = null;
+            localClear = null;
+            ownSelect = [...selected].sort().join(",");
+            selectGen++;
+            log("info", "layer panel delete next", result.selected ?? "none");
+            if (selected.size) reveal(); else render();
+          }
+        }
+      }
     } catch (e) {
       log("warn", "layer command", action, e);
-      status(`操作失败：${(e as Error).message ?? e}`, "error");
+      status("操作失败：" + ((e as Error).message ?? e), "error");
+    } finally {
+      if (destructive) { deleting = false; deletingAction = null; }
+      refocus(action);
+      void refresh();
+      if (action === "delete" && pendingKeyboardDelete) {
+        pendingKeyboardDelete = false;
+        if (deleteCompleted) {
+          // Wait for any in-flight tree read, then refresh from Photoshop before consuming the
+          // queued deliberate key press. Never reuse the IDs from the first delete.
+          const drain = async () => {
+            if (docId !== doc) return;
+            if (deleting || reading) { setTimeout(() => { void drain(); }, 35); return; }
+            await refresh();
+            if (docId === doc && !deleting && selected.size) deleteSelected("keyboard");
+            else log("info", "layer keyboard delete queue cancelled", JSON.stringify({ doc, currentDoc: docId, selected: [...selected] }));
+          };
+          setTimeout(() => { void drain(); }, 0);
+        } else log("info", "layer keyboard delete queue dropped", "previous delete did not remove a layer");
+      }
     }
-    void refresh();
   }
 
   // ── drag to reorder: the selected layers (or the one grabbed), dropped above / below / into a row ──
@@ -1272,7 +1471,7 @@ export function createLayerTreeView(tree: LayerTree, status: Status, tools?: Lay
   });
 
   function startDrag(id: number, e: MouseEvent, sub?: { what: SubDrag; row: number }) {
-    if (e.button !== 0 || docId === null) return;
+    if (e.button !== 0 || docId === null || deleting) return;
     // the selection when the grabbed layer is part of it, in list order; else just that layer
     const ids = sub ? [] : selected.has(id) ? layers.filter(l => selected.has(l.id)).map(l => l.id) : [id];
     const idx = sub ? sub.row : Math.max(0, rows.findIndex(r => r.layer.id === id));
@@ -1394,7 +1593,7 @@ export function createLayerTreeView(tree: LayerTree, status: Status, tools?: Lay
   /** -1 / 1 while the pointer is near (or past) the list's top / bottom edge */
   const edgeDir = () => !drag || drag.overTool ? 0 : drag.view < 22 ? -1 : drag.view > list.clientHeight - 22 ? 1 : 0;
 
-  document.addEventListener("mousemove", e => {
+  listen(document, "mousemove", e => {
     if (!drag) return;
     const m = e as MouseEvent;
     if (!drag.active) {
@@ -1429,7 +1628,7 @@ export function createLayerTreeView(tree: LayerTree, status: Status, tools?: Lay
     if (d?.active) { suppressClick = true; setTimeout(() => { suppressClick = false; }, 0); draw(); }
     return d;
   }
-  document.addEventListener("mouseup", e => {
+  listen(document, "mouseup", e => {
     const d = endDrag();
     // an effect chip pressed and let go without dragging: its switch
     if (!d?.active) { if (d?.sub && "chip" in d.sub) d.sub.toggleOnUp?.(); return; }
@@ -1467,7 +1666,7 @@ export function createLayerTreeView(tree: LayerTree, status: Status, tools?: Lay
     else if (s.kind === "effect") void run("moveEffect", [s.layerId], JSON.stringify({ ...arg, key: s.key, multi: s.multi }));
     else void run("moveEffects", [s.layerId], JSON.stringify(arg));
   }
-  document.addEventListener("keydown", e => { if ((e as KeyboardEvent).key === "Escape" && drag?.active) endDrag(); });
+  listen(document, "keydown", e => { if ((e as KeyboardEvent).key === "Escape" && drag?.active) endDrag(); });
 
   async function drop(targetId: number, where: Where, plan: MoveStep[], count: number) {
     if (docId === null) return;
@@ -1480,7 +1679,9 @@ export function createLayerTreeView(tree: LayerTree, status: Status, tools?: Lay
   }
 
   // ── right-click menu, rename, toolbar ──
-  const el = h("section", { class: "lt fill" });
+  const el = h("section", { class: "lt fill", tabindex: "-1" });
+  el.addEventListener("mouseenter", () => { pointerIn = true; refocus("hover"); });
+  el.addEventListener("mouseleave", () => { pointerIn = false; });
   const popup = createPopup(el);
   /** y (px from the panel section's top) just below row `idx` */
   const rowBottom = (idx: number) => list.offsetTop + yOf(idx + 1);
@@ -1601,7 +1802,7 @@ export function createLayerTreeView(tree: LayerTree, status: Status, tools?: Lay
   const newBtn = tool("newLayer", "新建图层（把图层拖到这里：复制图层）", () => void run("newLayer", ids(), undefined, outsideAi()));
   /** new layers next to a selected AI result (a group in Photoshop) go above it, not into it */
   const outsideAi = (): RunOptions => { const top = selectedLayers()[0]; return top && isVariantLayer(top) ? { above: top.id } : {}; };
-  const trashBtn = tool("trash", "删除图层；选中的是蒙版时（缩略图带绿框）删除蒙版。也可以把图层拖到这里；Delete 键同样", () => deleteSelected());
+  const trashBtn = tool("trash", "删除图层；选中的是蒙版时（缩略图带绿框）删除蒙版。也可以把图层拖到这里；Delete 键同样", () => deleteSelected("toolbar"));
   const dropTools: { el: HTMLElement; action: LayerAction }[] = [
     { el: groupBtn, action: "groupLayers" }, { el: newBtn, action: "duplicate" }, { el: trashBtn, action: "delete" },
   ];
@@ -1617,41 +1818,91 @@ export function createLayerTreeView(tree: LayerTree, status: Status, tools?: Lay
     h("option", { disabled: true, value: "" }, "混合模式"),
     ...BLEND_MODES.map(m => m === "-" ? h("option", { disabled: true, value: "" }, "──────") : h("option", { value: m[0] }, m[1]))) as HTMLSelectElement;
   modeSel.addEventListener("change", () => { if (modeSel.value) void run("setProps", ids(), JSON.stringify({ mode: modeSel.value })); });
-  /** 不透明度 / 填充: a slider and a number; the slider shows its value while dragged and is written
-   *  to Photoshop when let go (one history step, as Photoshop's own slider) */
-  /** 不透明度 / 填充: a slider and its value; the value is text (click it to type one), so the row
-   *  stays low in UXP, where inputs are tall */
-  const percentRow = (key: "opacity" | "fill", label: string, tip: string) => {
-    const val = h("span", { class: "lt-pct-val", title: tip + "\n单击输入数值" });
-    const edit = h("input", { class: "lt-pct-edit", type: "text" }) as HTMLInputElement;
-    setShown(edit, false);
+  /** Photoshop-style percentage field: editable value + a narrow arrow that opens a scrub slider. */
+  const percentRow = (key: "opacity" | "fill", label: string, tip: string, locked = false) => {
+    const value = h("span", { class: "lt-pct-display", title: tip + "\n单击输入数值" }, "100%");
+    const input = h("input", { class: "lt-pct-input", type: "text" }) as HTMLInputElement;
+    setShown(input, false);
+    const arrow = h("button", { class: "lt-pct-arrow", title: "打开滑块" }, ic("chevron", 10));
+    const control = h("div", { class: "lt-pct-control" }, value, input, arrow);
+    const pop = h("div", { class: "lt-pct-pop" });
+    setShown(pop, false);
+    let editing = false, disabled = true, editOriginal = "";
+    let row: HTMLElement;
+    const closeSlider = () => { setShown(pop, false); row.classList.remove("open"); };
     const apply = (v: number) => {
-      if (!Number.isFinite(v) || !selected.size) { renderProps(); return; }
+      if (!Number.isFinite(v) || !selected.size) { renderProps(); closeSlider(); return; }
       const n = Math.max(0, Math.min(100, Math.round(v)));
-      replace(val, n + "%"); slider.value = n;
+      replace(value, n + "%");
+      slider.value = n;
+      closeSlider();
       void run("setProps", ids(), JSON.stringify({ [key]: n }));
     };
-    const slider = createSlider({ title: tip, onInput: v => replace(val, v + "%"), onChange: apply });
-    let editing = false;
-    const stopEdit = (save: boolean) => {
-      if (!editing) return;
-      editing = false; setShown(edit, false); setShown(val, true);
-      if (save && edit.value.trim()) apply(Number(edit.value.replace(/[%\s]/g, "")));
+    const slider = createSlider({ title: tip, onInput: v => { if (!editing) replace(value, v + "%"); }, onChange: apply });
+    pop.append(slider.el);
+    const setValue = (v: string) => {
+      if (editing) return;
+      replace(value, v ? v + "%" : "—");
+      slider.value = v && Number.isFinite(Number(v)) ? Number(v) : 100;
     };
-    val.addEventListener("click", () => {
-      if ((val as any).disabled || !selected.size) return;
-      editing = true;
-      edit.value = String(slider.value);
-      setShown(val, false); setShown(edit, true);
-      edit.focus(); edit.select();
+    const setDisabled = (v: boolean) => {
+      disabled = v;
+      input.disabled = v;
+      (arrow as any).disabled = v;
+      value.classList.toggle("off", v);
+      control.classList.toggle("off", v);
+      row.classList.toggle("off", v);
+      if (v) closeSlider();
+    };
+    const finishEdit = (save: boolean) => {
+      if (!editing) return;
+      editing = false;
+      setShown(input, false);
+      setShown(value, true);
+      if (save) {
+        const raw = input.value.replace(/[%\s]/g, "").trim();
+        const value = Number(raw), original = Number(editOriginal.replace(/[%\s]/g, "").trim());
+        if (!raw || !Number.isFinite(value)) renderProps();
+        else if (Number.isFinite(original) && Math.round(Math.max(0, Math.min(100, value))) === original) renderProps();
+        else apply(value);
+      } else renderProps();
+    };
+    input.addEventListener("keydown", e => {
+      const k = (e as KeyboardEvent).key;
+      if (k === "Enter") { e.preventDefault(); finishEdit(true); input.blur(); }
+      else if (k === "Escape") { e.preventDefault(); finishEdit(false); input.blur(); }
+      e.stopPropagation();
     });
-    edit.addEventListener("keydown", e => { const k = (e as KeyboardEvent).key; if (k === "Enter") stopEdit(true); else if (k === "Escape") stopEdit(false); e.stopPropagation(); });
-    edit.addEventListener("blur", () => stopEdit(true));
-    const row = h("div", { class: "lt-pct-row" }, h("span", { class: "lt-pct-label", title: tip }, label), slider.el, h("div", { class: "lt-pct-box" }, val, edit));
-    return { row, slider, val, isEditing: () => editing };
+    input.addEventListener("blur", () => finishEdit(true));
+    input.addEventListener("mousedown", e => e.stopPropagation());
+    value.addEventListener("click", () => {
+      if (disabled) return;
+      editing = true;
+      editOriginal = value.textContent ?? "";
+      input.value = editOriginal.replace(/%$/, "");
+      setShown(value, false);
+      setShown(input, true);
+      input.focus();
+      input.select();
+    });
+    arrow.addEventListener("mousedown", e => e.stopPropagation());
+    arrow.addEventListener("click", () => {
+      if (disabled) return;
+      if (isShown(pop)) { closeSlider(); return; }
+      const current = Number((value.textContent ?? "").replace(/[%\s]/g, ""));
+      slider.value = Number.isFinite(current) ? current : 100;
+      setShown(pop, true);
+      row.classList.add("open");
+    });
+    pop.addEventListener("mousedown", e => e.stopPropagation());
+    row = h("div", { class: "lt-pct-row" },
+      locked ? h("span", { class: "lt-pct-lock", title: "填充" }, ic("psLock", 13)) : null,
+      h("span", { class: "lt-pct-label", title: tip }, label), control, pop);
+    listen(document, "mousedown", e => { if (!row.contains(e.target as Node)) closeSlider(); });
+    return { row, setValue, setDisabled, isEditing: () => editing };
   };
-  const opacity = percentRow("opacity", "不透明", "不透明度：图层和它的样式一起变淡");
-  const fillPct = percentRow("fill", "填充", "填充：只让图层像素变淡，图层样式不变");
+  const opacity = percentRow("opacity", "不透明度:", "不透明度：图层和它的样式一起变淡");
+  const fillPct = percentRow("fill", "填充:", "填充：只让图层像素变淡，图层样式不变", true);
   const LOCKS: [LockKey, string, string, (l: TreeLayer) => boolean][] = [
     ["transparency", "checker", "锁定透明像素", l => l.lockTransparency],
     ["pixels", "brush", "锁定图像像素", l => l.lockPixels],
@@ -1675,14 +1926,13 @@ export function createLayerTreeView(tree: LayerTree, status: Status, tools?: Lay
     const sel = selectedLayers(), l = sel[0], none = docId === null || !l;
     const same = <T,>(f: (x: TreeLayer) => T) => sel.every(x => f(x) === f(l));
     (modeSel as any).disabled = none;
-    opacity.slider.disabled = fillPct.slider.disabled = none;
+    opacity.setDisabled(none);
+    fillPct.setDisabled(none);
     if (document.activeElement !== modeSel) modeSel.value = l && same(x => x.mode) ? l.mode : "";
     for (const [p, get] of [[opacity, (x: TreeLayer) => x.opacity], [fillPct, (x: TreeLayer) => x.fill]] as const) {
       if (p.isEditing()) continue;
-      const v = l && same(get) ? String(get(l)) : "";
-      replace(p.val, none ? "" : v ? v + "%" : "—");
-      p.val.classList.toggle("off", none);
-      p.slider.value = v ? Number(v) : 100;
+      const v = l ? (same(get) ? String(get(l)) : "") : "100";
+      p.setValue(v);
     }
     LOCKS.forEach(([, , , has], i) => {
       // groups take 锁定全部 only, like Photoshop
@@ -1742,14 +1992,14 @@ export function createLayerTreeView(tree: LayerTree, status: Status, tools?: Lay
   // the panel can be resized without an event reaching the list: re-fill when its height changes
   // (a new width re-flows the effect chips)
   let lastH = 0, lastW = 0;
-  setInterval(() => {
+  every(() => {
     const ht = list.clientHeight, wd = list.clientWidth;
     if (wd !== lastW) { lastW = wd; lastH = ht; render(); }
     else if (ht !== lastH) { lastH = ht; draw(); }
   }, 400);
 
 
-  list.title = "点击选中，Ctrl / ⌘ 加选，Shift 连选；双击打开图层样式；右键更多操作；拖动改顺序（拖到图层组中间放进组里）";
+  list.title = "点击图层选中，点击列表空白处取消全选；Ctrl / ⌘ 加选，Shift 连选；双击打开图层样式；右键更多操作；拖动改顺序（拖到图层组中间放进组里）";
   el.append(
     h("div", { class: "card-head" }, h("span", { class: "label" }, "图层"), countEl, h("span", { class: "grow" }), peersBtn),
     infoEl,

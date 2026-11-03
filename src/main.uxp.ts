@@ -8,6 +8,7 @@ import { UxpLayerTree } from "./ps/uxpLayers.ts";
 import { log, setLogSink } from "./app/log.ts";
 import { mountApp } from "./ui/app.ts";
 import { mountLayersPanel } from "./ui/layersPanel.ts";
+import { disposeGlobals } from "./ui/dom.ts";
 import { diagnose, uxpFetch } from "./ps/net.ts";
 
 declare const require: (m: string) => any;
@@ -41,9 +42,13 @@ setLogSink(async line => {
 log("info", "uxp", JSON.stringify(uxp.versions ?? {}), "host", JSON.stringify(uxp.host ?? {}));
 
 const host = new UxpHost();
-// lets the development loader detach this build's Photoshop listeners before loading a new one
+// lets the development loader detach this build's Photoshop listeners, document / window listeners
+// and timers before loading a new one
 const layerTree = new UxpLayerTree();
-(globalThis as any).__waveplugDispose = () => { host.dispose(); layerTree.dispose(); };
+// the loader calls the old build's dispose before it reads the files, so several quick ⟳ can each
+// start a build: the one that started just before this one is still running, stop it here
+try { (globalThis as any).__waveplugDispose?.(); } catch { /* old build */ }
+(globalThis as any).__waveplugDispose =() => { host.dispose(); layerTree.dispose(); disposeGlobals(); };
 
 const services: Services = {
   host,
@@ -75,10 +80,10 @@ const services: Services = {
     const f = await fs.getFileForOpening({ types: ["png", "jpg", "jpeg", "webp"] });
     if (!f) return null;
     const bytes = new Uint8Array(await f.read({ format: formats.binary }));
-    let bin = "";
-    for (let i = 0; i < bytes.length; i += 0x8000) bin += String.fromCharCode(...bytes.subarray(i, i + 0x8000));
-    const mime = /\.png$/i.test(f.name) ? "image/png" : /\.webp$/i.test(f.name) ? "image/webp" : "image/jpeg";
-    return { name: f.name, bytes, url: `data:${mime};base64,${btoa(bin)}` };
+    // the panel shows a 128 px copy, not the whole file as base64; without one it shows the file type
+    let url: string | undefined;
+    try { url = await host.imageFileThumbnail(f, 128); } catch (e) { log("warn", "reference thumbnail", f.name, e); }
+    return { name: f.name, bytes, url };
   },
   async saveImage(png, suggested) {
     const f = await fs.getFileForSaving(suggested, { types: ["png"] });

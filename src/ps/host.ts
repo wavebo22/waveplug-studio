@@ -167,6 +167,13 @@ export interface LayerTools {
   purgeMemory(): Promise<void>;
 }
 
+export interface LayerDeleteResult {
+  kind: "delete";
+  deleted: number[];
+  skipped: { id: number; name: string; reason: string }[];
+  selected: number | null;
+}
+
 /** WavePlug 图层 panel: the active document's layer tree, kept in step with Photoshop's Layers panel. */
 export interface LayerTree {
   /** All layers top to bottom with their status, and the selected ids; null without a document.
@@ -176,7 +183,9 @@ export interface LayerTree {
   pickColor(hex: string): Promise<string | null>;
   /** Selects `ids` and runs a layer command on them (one undo step). `arg`: the new name (rename),
    *  the adjustment (adjustment, a key of ADJUSTMENTS), "on" / "off" (toggleMask, toggleEffects). */
-  run(docId: number, action: LayerAction, ids: number[], arg?: string, opts?: RunOptions): Promise<void>;
+  /** Deletion also reports which IDs Photoshop actually removed, which were skipped, and the
+   *  surviving selection. Other layer commands return void. */
+  run(docId: number, action: LayerAction, ids: number[], arg?: string, opts?: RunOptions): Promise<void | LayerDeleteResult>;
   /** Makes exactly `ids` the selected layers (none when empty). */
   select(docId: number, ids: number[]): Promise<void>;
   /** Shows / hides `ids` (one Photoshop call, however many: a drag down the eye column). */
@@ -198,7 +207,9 @@ export interface LayerTree {
 
 /** `above`: a new layer / group / adjustment goes above this group rather than into it (an AI result
  *  group, which the panel shows as one layer), in the same undo step */
-export interface RunOptions { above?: number }
+/** `afterDeleteSelect`: the next visible layer picked by the panel before a delete;
+ *  the Photoshop implementation validates that this layer survived before selecting it. */
+export interface RunOptions { above?: number; afterDeleteSelect?: number | null }
 
 /** what of the active layer Photoshop paints on: its pixels, layer mask, vector mask or smart filter mask */
 export type TargetPart = "layer" | "mask" | "vmask" | "filterMask";

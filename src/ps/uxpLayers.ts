@@ -4,9 +4,9 @@
 import { log } from "../app/log.ts";
 import { type Bounds, frameThumb, thumbArea } from "../core/layers/thumbs.ts";
 import type { ToolResult } from "../core/layers/smart.ts";
-import { type LayerAction, type MoveStep, type RawLayer, buildTree, effectsOf, EFFECTS, rawProblem } from "../core/layers/tree.ts";
+import { type LayerAction, type MoveStep, type RawLayer, buildTree, nextLayerAfterDelete, planLayerDeletion, effectsOf, EFFECTS, rawProblem } from "../core/layers/tree.ts";
 import { addEffect, effectItem, hasEffects, removeEffect } from "../core/layers/effects.ts";
-import { type LayerTree, type RunOptions, type TargetPart, ADJUSTMENTS } from "./host.ts";
+import { type LayerDeleteResult, type LayerTree, type RunOptions, type TargetPart, ADJUSTMENTS } from "./host.ts";
 import { docById, findLayer, modal, onModalDone, play, step } from "./uxpHost.ts";
 import { act, selectLayers } from "./uxpTools.ts";
 
@@ -14,6 +14,10 @@ declare const require: (m: string) => any;
 
 const ps = () => require("photoshop");
 const docRef = (id: number) => ({ _ref: "document", _id: id });
+/** UI commands must never mutate an earlier PSD after the user switches tabs mid-operation. */
+const requireActiveDoc = (docId: number) => {
+  if (ps().app.activeDocument?.id !== docId) throw new Error("当前文档已切换，已取消操作以防误删其他 PSD");
+};
 const PROPS = ["layerID", "name", "layerKind", "layerSection", "visible", "hasUserMask", "layerLocking", "smartObject", "smartObjectMore", "boundsNoEffects", "background", "group", "userMaskEnabled", "layerEffects", "layerFXVisible", "linkedLayerIDs", "mode", "opacity", "fillOpacity", "artboardEnabled", "color", "hasVectorMask", "vectorMaskEnabled", "userMaskLinked", "vectorMaskLinked", "hasFilterMask", "artboard"];
 /** opacity / fillOpacity as % (Photoshop gives 0–255, or a percent unit) */
 const percent = (v: any): number | undefined => v === undefined || v === null ? undefined
@@ -24,7 +28,8 @@ async function whenFree<T>(fn: () => Promise<T>, tries = 20): Promise<T> {
   for (let i = 0; ; i++) {
     try { return await fn(); }
     catch (e) {
-      if (i >= tries || !/modal/i.test(String((e as Error)?.message ?? e))) throw e;
+      // Photoshop busy with another command (a modal one, or one holding the document's history)
+      if (i >= tries || !/modal|already suspended/i.test(String((e as Error)?.message ?? e))) throw e;
       await new Promise(r => setTimeout(r, 100));
     }
   }
@@ -182,10 +187,38 @@ export class UxpLayerTree implements LayerTree {
   }
 
   async select(_docId: number, ids: number[]) {
-    await modal(SELECT, async () => {
-      if (ids.length) await selectLayers(ids);
-      else await act({ _obj: "selectNoLayers", _target: [{ _ref: "layer", _enum: "ordinal", _value: "targetEnum" }] });
-    });
+    requireActiveDoc(_docId);
+    if (ids.length) {
+      await modal(SELECT, async () => { requireActiveDoc(_docId); await selectLayers(ids); });
+      return;
+    }
+    const doc = docById(_docId);
+    if (doc.layers.length === 1 && doc.layers[0]?.isBackgroundLayer) {
+      // Photoshop never accepts selectNoLayers when the only layer is Background.
+      // The UI will preserve its local empty selection; do not invoke a failing host command.
+      log("info", "layer deselect skipped", "only background", _docId);
+      return;
+    }
+    // Photoshop disables Select > Deselect Layers in some document states (notably a lone
+    // Background layer). act() uses dontDisplay, which *still shows a native error dialog* when
+    // the action is unavailable. Use silent instead, and let the panel keep an empty local
+    // selection when Photoshop cannot represent an unselected layer state.
+    try {
+      await modal(SELECT, async () => {
+        requireActiveDoc(_docId);
+        const [result] = await play([{
+          _obj: "selectNoLayers",
+          _target: [{ _ref: "layer", _enum: "ordinal", _value: "targetEnum" }],
+          _options: { dialogOptions: "silent" },
+        }]);
+        if (result?._obj === "error") {
+          log("info", "layer deselect unavailable", _docId, result?.result, String(result?.message ?? ""));
+        }
+      });
+    } catch (e) {
+      // Deselecting is a UI convenience: never interrupt the user with a Photoshop error dialog.
+      log("info", "layer deselect unavailable", _docId, e);
+    }
   }
 
   async setVisible(_docId: number, ids: number[], visible: boolean) {
@@ -231,7 +264,9 @@ export class UxpLayerTree implements LayerTree {
         try {
           const r = await (l.mask ? imaging.getLayerMask(opts) : imaging.getPixels(opts));
           try {
-            const d = r.imageData, sb = r.sourceBounds;
+            const d = r?.imageData, sb = r?.sourceBounds;
+            // nothing to read (an empty layer or mask): no picture, not a failure
+            if (!d) { out.push(null); log("info", "layer thumbnail empty", l.id); continue; }
             let at = sb && [sb.left, sb.top, sb.right, sb.bottom].every((v: unknown) => Number.isFinite(Number(v)))
               ? { left: Number(sb.left), top: Number(sb.top), right: Number(sb.right), bottom: Number(sb.bottom) } : read;
             // with targetSize, Photoshop reads a scaled-down copy (pyramid `level`: 1/2, 1/4 …) and gives
@@ -246,10 +281,12 @@ export class UxpLayerTree implements LayerTree {
               const b64 = await imaging.encodeImageData({ imageData: flat, base64: true });
               out.push(typeof b64 === "string" && b64 ? "data:image/jpeg;base64," + b64 : null);
             } finally { flat.dispose(); }
-          } finally { r.imageData.dispose(); }
+          } finally { r?.imageData?.dispose?.(); }
         } catch (e) {
-          // Photoshop busy with something else ("不能使用移动工具" …): worth another try later
-          out.push(undefined); log("info", "layer thumbnail", l.id, e);
+          // a layer or document that is gone has no picture; anything else (-32005 "不能使用移动工具",
+          // "无法更新智能对象文件" … while Photoshop is busy) is worth another try later
+          const gone = /Unknown (layer|document)/i.test(String((e as Error)?.message ?? e));
+          out.push(gone ? null : undefined); log("info", "layer thumbnail", l.id, e);
         }
       }
       return out;
@@ -257,9 +294,85 @@ export class UxpLayerTree implements LayerTree {
   }
 
   async run(docId: number, action: LayerAction, ids: number[], arg?: string, opts: RunOptions = {}) {
+    requireActiveDoc(docId);
     const label = ACTION_NAMES[action] ?? action;
+    if (action === "delete") {
+      // Explicit layer IDs (never active pixels/masks). All successful deletions form one undo step.
+      return whenFree(() => step("WavePlug " + label, docId, async (): Promise<LayerDeleteResult> => {
+        requireActiveDoc(docId);
+        const doc = docById(docId);
+        const live: { id: number; parentId: number | null; name: string; locked: boolean; background: boolean }[] = [];
+        const collect = (ls: any[], parentId: number | null, dest: typeof live) => {
+          for (const l of ls) {
+            dest.push({ id: l.id, parentId, name: String(l.name ?? ("#" + l.id)),
+              locked: !!l.allLocked, background: !!l.isBackgroundLayer });
+            if (l.layers?.length) collect(l.layers, l.id, dest);
+          }
+        };
+        collect(doc.layers, null, live);
+        const { targets, skipped } = planLayerDeletion(live, ids);
+        const names = new Map(live.map(l => [l.id, l.name]));
+        const attempted: number[] = [];
+        log("info", "layer delete targets", JSON.stringify({ docId, requested: ids, targets, skipped }));
+        for (const id of targets) {
+          if (!findLayer(doc.layers, id)) {
+            skipped.push({ id, name: names.get(id) ?? ("#" + id), reason: "删除前图层已不存在" });
+            continue;
+          }
+          try {
+            const [response] = await play([{
+              _obj: "delete", _target: [{ _ref: "layer", _id: id }, docRef(docId)],
+              _options: { dialogOptions: "silent" },
+            }]);
+            if (response?._obj === "error") throw new Error(response.message || "Photoshop 拒绝删除此图层");
+            attempted.push(id);
+          } catch (e) {
+            const reason = String((e as Error)?.message ?? e);
+            // User cancellation and modal/history interruption must roll back the transaction.
+            if (/cancel|取消|modal|already suspended/i.test(reason)) throw e;
+            skipped.push({ id, name: names.get(id) ?? ("#" + id), reason });
+            log("warn", "layer delete failed", JSON.stringify({ docId, id, name: names.get(id), completed: attempted }), e);
+          }
+        }
+        // Re-read live IDs. A resolved batchPlay action is not enough to claim removal.
+        const after: typeof live = [];
+        collect(doc.layers, null, after);
+        const surviving = new Set(after.map(l => l.id));
+        const deleted = attempted.filter(id => !surviving.has(id));
+        for (const id of attempted) if (surviving.has(id)) {
+          skipped.push({ id, name: names.get(id) ?? ("#" + id), reason: "Photoshop 仍保留该图层" });
+          log("warn", "layer delete not removed", JSON.stringify({ docId, id, name: names.get(id) }));
+        }
+        // A skipped/failed target changes which row is next. Select only from confirmed deletions.
+        const preferred = !skipped.length && opts.afterDeleteSelect !== undefined ? opts.afterDeleteSelect : null;
+        const next = deleted.length ? (preferred !== null && findLayer(doc.layers, preferred)
+          ? preferred : nextLayerAfterDelete(live, deleted)) : null;
+        if (next !== null && findLayer(doc.layers, next)) {
+          try {
+            await selectLayers([next]);
+          } catch (e) { log("warn", "layer delete next select", next, e); }
+        }
+        let actual: number[] = (doc.activeLayers ?? []).map((l: any) => l.id);
+        try {
+          const [r] = await play([{ _obj: "get", _target: [{ _property: "targetLayersIDs" }, docRef(docId)] }]);
+          if (Array.isArray(r?.targetLayersIDs) && r.targetLayersIDs.length)
+            actual = r.targetLayersIDs.map((x: any) => Number(x._id));
+        } catch (e) { log("info", "layer delete selection read", docId, e); }
+        const selected = actual.find(id => surviving.has(id)) ?? null;
+        const outcome: LayerDeleteResult = { kind: "delete", deleted, skipped, selected };
+        log("info", "layer delete result", JSON.stringify({ docId, ...outcome, attempted, proposed: opts.afterDeleteSelect }));
+        return outcome;
+      }), 40);
+    }
     // these act on the layer by id, leaving the selection alone
-    const prepare = async () => { if (ids.length && action !== "solo" && action !== "setLock" && action !== "loadSelection") await selectLayers(ids); };
+    const prepare = async () => {
+      if (!ids.length || action === "solo" || action === "setLock" || action === "loadSelection") return;
+      // a layer deleted since the list was read can't be selected: leave it out
+      requireActiveDoc(docId);
+      const doc = docById(docId), there = ids.filter(id => findLayer(doc.layers, id));
+      if (!there.length) throw new Error("图层已不存在");
+      await selectLayers(there);
+    };
     if (action === "toggleFilter") {
       // index 0: the 智能滤镜 row (hide all if any is shown, else show all); 1…: one filter, by its
       // place in the list we read. Photoshop numbers filters in its own order, so every switch is
@@ -590,7 +703,12 @@ export class UxpLayerTree implements LayerTree {
         const v = g && (g.layers ?? []).find((x: any) => x.id === vid);
         if (!v) throw new Error("这个变体已经不在了");
         const wasShown = v.visible;
-        await v.delete();
+        const [response] = await play([{
+          _obj: "delete", _target: [{ _ref: "layer", _id: vid }, docRef(docId)],
+          _options: { dialogOptions: "silent" },
+        }]);
+        if (response?._obj === "error") throw new Error(response.message || "Photoshop 拒绝删除此变体");
+        if (findLayer(docById(docId).layers, vid)) throw new Error("Photoshop 未删除该变体图层");
         const rest = (g.layers ?? []).filter((x: any) => /^v\d+/.test(x.name));
         if (wasShown && rest.length) rest[rest.length - 1].visible = true;
       }));

@@ -167,3 +167,21 @@ export function replace(el: Element, ...children: (Child | Child[])[]) {
   el.textContent = "";
   for (const c of children.flat()) if (c !== null && c !== undefined && c !== false) el.append(c);
 }
+
+// Listeners on document / window and repeating timers outlive the panel's own elements: they are
+// registered here so the development loader's ⟳ can remove this build's before running the next.
+const globals: (() => void)[] = [];
+
+export function listen(target: Document | Window, type: string, fn: (e: Event) => void, opts?: boolean | AddEventListenerOptions) {
+  target.addEventListener(type, fn, opts);
+  globals.push(() => target.removeEventListener(type, fn, opts));
+}
+
+export function every(fn: () => void, ms: number) {
+  const t = setInterval(fn, ms);
+  globals.push(() => clearInterval(t));
+}
+
+export function disposeGlobals() {
+  for (const off of globals.splice(0)) { try { off(); } catch { /* host gone */ } }
+}

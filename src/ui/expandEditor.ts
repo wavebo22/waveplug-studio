@@ -8,7 +8,7 @@
 // per animation frame, and a draw only touches style values that actually changed.
 
 import type { Pads } from "../ps/host.ts";
-import { h, icon } from "./dom.ts";
+import { h, icon, listen } from "./dom.ts";
 
 export const RATIOS = ["自由比例", "1:1", "2:3", "3:2", "3:4", "4:3", "5:7", "9:16", "16:9", "21:9", "1:2", "2:1"];
 type Edge = "l" | "r" | "t" | "b";
@@ -184,20 +184,20 @@ export function createExpandEditor(opts: { maxPad: number; onChange(p: Pads): vo
     draw();
   }
 
-  document.addEventListener("mousemove", e => {
+  listen(document, "mousemove", e => {
     if (!drag) return;
     const m = e as MouseEvent;
     last = { x: m.clientX, y: m.clientY, shift: m.shiftKey };
     if (!queued) { queued = true; nextFrame(applyMove); }
   });
-  document.addEventListener("mouseup", () => {
+  listen(document, "mouseup", () => {
     if (!drag) return;
     if (queued) applyMove(); // apply the final position before letting go
     drag = null; last = null;
     stage.classList.remove("dragging");
     set(pads); // re-fit the view and notify
   });
-  window.addEventListener("resize", () => { if (!drag) draw(); });
+  listen(window, "resize", () => { if (!drag) draw(); });
 
   return {
     el,

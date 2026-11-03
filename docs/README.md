@@ -6,12 +6,22 @@
 |---|---|---|---|
 | 1 | [`PROJECT_STATUS.md`](PROJECT_STATUS.md) | 项目全貌：版本和 git 状态、开发流程、架构、功能清单、待办、用户偏好、踩过的坑摘要 | 一定要读 |
 | 2 | [`LAYER_PANEL_HANDOFF.md`](LAYER_PANEL_HANDOFF.md) | 「WavePlug 图层」面板：现在停在哪里、按确认程度分的功能、缩略图方案、悬停定位的 bug、和 PS 原版相比还缺什么 | 碰图层面板之前 |
+| 2b | [`STABILITY_HANDOFF.md`](STABILITY_HANDOFF.md) | 11-03 稳定性 / 性能修复：已修的、Delete 键没解决的证据和下一步、核实过还没修的 | 接手时先读；碰网络、扩图、缩略图、Delete 键之前 |
+| 2c | [`DELETE_AUDIT.md`](DELETE_AUDIT.md) | 图层删除全链路审计、源码修复及需实测的边界 | Delete / 垃圾桶 / 多选删除 |
 | 3 | [`DEVELOPMENT.md`](DEVELOPMENT.md) | 构建、打包、用 UPIA 安装、开发版、日志位置、已确认的 UXP 行为 | 要打包、安装或排查环境时 |
 | — | [`../README.md`](../README.md) | 面向用户的使用说明（1.0 时写的，部分功能没写进去） | 想知道用户看到什么时 |
 | — | [`../CHANGELOG.md`](../CHANGELOG.md) | 已发布版本的改动 | 发版时 |
 | — | [`history/`](history/) | 历史资料：V1.4 设计交接、0.1.x 实机测试交接。**已过时，只作参考** | 需要追溯最初的设计意图时 |
 
-## 当前状态一览（2026-11-02）
+## 当前状态一览（2026-11-04）
+
+- 11-04 WaveLayer 删除链路及快捷键补修：统一删除入口、逐项失败隔离、回读真实删除/选中结果、跨文档保护；快捷键改为捕获阶段监听，延迟恢复焦点，并排队一次明确的快速二次按键。`npm run typecheck`、102 项测试和 build 通过。**快捷键问题仍待 Photoshop 实机复测**。见 [`DELETE_AUDIT.md`](DELETE_AUDIT.md)。
+
+
+- 11-03 稳定性及图层交互：Delete 删除后自动选中下一存活图层；**新增单击图层列表空白处清空选择**（WavePlug 与 Photoshop 同步，支持取消多选，拖拽/工具栏/滚动条不触发）。源码已更新并重建 `dist/`，**未提交**；`npm run typecheck` 通过，`npm test` 101 项通过。Delete 用户反馈基本正常；空白取消选择已处理唯一背景图层限制；不透明度 / 填充已改为原版式百分比框与下拉滑块。**最近一次顶部重排及三个筛选图标 Tooltip 修改因用户反馈已撤回，现恢复到重排前的代码；此前百分比框改动仍需在 PS 实测。**见 [`STABILITY_HANDOFF.md`](STABILITY_HANDOFF.md)。
+
+以下是 11-02 的状态：
+
 
 - 分支 `local-test`。最后一个正式版是 1.1.0；`5e21588` 已提交但没发布；**整个图层面板都没提交**。只在用户要求时提交。
 - `npx tsc --noEmit -p .` 没有报错，`npm test` 88 个全过。

@@ -31,6 +31,13 @@ export class ThumbCache {
   }
 }
 
+/** When to ask Photoshop again after the `n`th failed read in a row: 2.5 s, 5 s, 10 s … at most a
+ *  minute. Photoshop refuses (-32005) while a tool, a paste or a smart object update is under way,
+ *  so a failure is never taken as "this layer has no picture". */
+export function thumbRetryDelay(n: number): number {
+  return Math.min(60_000, 2500 * 2 ** Math.max(0, n - 1));
+}
+
 export interface Bounds { left: number; top: number; right: number; bottom: number }
 
 /**

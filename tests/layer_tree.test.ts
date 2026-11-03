@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { type MenuItem, type RawLayer, ancestors, effectsOf, isVariantLayer, packChips, rawProblem, buildTree, clickSelect, contentUsers, dropPlan, dropZone, filterCounts, layerMenu, layerTags, linkPeers, lockPlan, lockedByGroup, sharedColors, visibleRows } from "../src/core/layers/tree.ts";
+import { type MenuItem, type RawLayer, ancestors, effectsOf, isVariantLayer, packChips, rawProblem, buildTree, clickSelect, contentUsers, deleteTargets, nextLayerAfterDelete, planLayerDeletion, dropPlan, dropZone, filterCounts, layerMenu, layerTags, linkPeers, lockPlan, lockedByGroup, sharedColors, selectionAfterLocalClear, visibleRows } from "../src/core/layers/tree.ts";
 import { ThumbCache, frameThumb, thumbArea } from "../src/core/layers/thumbs.ts";
 
 const raw = (id: number, name: string, kind: number, extra: Partial<RawLayer> = {}): RawLayer =>
@@ -60,6 +60,60 @@ test("图层列表: click, Ctrl and Shift selection", () => {
   assert.deepEqual(clickSelect(rows, [5], 4, 2, { ctrl: true, shift: true }), { ids: [5, 2, 3, 4], anchor: 4 });
   // the anchor scrolled away (filtered out): Shift acts like a plain click
   assert.deepEqual(clickSelect(rows, [9], 9, 2, { ctrl: false, shift: true }), { ids: [2], anchor: 2 });
+});
+
+test("空白取消选择: Photoshop 不支持取消选择时保持本地清空，PS 改选后恢复同步", () => {
+  assert.deepEqual(selectionAfterLocalClear([12, 3], [3, 12]), { selected: [], keepClear: true });
+  assert.deepEqual(selectionAfterLocalClear([1], [1]), { selected: [], keepClear: true });
+  assert.deepEqual(selectionAfterLocalClear([], [1]), { selected: [], keepClear: false });
+  assert.deepEqual(selectionAfterLocalClear([3], [1]), { selected: [3], keepClear: false });
+  assert.deepEqual(selectionAfterLocalClear([3], null), { selected: [3], keepClear: false });
+});
+
+test("删除: 过期和重复 id 不会造成误删，父组包含子层", () => {
+  const layers = buildTree(doc());
+  assert.deepEqual(deleteTargets(layers, [21, 22, 23, 24]), [21, 22, 24]);
+  assert.deepEqual(deleteTargets(layers, [23, 20, 22, 1, 20, 999]), [20, 1]);
+  assert.deepEqual(deleteTargets(layers, [1, 999, 1, 12]), [1, 12]);
+  assert.deepEqual(deleteTargets(layers, [999]), []);
+});
+
+test("删除预检: 多选只跳过背景、锁定、过期图层及重复父子选择", () => {
+  const layers = buildTree(doc()).map(l => ({
+    id: l.id, parentId: l.parentId, name: l.name,
+    background: l.kind === "background", locked: l.id === 24 || l.id === 30,
+  }));
+  const plan = planLayerDeletion(layers, [1, 24, 30, 999, 24, 20, 23]);
+  assert.deepEqual(plan.targets, [1, 20]);
+  assert.deepEqual(plan.skipped.map(s => [s.id, s.reason]), [
+    [999, "图层已不存在"],
+    [30, "背景图层需先解锁"],
+  ]);
+  // 24 is part of selected parent 20, so its own lock does not block deleting the group.
+  assert.deepEqual(planLayerDeletion(layers, [1, 24, 30]).targets, [1]);
+  assert.deepEqual(planLayerDeletion(layers, [1, 24, 30]).skipped.map(s => s.id), [24, 30]);
+  // Selecting a parent group suppresses its child; a locked parent isn't silently unlocked.
+  const lockedGroup = layers.map(l => l.id === 20 ? { ...l, locked: true } : l);
+  const group = planLayerDeletion(lockedGroup, [20, 21, 22, 23]);
+  assert.deepEqual(group.targets, []);
+  assert.deepEqual(group.skipped.map(s => s.id), [20]);
+  const empty = planLayerDeletion(layers, [999, 999]);
+  assert.deepEqual(empty.targets, []);
+  assert.equal(empty.skipped.length, 1);
+  assert.deepEqual(planLayerDeletion(layers, [21, 23]).targets, [21, 23]);
+});
+
+test("删除后自动选中下一存活图层；没有下一层时选上一层", () => {
+  const t = buildTree(doc());
+  assert.equal(nextLayerAfterDelete(t, [1]), 10); // topmost: down
+  assert.equal(nextLayerAfterDelete(t, [11]), 12); // within a group
+  assert.equal(nextLayerAfterDelete(t, [10]), 20); // deleting a group skips all its children
+  assert.equal(nextLayerAfterDelete(t, [20, 23, 30]), 12); // multi selection, fall back up
+  assert.equal(nextLayerAfterDelete(t, [21, 22, 23]), 24); // group and child selected
+  assert.equal(nextLayerAfterDelete(t, [24], [1, 10, 20, 21, 22, 24, 30]), 30);
+  assert.equal(nextLayerAfterDelete(t, [30], [1, 10, 20, 30]), 20); // closed group: visible row
+  assert.equal(nextLayerAfterDelete(t, [999]), null); // stale selection
+  assert.equal(nextLayerAfterDelete(t, t.map(l => l.id)), null); // none survive
 });
 
 test("拖动: drop zones of layers and groups", () => {
@@ -292,4 +346,14 @@ test("a layer's thumbnail shows its own bounds, a thin one widened to at most 4 
   const row = (y: number) => [...t.data.subarray(y * 48 * 3, y * 48 * 3 + 3)];
   assert.deepEqual(row(23), [0, 0, 0]);      // the line, black
   assert.notDeepEqual(row(0), [0, 0, 0]);    // checkerboard above it
+});
+
+test("thumbnail retries back off instead of giving up", async () => {
+  const { thumbRetryDelay } = await import("../src/core/layers/thumbs.ts");
+  assert.deepEqual([1, 2, 3, 4, 5].map(thumbRetryDelay), [2500, 5000, 10000, 20000, 40000]);
+  assert.equal(thumbRetryDelay(30), 60_000);
+  // a failed key shown as "no picture" is still offered again once marked stale
+  const c = new ThumbCache();
+  c.put(-5, null); c.invalidate([-5]);
+  assert.deepEqual(c.next([-5], 4), [-5]);
 });

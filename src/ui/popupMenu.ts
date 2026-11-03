@@ -2,7 +2,7 @@
 // right-click menu and the toolbar's fx / adjustment menus. Positioned in the host's own
 // coordinates (offsetTop), never from the mouse, and kept inside the host.
 
-import { h, isShown, replace, setShown } from "./dom.ts";
+import { h, isShown, listen, replace, setShown } from "./dom.ts";
 
 /** a colour square: `color` null is "no colour" (crossed out); `on` marks the current one */
 export type Swatch = { color: string | null; title: string; on?: boolean; run: () => void };
@@ -47,7 +47,7 @@ export function createPopup(host: HTMLElement) {
     el.style.top = top + "px";
   }
 
-  document.addEventListener("mousedown", e => { if (isShown(el) && !el.contains(e.target as Node)) close(); });
-  document.addEventListener("keydown", e => { if ((e as KeyboardEvent).key === "Escape") close(); });
+  listen(document, "mousedown", e => { if (isShown(el) && !el.contains(e.target as Node)) close(); });
+  listen(document, "keydown", e => { if ((e as KeyboardEvent).key === "Escape") close(); });
   return { open, close, isOpen: () => isShown(el) };
 }
