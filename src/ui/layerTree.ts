@@ -17,11 +17,12 @@ import { createSlider } from "./slider.ts";
 
 type Status = (text: string, kind?: "info" | "ok" | "error") => void;
 
-/** 缩略图大小, like Photoshop's 面板选项: row height, thumbnail box and icon scale (无: icons only) */
+/** 缩略图大小, like Photoshop's 面板选项: the thumbnail box, and the row height it needs (无: icons only).
+ *  Nothing else changes with it: icons, groups and sub rows keep the small size. */
 type Size = "off" | "s" | "m" | "l";
 const SIZES: Record<Size, { row: number; short: number; thumb: number; icon: number; label: string }> = {
-  off: { row: 32, short: 28, thumb: 0, icon: 1.2, label: "无" }, s: { row: 32, short: 28, thumb: 26, icon: 1.2, label: "小" },
-  m: { row: 44, short: 32, thumb: 38, icon: 1.35, label: "中" }, l: { row: 60, short: 38, thumb: 54, icon: 1.5, label: "大" },
+  off: { row: 30, short: 26, thumb: 0, icon: 1.15, label: "无" }, s: { row: 30, short: 26, thumb: 24, icon: 1.15, label: "小" },
+  m: { row: 44, short: 26, thumb: 38, icon: 1.15, label: "中" }, l: { row: 60, short: 26, thumb: 54, icon: 1.15, label: "大" },
 };
 let size: Size = (() => {
   try {
@@ -36,14 +37,18 @@ const isShort = (r: Row) => !!r.filter || (r.layer.kind === "group" && !isVarian
 const heightOf = (r: Row) => isShort(r) ? SHORT : ROW;
 const INDENT = 14;
 /** px from the row's left edge to where the indent starts: colour stripe, eye, 可移动, 可编辑, padding */
-const LEAD = 4 + 30 + 24 + 24 + 4;
+const LEAD = 4 + 22 + 18 + 18 + 2;
 /** icon and name of each kind of layer (in place of a thumbnail, or as a badge on it) */
 const KIND_ICON: Record<TreeLayer["kind"], [string, string]> = {
   pixel: ["image", "像素图层"], text: ["text", "文字图层"], shape: ["shape", "形状图层"], adjustment: ["adjust", "调整图层"], fill: ["fill", "填充图层"],
   smartObject: ["smart", "智能对象"], group: ["folder", "图层组"], background: ["image", "背景"], other: ["image", "图层"],
 };
 /** the panel's icons: Photoshop-style ones where there are, scaled with the 缩略图 size */
-const PS_ICON: Record<string, string> = { eye: "psEye", lock: "psLock", link: "psLink", mask: "psMask", adjust: "psAdjust", folder: "psFolder", folderOpen: "psFolderOpen", trash: "psTrash", clip: "psClip", text: "psText", newLayer: "psNew", smart: "psSmart" };
+const PS_ICON: Record<string, string> = {
+  eye: "psEye", lock: "psLock", link: "psLink", mask: "psMask", adjust: "psAdjust", folder: "psFolder", folderOpen: "psFolderOpen", trash: "psTrash", clip: "psClip", text: "psText",
+  newLayer: "psNew", smart: "psSmart", image: "psImage", shape: "psShape", fill: "psFill", move: "psMove", brush: "psBrush", filters: "psFilters",
+  copies: "psShared", single: "psSingle", external: "psExternal", vector: "psVector", layers: "psEditable",
+};
 /** 画板 frames: Photoshop's 图层颜色 labels; artboards without one take these in turn */
 const LABELS: [string, string, string][] = [["red", "红色", "#e5534b"], ["orange", "橙色", "#f0a04b"], ["yellowColor", "黄色", "#e3cf4a"], ["grain", "绿色", "#5cc26b"], ["blue", "蓝色", "#4f9cf0"], ["violet", "紫色", "#a77ff0"], ["gray", "灰色", "#a0a0a0"]];
 /** 自定义颜色: Photoshop's labels are only seven, so other colours are the panel's own, kept here by
@@ -103,7 +108,7 @@ const isSmartAction = (a: string): a is SmartAction => a in SMART_VERB;
 /** Status columns at the right of each row, always in this order; a column shows only when some
  *  layer in the document uses it, and stays blank on the rows that don't. */
 type Col = "content" | "filters" | "fx" | "chain" | "lock";
-const COLS: Col[] = ["content", "filters", "fx", "chain", "lock"];
+const COLS: Col[] = ["fx", "filters", "content", "chain", "lock"];
 
 interface RowEl { index: number; el: HTMLElement; eye: HTMLElement; move: HTMLElement; edit: HTMLElement; twisty: HTMLElement; name: HTMLElement; body: HTMLElement; key: string; id: number; sub: Row["filter"] | null }
 
@@ -244,7 +249,6 @@ export function createLayerTreeView(tree: LayerTree, status: Status, tools?: Lay
   /** 属性: what the selected layer is, in small type under the title */
   const infoEl = h("div", { class: "lt-info" });
   /** shared contents and their colour; the layers linked with the selection */
-  let cols = new Set<Col>(), colsKey = "";
   /** contents of the selected smart objects: only their instances show their colour */
   /** layers inside a fully locked group (their own locks wait until the group is unlocked) */
   let groupLocked = new Set<number>();
@@ -316,15 +320,15 @@ export function createLayerTreeView(tree: LayerTree, status: Status, tools?: Lay
     return b;
   });
 
-  const FILTERS: [Filter, string, string][] = [
-    ["all", "全部", "显示所有图层"],
-    ["shared", "共用", "只看和其他图层共用内容的智能对象（改一个全部跟着变）"],
-    ["uneditable", "不可编辑", "只看内容是图片、矢量文件或外部链接的智能对象（可以用下面的「转为可编辑」）"],
-    ["ai", "AI 结果", "只看 WavePlug 生成的结果组"],
+  // 共用 / 不可编辑 / AI 结果: icons beside the kinds; on = only those, click again for all layers
+  const FILTERS: [Filter, string, string, string][] = [
+    ["shared", "共用", "psShared", "只看和其他图层共用内容的智能对象（改一个全部跟着变）"],
+    ["uneditable", "不可编辑", "psUneditable", "只看内容是图片、矢量文件或外部链接的智能对象（可以用下面的「转为可编辑」）"],
+    ["ai", "AI 结果", "spark", "只看 WavePlug 生成的结果组"],
   ];
-  const filterBtns = FILTERS.map(([f, , tip]) => {
-    const b = h("button", { class: "seg-btn lt-filter", title: tip });
-    b.addEventListener("click", () => { filter = filter === f && f !== "all" ? "all" : f; firstRow = 0; render(); });
+  const filterBtns = FILTERS.map(([f, , ico]) => {
+    const b = h("button", { class: "lt-kindbtn lt-fbtn" }, ic(ico, 15));
+    b.addEventListener("click", () => { filter = filter === f ? "all" : f; firstRow = 0; render(); });
     return b;
   });
 
@@ -619,7 +623,7 @@ export function createLayerTreeView(tree: LayerTree, status: Status, tools?: Lay
     const maskThumb = l.mask && thumbsOn ? thumbs().get(maskKey(l.id)) : undefined;
     const vmaskThumb = l.vmask && thumbsOn ? thumbs().get(vmaskKey(l.id)) : undefined;
     const key = [l.id, l.name, l.visible, l.locked, l.lockAll, l.lockPosition, l.lockPixels, l.lockTransparency, groupLocked.has(l.id), l.links.length, peers.has(l.id), sharedColor(l), l.mask, l.maskOn, l.clipped, l.clipBase, l.effects, l.effectsOn, l.depth, l.children, l.ai?.variations, l.smart?.contentId, l.smart?.linked, l.smart?.file, l.filters.length, l.filtersOn, l.effectList.map(e => +e.enabled).join(""), groupColor.get(l.id),
-      users.get(l.smart?.contentId ?? "") ?? 0, sel, open, row.context, moving, thumbs().version(l.id), thumbs().version(maskKey(l.id)), thumbs().version(vmaskKey(l.id)), l.vmask, l.vmaskOn, l.maskLinked, l.vmaskLinked, l.color, customOf(l.id), maskView?.id === l.id, hasPicture(l), framed(l), thumbW(l), openSubs().has(-l.id), shown, shown !== null ? thumbs().version(shown) : 0, l.ai?.shown, colsKey].join("|");
+      users.get(l.smart?.contentId ?? "") ?? 0, sel, open, row.context, moving, thumbs().version(l.id), thumbs().version(maskKey(l.id)), thumbs().version(vmaskKey(l.id)), l.vmask, l.vmaskOn, l.maskLinked, l.vmaskLinked, l.color, customOf(l.id), maskView?.id === l.id, hasPicture(l), framed(l), thumbW(l), openSubs().has(-l.id), shown, shown !== null ? thumbs().version(shown) : 0, l.ai?.shown].join("|");
     r.index = index;
     setShown(r.el, true);
     if (key === r.key) return;
@@ -675,7 +679,8 @@ export function createLayerTreeView(tree: LayerTree, status: Status, tools?: Lay
       l.vmask ? maskChain(l, true) : null,
       l.vmask ? vmaskCell(l, vmaskThumb) : null,
       r.name,
-      ...COLS.filter(c => cols.has(c)).map(c => cell(l, c, color, peer)));
+      // the status icons this layer has, at the right in a fixed order and spacing (no empty places)
+      h("div", { class: "lt-cells" }, ...COLS.filter(c => cellUsed(l, c)).map(c => cell(l, c, color, peer, index))));
     r.el.title = l.name + (vl ? `（变体图层，${l.ai!.variations} 个变体：双击 ✦ 选择变体；PS 图层面板里是图层组）` : l.kind === "group" ? `（图层组，${l.children} 个图层）` : "") + (l.clipBase ? "（剪贴蒙版的基底图层）" : "");
   }
 
@@ -763,12 +768,13 @@ export function createLayerTreeView(tree: LayerTree, status: Status, tools?: Lay
   }
 
   /** fx: the layer has effects; click opens 图层样式 */
-  function fxCell(l: TreeLayer): HTMLElement {
+  function fxCell(l: TreeLayer, row: number): HTMLElement {
     const open = openSubs().has(l.id);
     const cell = h("span", { class: "lt-col col-fx lt-fx" + (l.effectsOn ? "" : " off") + (open ? " open" : ""),
-      title: (l.effectsOn ? "图层样式" : "图层样式（已隐藏）") + `：单击${open ? "收起" : "展开"}效果；双击缩略图打开图层样式` }, "fx");
-    cell.addEventListener("mousedown", e => e.stopPropagation());
-    cell.addEventListener("click", e => { e.stopPropagation(); toggleSub(l.id); });
+      title: (l.effectsOn ? "图层样式" : "图层样式（已隐藏）") + `：单击${open ? "收起" : "展开"}效果；拖到别的图层上移动整个样式（按住 Alt 复制），拖到垃圾桶清除；双击缩略图打开图层样式` }, "fx");
+    // dragged like Photoshop's fx icon: onto another layer (move; Alt: copy), the trash (clear)
+    cell.addEventListener("mousedown", e => { e.stopPropagation(); startDrag(l.id, e as MouseEvent, { what: { kind: "effects", layerId: l.id }, row }); });
+    cell.addEventListener("click", e => { e.stopPropagation(); if (!suppressClick) toggleSub(l.id); });
     return cell;
   }
 
@@ -784,7 +790,7 @@ export function createLayerTreeView(tree: LayerTree, status: Status, tools?: Lay
   }
 
   /** Column `c` of layer `l`: its icon, or a blank of the same width. */
-  function cell(l: TreeLayer, c: Col, color: number | undefined, peer: boolean): HTMLElement {
+  function cell(l: TreeLayer, c: Col, color: number | undefined, peer: boolean, row: number): HTMLElement {
     const box = (cls: string, tip: string, ...kids: (Node | null)[]) => h("span", { class: `lt-col col-${c} ${cls}`, title: tip }, ...kids);
     if (!cellUsed(l, c)) return h("span", { class: `lt-col col-${c}` });
     const tag = (cls: string[]) => layerTags(l, users).find(t => cls.includes(t.cls.split(" ")[0]));
@@ -793,12 +799,13 @@ export function createLayerTreeView(tree: LayerTree, status: Status, tools?: Lay
       case "filters": {
         // a click opens / closes the 智能滤镜 row, as the fx cell does the effects
         const t = tag(["filters"])!, open = openSubs().has(-l.id);
-        const b = box(t.cls + " lt-subcell" + (open ? " open" : ""), `智能滤镜：单击${open ? "收起" : "展开"}\n` + t.tip, ic("filters", 14));
-        b.addEventListener("mousedown", e => e.stopPropagation());
-        b.addEventListener("click", e => { e.stopPropagation(); toggleSub(-l.id); });
+        const b = box(t.cls + " lt-subcell" + (open ? " open" : ""), `智能滤镜：单击${open ? "收起" : "展开"}；拖到别的智能对象上移动全部（按住 Alt 复制），拖到垃圾桶清除\n` + t.tip, ic("filters", 14));
+        // dragged like Photoshop's smart filter icon: onto another smart object (move; Alt: copy), the trash (clear)
+        b.addEventListener("mousedown", e => { e.stopPropagation(); startDrag(l.id, e as MouseEvent, { what: { kind: "filters", layerId: l.id }, row }); });
+        b.addEventListener("click", e => { e.stopPropagation(); if (!suppressClick) toggleSub(-l.id); });
         return b;
       }
-      case "fx": return fxCell(l);
+      case "fx": return fxCell(l, row);
       case "chain": return box("lt-chain" + (peer ? " peer" : ""), peer ? "和选中的图层链接在一起" : `和 ${l.links.length} 个图层链接（一起移动、变换）`, ic("link", 13));
       case "lock": return box("lt-lock" + (l.lockAll ? "" : " part"), l.lockAll ? "锁定全部（上方的锁定按钮可以解开）" : "锁定透明像素（上方的锁定按钮可以解开）", ic("lock", 13));
     }
@@ -1015,8 +1022,6 @@ export function createLayerTreeView(tree: LayerTree, status: Status, tools?: Lay
     collapsed = new Set(layers.filter(l => l.kind === "group" && !exp.has(l.id)).map(l => l.id));
     rows = layoutEffects(visibleRows(layers, collapsed, filter, users, openSubs(), query));
     groupLocked = lockedByGroup(layers);
-    cols = new Set(COLS.filter(c => layers.some(l => cellUsed(l, c))));
-    colsKey = [...cols].join(",");
     KINDS.forEach(([k], i) => kindBtns[i].classList.toggle("on", query.kinds.has(k)));
     activeContents = new Set(layers.filter(l => selected.has(l.id) && l.smart?.contentId).map(l => l.smart!.contentId!));
     boardOf = new Map(); boardColor = new Map();
@@ -1035,11 +1040,11 @@ export function createLayerTreeView(tree: LayerTree, status: Status, tools?: Lay
     replace(peersBtn, ic("link", 12), ` 链接 ${peerList.length}`);
     setShown(peersBtn, peerList.length > 0);
     const counts = filterCounts(layers, users);
-    FILTERS.forEach(([f, label], i) => {
-      const n = f === "all" ? 0 : counts[f];
-      replace(filterBtns[i], f === "all" ? label : `${label} ${n}`);
+    FILTERS.forEach(([f, label, , tip], i) => {
+      const n = counts[f as Exclude<Filter, "all">];
+      filterBtns[i].title = `${label}（${n} 个）：${tip}${filter === f ? "；再点一次显示全部" : ""}`;
       filterBtns[i].classList.toggle("on", filter === f);
-      (filterBtns[i] as any).disabled = docId === null || (f !== "all" && !n && filter !== f);
+      (filterBtns[i] as any).disabled = docId === null || (!n && filter !== f);
     });
     replace(countEl, docId === null ? "" : `${layers.length} 个` + (selected.size ? ` · 已选 ${selected.size}` : ""));
     (openAll as any).disabled = (closeAll as any).disabled = docId === null || filter !== "all" || queryActive(query);
@@ -1741,8 +1746,7 @@ export function createLayerTreeView(tree: LayerTree, status: Status, tools?: Lay
   el.append(
     h("div", { class: "card-head" }, h("span", { class: "label" }, "图层"), countEl, h("span", { class: "grow" }), peersBtn),
     infoEl,
-    h("div", { class: "lt-find" }, searchBox, h("div", { class: "lt-kinds" }, ...kindBtns)),
-    h("div", { class: "seg lt-seg" }, ...filterBtns),
+    h("div", { class: "lt-find" }, searchBox, h("div", { class: "lt-kinds" }, ...kindBtns, h("span", { class: "lt-kinds-sep" }), ...filterBtns)),
     props, opacity.row, fillPct.row,
     list,
     h("div", { class: "lt-foot" }, h("div", { class: "lt-foot-btns" }, peekBtn, thumbBtn, openAll, closeAll), bar));

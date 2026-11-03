@@ -356,7 +356,7 @@ button, .ub { font: inherit; color: inherit; background: none; border: 0; paddin
 .lt-row.on.hover { background: rgba(63, 181, 159, .38); }
 .lt-row.context .lt-name { color: var(--muted); }
 .lt-row.off .lt-name { color: var(--muted); }
-.lt-eye { width: 30px; height: 100%; flex: none; display: flex; align-items: center; justify-content: center; color: var(--text); cursor: pointer; border-right: 1px solid rgba(255, 255, 255, .06); }
+.lt-eye { width: 22px; height: 100%; flex: none; display: flex; align-items: center; justify-content: center; color: var(--text); cursor: pointer; border-right: 1px solid rgba(255, 255, 255, .06); }
 .lt-eye.hidden::after { content: ""; width: 8px; height: 8px; border: 1px solid var(--faint); border-radius: 2px; }
 .lt-eye:hover { background: var(--hover); }
 .lt-body { flex: 1 1 auto; min-width: 0; display: flex; align-items: center; height: 100%; padding-left: 4px; }
@@ -515,11 +515,11 @@ button, .ub { font: inherit; color: inherit; background: none; border: 0; paddin
 .lt .card-head > .muted { flex: 0 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; }
 .lt .card-head > .grow { flex: 1 1 auto; }
 /* 可移动 / 可编辑 switches after the eye; nesting guide lines */
-.lt-toggle { width: 24px; height: 100%; flex: none; display: flex; align-items: center; justify-content: center; color: var(--muted); cursor: pointer; }
+.lt-toggle { width: 18px; height: 100%; flex: none; display: flex; align-items: center; justify-content: center; color: var(--muted); cursor: pointer; }
 .lt-toggle:hover { background: var(--hover); color: var(--text); }
 .lt-toggle.off { color: var(--warn); opacity: .9; }
 .lt-toggle.off .icon { opacity: .45; }
-.lt-toggle.off::after { content: ""; position: absolute; width: 14px; height: 2px; background: var(--warn); transform: rotate(-45deg); }
+.lt-toggle.off::after { content: ""; position: absolute; width: 12px; height: 2px; background: var(--warn); transform: rotate(-45deg); }
 .lt-toggle { position: relative; }
 .lt-indent { display: flex; flex: none; height: 100%; }
 .lt-guide { width: 7px; margin-left: 6px; height: 100%; flex: none; border-left: 1px solid rgba(255, 255, 255, .38); }
@@ -653,9 +653,9 @@ button, .ub { font: inherit; color: inherit; background: none; border: 0; paddin
 .lt-pic { width: 100%; height: 100%; background-repeat: no-repeat; background-position: center; background-size: contain; }
 
 /* 缩略图 size (无 / 小 / 中 / 大): row height, thumbnail box, the box's column; set on the list */
-.lt-list { --lt-row: 44px; --lt-short: 32px; --lt-thumb: 38px; --lt-mark: 40px; }
-.lt-list.sz-off, .lt-list.sz-s { --lt-row: 32px; --lt-short: 28px; --lt-thumb: 26px; --lt-mark: 28px; }
-.lt-list.sz-l { --lt-row: 60px; --lt-short: 38px; --lt-thumb: 54px; --lt-mark: 56px; }
+.lt-list { --lt-row: 44px; --lt-short: 26px; --lt-thumb: 38px; --lt-mark: 40px; }
+.lt-list.sz-off, .lt-list.sz-s { --lt-row: 30px; --lt-short: 26px; --lt-thumb: 24px; --lt-mark: 26px; }
+.lt-list.sz-l { --lt-row: 60px; --lt-short: 26px; --lt-thumb: 54px; --lt-mark: 56px; }
 /* groups and sub-rows (effects, smart filters, variations) are shorter (layerTree SIZES.short) */
 .lt-row.short { height: var(--lt-short); }
 .lt-list.sz-l .lt-badge { width: 16px; height: 16px; }
@@ -675,3 +675,15 @@ button, .ub { font: inherit; color: inherit; background: none; border: 0; paddin
 .lt-row.ab-head .lt-guide { border-left-color: rgba(0, 0, 0, .35); }
 .lt-row.ab-head.on::after { content: ""; position: absolute; left: 0; top: 0; right: 0; bottom: 0; background: rgba(255, 255, 255, .28); pointer-events: none; }
 .lt-row.ab-head { border-radius: 5px 5px 0 0; }
+
+/* status icons at the right of a row: only the ones the layer has, in a fixed order and spacing */
+.lt-cells { flex: none; display: flex; align-items: center; margin-left: auto; padding-left: 6px; }
+.lt-cells .lt-col { width: auto; min-width: 16px; margin-left: 4px; }
+.lt-cells .lt-col:first-child { margin-left: 0; }
+.lt-cells .lt-fx, .lt-cells .lt-subcell { cursor: grab; }
+
+/* search, kinds and the 共用 / 不可编辑 / AI 结果 filters on one compact row */
+.lt-kinds .lt-kindbtn { width: 24px; height: 24px; }
+.lt-kinds-sep { width: 1px; height: 16px; margin: 0 4px; background: var(--field-line); align-self: center; }
+.lt-fbtn.on { background: var(--accent); color: var(--accent-ink); }
+.lt-fbtn.is-disabled { opacity: .35; }

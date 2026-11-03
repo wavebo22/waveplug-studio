@@ -85,7 +85,9 @@ const PATHS: Record<string, string> = {
   checker: "M4 4h12v12H4zM4 4h4v4H4zM12 4h4v4h-4zM8 8h4v4H8zM4 12h4v4H4zM12 12h4v4h-4z",
   lock: "M6.5 9V7a3.5 3.5 0 0 1 7 0v2M5 9h10v8H5z",
   eye: "M2 10s3-5.5 8-5.5 8 5.5 8 5.5-3 5.5-8 5.5S2 10 2 10zM10 12.3a2.3 2.3 0 1 0 0-4.6 2.3 2.3 0 0 0 0 4.6z",
-  // the 图层 panel's set, drawn in the manner of Photoshop's Layers panel (outline + solid parts, FILLS)
+  // the 图层 panel's set, drawn in the manner of Photoshop's Layers panel (outline + solid parts, FILLS):
+  // eye, lock, chain, mask (frame + dot), half circle (adjustment / fill), folder, square + plus (new),
+  // page + corner (smart object), square with anchors (shape), funnel (smart filters)
   psEye: "M2 10c2-3.6 4.8-5.5 8-5.5s6 1.9 8 5.5c-2 3.6-4.8 5.5-8 5.5S4 13.6 2 10z",
   psLock: "M7 9V6.8a3 3 0 0 1 6 0V9",
   psLink: "M8.6 11.4l2.8-2.8M9.2 6.6l1.4-1.4a2.8 2.8 0 0 1 4 4l-1.4 1.4M10.8 13.4l-1.4 1.4a2.8 2.8 0 0 1-4-4l1.4-1.4",
@@ -96,8 +98,20 @@ const PATHS: Record<string, string> = {
   psTrash: "M4.5 6h11M8 6V4.5h4V6M6 6l.8 10h6.4l.8-10M8.5 8.5v5M11.5 8.5v5",
   psClip: "M6 4v6.5a1.5 1.5 0 0 0 1.5 1.5H15M12.5 9.5L15 12l-2.5 2.5",
   psText: "",
-  psNew: "M5 3.5h7l3 3v10H5zM10 8.5v5M7.5 11h5",
-  psSmart: "M3.5 4.5h13v11h-13zM7 8h6v4H7z",
+  psNew: "M4 4h12v12H4zM10 7v6M7 10h6",
+  psSmart: "M3.5 3.5h13v13h-13z",
+  psImage: "M3 4h14v12H3zM3 13.5l4-4 3 3 2-2 5 5",
+  psShape: "M5 5h10v10H5z",
+  psFill: "M4 4h12v12H4z",
+  psMove: "M10 2.5v15M2.5 10h15M8 4.5l2-2 2 2M8 15.5l2 2 2-2M4.5 8l-2 2 2 2M15.5 8l2 2-2 2",
+  psBrush: "M15.5 3l1.5 1.5-6.5 7-2-2zM8.2 10.8c-1.6-.4-3 .6-3.2 2.4-.1 1-.6 1.9-1.6 2.3 2.3.8 4.6.3 5.6-1.4.5-.9.3-2.2-.8-3.3z",
+  psFilters: "M3 4h14l-5.5 6.5V16l-3-1.5v-4z",
+  psShared: "M6.5 3.5h10v10h-10zM3.5 6.5v10h10",
+  psUneditable: "M3.5 3.5h13v13h-13zM4 16L16 4",
+  psSingle: "M4.5 4.5h11v11h-11z",
+  psExternal: "M9 4H4v12h12v-5M12 3h5v5M17 3l-7 7",
+  psVector: "M10 3.5L4 16.5M10 3.5l6 13M6.5 11.5h7",
+  psEditable: "M3.5 3.5h13v13h-13zM7 13l1-3 5-5 2 2-5 5z",
 };
 
 /** solid parts drawn over an icon's outline (pupil, lock body …) */
@@ -107,6 +121,12 @@ const FILLS: Record<string, string> = {
   psMask: "M10 6.8a3.2 3.2 0 1 1 0 6.4 3.2 3.2 0 0 1 0-6.4z",
   psAdjust: "M10 3.5a6.5 6.5 0 0 0 0 13z",
   psText: "M4.5 4h11v2.4h-4.3V16H8.8V6.4H4.5z",
+  psSmart: "M10 10h6.5v6.5H10z",
+  psImage: "M13.5 6a1.5 1.5 0 1 1 0 3 1.5 1.5 0 0 1 0-3z",
+  psShape: "M3.3 3.3h3.4v3.4H3.3zM13.3 3.3h3.4v3.4h-3.4zM3.3 13.3h3.4v3.4H3.3zM13.3 13.3h3.4v3.4h-3.4z",
+  psFill: "M4 16L16 4v12z",
+  psSingle: "M7.5 7.5h5v5h-5z",
+  psVector: "M8.6 2.6h2.8v2.8H8.6z",
 };
 
 export function icon(name: keyof typeof PATHS | string, size = 14): SVGElement {
