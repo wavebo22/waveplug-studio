@@ -116,6 +116,8 @@ interface RowEl { index: number; el: HTMLElement; eye: HTMLElement; move: HTMLEl
  *  tools to the right-click menu. */
 export function createLayerTreeView(tree: LayerTree, status: Status, tools?: LayerTools) {
   let docId: number | null = null, layers: TreeLayer[] = [], users = new Map<string, number>(), canvas = { width: 0, height: 0 };
+  /** the layers by id (kept with `layers`): lookups in drawing and dragging, which run for every row */
+  let byId = new Map<number, TreeLayer>();
   let selected = new Set<number>(), rows: Row[] = [], filter: Filter = "all", anchor: number | null = null;
   /** collapsed groups per document; groups start collapsed */
   const expandedByDoc = new Map<number, Set<number>>();
@@ -182,7 +184,7 @@ export function createLayerTreeView(tree: LayerTree, status: Status, tools?: Lay
   const customOf = (id: number): string | undefined => customColors[docKey]?.[id];
   /** what a layer's (and its masks') thumbnail shows, as in Photoshop: its artboard, or the whole canvas */
   function areaOf(l: TreeLayer): { left: number; top: number; right: number; bottom: number } {
-    const b = boardOf.get(l.id), board = b === undefined ? undefined : layers.find(x => x.id === b);
+    const b = boardOf.get(l.id), board = b === undefined ? undefined : byId.get(b);
     if (board?.board) return board.board;
     if (board && board.width > 0 && board.height > 0) return { left: board.left, top: board.top, right: board.left + board.width, bottom: board.top + board.height };
     return { left: 0, top: 0, right: Math.max(1, canvas.width), bottom: Math.max(1, canvas.height) };
@@ -483,7 +485,7 @@ export function createLayerTreeView(tree: LayerTree, status: Status, tools?: Lay
     replace(r.body, h("div", { class: "lt-indent" }, ...Array.from({ length: l.depth + 1 }, () => h("span", { class: "lt-guide" }))),
       fx ? h("div", { class: "lt-mark" }, more ? null : h("span", { class: "lt-kind k-fx" }, "fx"))
         : h("div", { class: "lt-mark has-thumb" }, more ? null : filterMaskCell(l)),
-      fx ? effectChips(l, places, index, held) : filterChips(l, places, index, held));
+      fx ? effectChips(l, places, r, held) : filterChips(l, places, r, held));
     r.el.title = fx ? `${l.name} 的图层样式（双击打开）。拖动这一行到别的图层上：移动整个样式（按住 Alt 复制，替换那个图层原有的样式）；拖到垃圾桶：清除`
       : `${l.name} 的智能滤镜，从右往左依次应用（和 PS 里从下往上一样）。拖动这一行到别的智能对象上：移动全部（按住 Alt 复制）；拖到垃圾桶：全部清除`;
   }
@@ -497,7 +499,7 @@ export function createLayerTreeView(tree: LayerTree, status: Status, tools?: Lay
       if (r.filter?.kind === "variants") {
         const avail = w - LEAD - (r.layer.depth + 1) * INDENT - 10;
         // by number (v1 first), as the main panel lists them
-        const num = (id: number) => Number(/^v(\d+)/.exec(layers.find(x => x.id === id)?.name ?? "")?.[1] ?? 0);
+        const num = (id: number) => Number(/^v(\d+)/.exec(byId.get(id)?.name ?? "")?.[1] ?? 0);
         const ids = r.layer.ai!.ids, order = ids.map((_, i) => i).sort((a, b) => num(ids[a]) - num(ids[b]));
         const lines = packChips(order.map(() => VCHIP_W), avail);
         return lines.map((chips, line) => ({ ...r, filter: { ...r.filter!, line, chips: chips.map(k => order[k]) } }));
@@ -515,7 +517,7 @@ export function createLayerTreeView(tree: LayerTree, status: Status, tools?: Lay
    *  rather than two `toggle`s — told from the presses, as UXP can lose the second click event; the
    *  native dblclick backs it up. A press can also start dragging the chip (`what`): then nothing
    *  is switched; held still, the switch comes on release. */
-  function chipPress(chip: HTMLElement, layerId: number, row: number, toggle: () => void, edit: () => void, what: (m: MouseEvent) => SubDrag) {
+  function chipPress(chip: HTMLElement, layerId: number, row: RowEl, toggle: () => void, edit: () => void, what: (m: MouseEvent) => SubDrag) {
     let pending: ReturnType<typeof setTimeout> | null = null, editedAt = 0;
     const twice = () => {
       if (pending) { clearTimeout(pending); pending = null; }
@@ -529,7 +531,7 @@ export function createLayerTreeView(tree: LayerTree, status: Status, tools?: Lay
       if (m.button !== 0) return;
       if (pending) { twice(); return; }
       const grabbed = what(m);
-      startDrag(layerId, m, { what: grabbed, row });
+      startDrag(layerId, m, { what: grabbed, row: row.index });
       pending = setTimeout(() => {
         pending = null;
         if ("dragged" in grabbed && grabbed.dragged) return;
@@ -547,7 +549,7 @@ export function createLayerTreeView(tree: LayerTree, status: Status, tools?: Lay
 
   /** 图层样式 on one row: each effect a chip, click to switch it, double-click for the dialog, drag it
    *  onto another layer (move; Alt: copy), onto 新建图层 (another one here) or the trash (delete) */
-  function effectChips(l: TreeLayer, places: number[], row: number, held: string): HTMLElement {
+  function effectChips(l: TreeLayer, places: number[], row: RowEl, held: string): HTMLElement {
     return h("div", { class: "lt-chips" }, ...places.map(i => l.effectList[i]).map(e => {
       const chip = h("span", { class: "lt-chip" + (e.enabled && l.effectsOn ? "" : " off") + (held === e.key + e.multi ? " held" : ""),
         title: `${e.name}：单击${e.enabled ? "隐藏" : "显示"}，双击打开图层样式。拖到别的图层上移动（按住 Alt 复制），拖到「新建图层」按钮上在本图层再加一个，拖到垃圾桶删除` }, e.name);
@@ -562,7 +564,7 @@ export function createLayerTreeView(tree: LayerTree, status: Status, tools?: Lay
   /** 智能滤镜 on one row, in Photoshop's order (it applies them bottom up: here right to left): click
    *  to switch one, double-click for its dialog, drag it along the row (reorder) or onto another smart
    *  object (move; Alt: copy), onto 新建图层 (a copy here) or the trash (delete) */
-  function filterChips(l: TreeLayer, places: number[], row: number, held: string): HTMLElement {
+  function filterChips(l: TreeLayer, places: number[], row: RowEl, held: string): HTMLElement {
     return h("div", { class: "lt-chips" }, ...places.map(i => {
       const f = l.filters[i];
       const chip = h("span", { class: "lt-chip lt-fchip" + (f.enabled && l.filtersOn ? "" : " off") + (held === "f" + i ? " held" : ""),
@@ -680,7 +682,7 @@ export function createLayerTreeView(tree: LayerTree, status: Status, tools?: Lay
       l.vmask ? vmaskCell(l, vmaskThumb) : null,
       r.name,
       // the status icons this layer has, at the right in a fixed order and spacing (no empty places)
-      h("div", { class: "lt-cells" }, ...COLS.filter(c => cellUsed(l, c)).map(c => cell(l, c, color, peer, index))));
+      h("div", { class: "lt-cells" }, ...COLS.filter(c => cellUsed(l, c)).map(c => cell(l, c, color, peer))));
     r.el.title = l.name + (vl ? `（变体图层，${l.ai!.variations} 个变体：双击 ✦ 选择变体；PS 图层面板里是图层组）` : l.kind === "group" ? `（图层组，${l.children} 个图层）` : "") + (l.clipBase ? "（剪贴蒙版的基底图层）" : "");
   }
 
@@ -768,12 +770,12 @@ export function createLayerTreeView(tree: LayerTree, status: Status, tools?: Lay
   }
 
   /** fx: the layer has effects; click opens 图层样式 */
-  function fxCell(l: TreeLayer, row: number): HTMLElement {
+  function fxCell(l: TreeLayer): HTMLElement {
     const open = openSubs().has(l.id);
     const cell = h("span", { class: "lt-col col-fx lt-fx" + (l.effectsOn ? "" : " off") + (open ? " open" : ""),
       title: (l.effectsOn ? "图层样式" : "图层样式（已隐藏）") + `：单击${open ? "收起" : "展开"}效果；拖到别的图层上移动整个样式（按住 Alt 复制），拖到垃圾桶清除；双击缩略图打开图层样式` }, "fx");
     // dragged like Photoshop's fx icon: onto another layer (move; Alt: copy), the trash (clear)
-    cell.addEventListener("mousedown", e => { e.stopPropagation(); startDrag(l.id, e as MouseEvent, { what: { kind: "effects", layerId: l.id }, row }); });
+    cell.addEventListener("mousedown", e => { e.stopPropagation(); startDrag(l.id, e as MouseEvent, { what: { kind: "effects", layerId: l.id }, row: rowOf(l.id) }); });
     cell.addEventListener("click", e => { e.stopPropagation(); if (!suppressClick) toggleSub(l.id); });
     return cell;
   }
@@ -790,7 +792,9 @@ export function createLayerTreeView(tree: LayerTree, status: Status, tools?: Lay
   }
 
   /** Column `c` of layer `l`: its icon, or a blank of the same width. */
-  function cell(l: TreeLayer, c: Col, color: number | undefined, peer: boolean, row: number): HTMLElement {
+  /** a layer's own row in the list now (rows move as groups open and the list scrolls) */
+  const rowOf = (id: number) => Math.max(0, rows.findIndex(x => x.layer.id === id && !x.filter));
+  function cell(l: TreeLayer, c: Col, color: number | undefined, peer: boolean): HTMLElement {
     const box = (cls: string, tip: string, ...kids: (Node | null)[]) => h("span", { class: `lt-col col-${c} ${cls}`, title: tip }, ...kids);
     if (!cellUsed(l, c)) return h("span", { class: `lt-col col-${c}` });
     const tag = (cls: string[]) => layerTags(l, users).find(t => cls.includes(t.cls.split(" ")[0]));
@@ -801,11 +805,11 @@ export function createLayerTreeView(tree: LayerTree, status: Status, tools?: Lay
         const t = tag(["filters"])!, open = openSubs().has(-l.id);
         const b = box(t.cls + " lt-subcell" + (open ? " open" : ""), `智能滤镜：单击${open ? "收起" : "展开"}；拖到别的智能对象上移动全部（按住 Alt 复制），拖到垃圾桶清除\n` + t.tip, ic("filters", 14));
         // dragged like Photoshop's smart filter icon: onto another smart object (move; Alt: copy), the trash (clear)
-        b.addEventListener("mousedown", e => { e.stopPropagation(); startDrag(l.id, e as MouseEvent, { what: { kind: "filters", layerId: l.id }, row }); });
+        b.addEventListener("mousedown", e => { e.stopPropagation(); startDrag(l.id, e as MouseEvent, { what: { kind: "filters", layerId: l.id }, row: rowOf(l.id) }); });
         b.addEventListener("click", e => { e.stopPropagation(); if (!suppressClick) toggleSub(-l.id); });
         return b;
       }
-      case "fx": return fxCell(l, row);
+      case "fx": return fxCell(l);
       case "chain": return box("lt-chain" + (peer ? " peer" : ""), peer ? "和选中的图层链接在一起" : `和 ${l.links.length} 个图层链接（一起移动、变换）`, ic("link", 13));
       case "lock": return box("lt-lock" + (l.lockAll ? "" : " part"), l.lockAll ? "锁定全部（上方的锁定按钮可以解开）" : "锁定透明像素（上方的锁定按钮可以解开）", ic("lock", 13));
     }
@@ -1032,7 +1036,10 @@ export function createLayerTreeView(tree: LayerTree, status: Status, tools?: Lay
       if (board !== null) boardOf.set(l.id, board);
     }
     groupColor = new Map();
-    for (const l of layers) { const c = sharedColor(l); if (c !== undefined) for (const g of ancestors(layers, l.id)) if (!groupColor.has(g)) groupColor.set(g, c); }
+    for (const l of layers) {
+      const c = sharedColor(l);
+      if (c !== undefined) for (let g = l.parentId; g !== null && !groupColor.has(g); g = byId.get(g)?.parentId ?? null) groupColor.set(g, c);
+    }
     peerList = linkPeers(layers, selected);
     const peerKey = peerList.join(",");
     if (peerKey !== [...peers].join(",")) peerAt = 0;
@@ -1096,7 +1103,7 @@ export function createLayerTreeView(tree: LayerTree, status: Status, tools?: Lay
         // the list chose layers while this was read: keep its selection and read again afterwards
         const stale = selecting > 0 || gen !== selectGen;
         const before = [...selected].sort().join(",");
-        if (!r) { docId = null; layers = []; selected = new Set(); users = new Map(); }
+        if (!r) { docId = null; layers = []; byId = new Map(); selected = new Set(); users = new Map(); }
         else {
           docKey = r.docKey;
           if (r.docId !== docId) { firstRow = 0; anchor = null; }
@@ -1111,7 +1118,7 @@ export function createLayerTreeView(tree: LayerTree, status: Status, tools?: Lay
           }
           if ((!peekHold && !stale) || r.docId !== docId) selected = new Set(r.selected);
           else if (stale && !peekHold) again = selecting === 0;
-          docId = r.docId; layers = r.layers; users = contentUsers(layers); colors = sharedColors(layers, users); canvas = { width: r.width, height: r.height };
+          docId = r.docId; layers = r.layers; byId = new Map(layers.map(l => [l.id, l])); users = contentUsers(layers); colors = sharedColors(layers, users); canvas = { width: r.width, height: r.height };
         }
         const now = [...selected].sort().join(",");
         if (now !== before && now !== ownSelect && selected.size) reveal(); else render();
@@ -1161,7 +1168,7 @@ export function createLayerTreeView(tree: LayerTree, status: Status, tools?: Lay
       paintSet(l, paint.col, paint.to);
     }
     for (const [id, was] of paint.orig) {
-      const l = layers.find(x => x.id === id);
+      const l = byId.get(id);
       if (l && !inRange.has(id)) paintSet(l, paint.col, was);
     }
     render();
@@ -1171,7 +1178,7 @@ export function createLayerTreeView(tree: LayerTree, status: Status, tools?: Lay
     paint = null;
     if (!d || doc === null) return;
     const ids = [...d.orig].filter(([, was]) => was !== d.to).map(([id]) => id)
-      .filter(id => { const l = layers.find(x => x.id === id); return l && paintGet(l, d.col) === d.to; });
+      .filter(id => { const l = byId.get(id); return l && paintGet(l, d.col) === d.to; });
     if (!ids.length) return;
     if (d.col !== "eye") {
       const plan = ids.flatMap(id => lockPlan(layers, [id], d.group ? "all" : d.col as "position" | "pixels", d.to));
