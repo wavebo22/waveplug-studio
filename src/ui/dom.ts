@@ -64,6 +64,8 @@ const PATHS: Record<string, string> = {
   folder: "M3 6h5l2 2h7v8H3z",
   refresh: "M16 10a6 6 0 1 1-1.8-4.3M16 4v3h-3",
   paste: "M7 3h6v3H7zM5 5H4v12h12V5h-1M7 10h6M7 13h4",
+  wbPlace: "M3 4h14v4M3 13v4h14v-4M10 2v11M7 10l3 3 3-3",
+  wbExport: "M3 10v7h14v-7M10 15V3M6 7l4-4 4 4",
   link: "M8.5 11.5l3-3M7.5 9.5L6 11a2.5 2.5 0 0 0 3.5 3.5L11 13M12.5 10.5L14 9a2.5 2.5 0 0 0-3.5-3.5L9 7",
   mask: "M3 4h14v12H3zM10 13a3 3 0 1 0 0-6 3 3 0 0 0 0 6z",
   adjust: "M10 3a7 7 0 1 0 0 14 7 7 0 0 0 0-14zM10 3v14M10 6l3.5-2M10 10h6.5M10 14l3.5 2",

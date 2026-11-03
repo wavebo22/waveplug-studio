@@ -33,6 +33,72 @@ body {
   font-family: "Segoe UI", "Microsoft YaHei UI", -apple-system, "PingFang SC", sans-serif;
   font-size: var(--fs); line-height: 1.45;
 }
+/* Inline workbench is collapsed by default and shares WaveLayer's UXP window.
+   It expands under the list as a drop target; no floating panel or cross-window ghost. */
+.wb-shell { flex: 0 1 auto; display: flex; flex-direction: column; min-height: 0; margin-top: 4px; }
+.wb-section { flex: 0 1 auto; min-height: 0; max-height: 205px; overflow: hidden;
+  padding: 6px 8px;
+  background: var(--field); border: 1px solid var(--field-line); border-radius: var(--r); }
+/* Drag-revealed shell floats above the bottom toolbar, leaving the row list height unchanged.
+   After a successful drop it becomes a regular in-flow subsection under the list. */
+.wb-shell.drag-ready { position: absolute; z-index: 16; bottom: 44px; left: 4px; right: 4px; }
+.wb-shell.drag-ready .wb-section { border-color: var(--accent); box-shadow: 0 4px 14px rgba(0, 0, 0, .36); }
+.wb-shell.drag-over .wb-section { border: 2px solid var(--accent-hi); background: rgba(63, 181, 159, .14); }
+.wb-arrow { flex: none; align-self: center; display: flex; align-items: center; justify-content: center;
+  width: 52px; height: 19px; margin-top: 2px; border: 1px solid var(--field-line);
+  border-radius: 0 0 5px 5px; background: var(--field); color: var(--muted); }
+.wb-arrow:hover { background: var(--hover); color: var(--accent-hi); border-color: var(--accent); }
+.wb-arrow.on svg { transform: rotate(180deg); }
+.wb-head { display: flex; align-items: center; min-height: 20px; margin-bottom: 5px; }
+.wb-heading { flex: 1 1 auto; min-width: 0; font-weight: 700; font-size: 11px; }
+.wb-count { color: var(--muted); font-size: 10px; margin-right: 8px; }
+.wb-dropzone { display: flex; flex-direction: column; justify-content: center; align-items: center; min-height: 44px;
+  border: 1px dashed rgba(131, 187, 176, .60); border-radius: 4px;
+  background: rgba(25, 38, 39, .7); color: var(--muted); cursor: copy; }
+.wb-dropzone.ready { border-color: var(--accent); color: var(--text); }
+.wb-dropzone.hot { border: 2px solid var(--accent-hi); background: rgba(43, 120, 100, .35); color: #fff; }
+.wb-dropzone.native-hot { border: 2px solid var(--accent-hi); background: rgba(48, 128, 104, .30); color: #fff; }
+.wb-dropzone > * { pointer-events: none; }
+.wb-drop-title { font-size: 12px; font-weight: 600; pointer-events: none; }
+.wb-drop-hint { font-size: 10px; color: var(--muted); pointer-events: none; }
+.wb-items { margin-top: 4px; max-height: 74px; overflow-y: auto; }
+.wb-empty { display: block; text-align: center; padding: 3px; color: var(--faint); font-size: 10px; }
+.wb-item { display: flex; align-items: center; min-width: 0; min-height: 23px; padding: 2px 4px;
+  border-bottom: 1px solid var(--card-line); font-size: 10px; }
+.wb-item-name { flex: 1 1 auto; min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.wb-item-source { color: var(--muted); max-width: 100px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; margin-left: 6px; }
+.wb-action { padding: 3px 8px; border: 1px solid var(--field-line); border-radius: 3px; font-size: 10px; }
+.wb-action:hover, .wb-remove:hover { background: var(--hover); }
+.wb-action.is-disabled, .wb-pending { opacity: .44; cursor: default; }
+.wb-actions { display: flex; align-items: center; justify-content: flex-end; gap: 5px; margin-top: 5px; }
+.wb-icon-btn { flex: none; display: inline-flex; align-items: center; justify-content: center;
+  width: 29px; height: 27px; border-radius: 4px; color: var(--text);
+  border: 1px solid var(--field-line); background: transparent; cursor: pointer; }
+.wb-icon-btn svg { pointer-events: none; }
+.wb-icon-btn:not(.is-disabled):hover { color: var(--accent-hi); border-color: var(--accent); background: var(--hover); }
+.wb-icon-btn.is-disabled { opacity: .32; cursor: default; }
+.wb-icon-btn.busy { cursor: wait; opacity: .65; }
+.wb-section.has-notice { max-height: 360px; overflow-y: auto; }
+.wb-section.has-notice .wb-items { max-height: 54px; }
+.wb-notice { margin-top: 7px; padding: 6px 7px; border: 1px solid var(--field-line);
+  border-left: 2px solid var(--warn); border-radius: 3px; font-size: 10px; line-height: 1.5; }
+.wb-notice.is-error { border-left-color: var(--err); }
+.wb-notice-head { display: flex; align-items: center; gap: 6px; margin-bottom: 3px; }
+.wb-notice-head svg { flex: none; color: var(--warn); }
+.wb-notice.is-error .wb-notice-head svg { color: var(--err); }
+.wb-notice-title { flex: 1 1 auto; min-width: 0; font-weight: 600; }
+.wb-notice-reason { white-space: pre-line; overflow-wrap: anywhere; }
+.wb-notice-advice { margin-top: 3px; color: var(--muted); white-space: pre-line; overflow-wrap: anywhere; }
+.wb-notice-dismiss { display: inline-flex; flex: none; align-items: center; justify-content: center;
+  width: 18px; height: 18px; color: var(--muted); }
+.wb-notice-dismiss:hover { color: var(--text); background: var(--hover); }
+.wb-notice-more { margin-top: 4px; font-size: 10px; color: var(--accent-hi); }
+.wb-notice-raw { max-height: 70px; overflow-y: auto; padding-top: 4px;
+  font-family: Consolas, monospace; font-size: 10px; white-space: pre-wrap; overflow-wrap: anywhere; color: var(--muted); }
+.wb-toggle.on { color: var(--accent-hi); border-color: var(--accent); }
+.wb-remove { min-width: 20px; height: 20px; font-size: 13px; color: var(--muted); margin-left: 5px; }
+.wb-state { display: block; color: var(--muted); font-size: 10px; margin-top: 3px;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 #app { display: flex; flex-direction: column; height: 100%; position: relative; overflow: hidden; }
 button, .ub { font: inherit; color: inherit; background: none; border: 0; padding: 0; cursor: pointer; }
 .ub { display: inline-flex; align-items: center; justify-content: center; user-select: none; }
@@ -99,7 +165,8 @@ button, .ub { font: inherit; color: inherit; background: none; border: 0; paddin
 .sel-state { font-size: var(--fs-s); color: var(--muted); font-variant-numeric: tabular-nums; white-space: nowrap; }
 .sel-state.warn { color: var(--warn); }
 .gen-row { display: flex; align-items: center; }
-.count-sel { width: 64px; flex: none; margin-right: 6px; height: 36px; }
+.count-label { margin: 0 6px 0 0; color: var(--muted); font-size: var(--fs); }
+.count-input { width: 52px; flex: none; margin-right: 8px; height: 36px; text-align: center; padding: 0 3px; font-variant-numeric: tabular-nums; }
 .generate { flex: 1 1 auto; height: 36px; display: flex; align-items: center; justify-content: center; background: var(--accent); color: var(--accent-ink); font-size: 13px; font-weight: 700; border-radius: var(--r); letter-spacing: .5px; }
 .generate .icon { margin-right: 7px; }
 .generate:hover { background: var(--accent-hi); }
@@ -381,7 +448,7 @@ button, .ub { font: inherit; color: inherit; background: none; border: 0; paddin
 /* WavePlug 图层 panel: the layer list filling the whole panel */
 #layers-app { height: 100%; }
 .lp { display: flex; flex-direction: column; height: 100%; padding: 8px; }
-.lt.fill { flex: 1 1 auto; display: flex; flex-direction: column; min-height: 0; }
+.lt.fill { flex: 1 1 auto; display: flex; flex-direction: column; min-height: 0; position: relative; }
 .lt.fill .lt-list { flex: 1 1 auto; min-height: 60px; }
 .lp-status { flex: none; min-height: 18px; margin-top: 4px; color: var(--muted); }
 .lp-status.error { color: var(--err); }
@@ -407,7 +474,7 @@ button, .ub { font: inherit; color: inherit; background: none; border: 0; paddin
 .lt-chip.held { opacity: .4; border-style: dashed; border-color: var(--accent-hi); }
 /* the label beside the pointer while dragging: what, and what letting go here does (green move, amber
    copy, red delete, gray not here) */
-.lt-ghost { position: absolute; z-index: 6; pointer-events: none; display: flex; align-items: center; max-width: 260px; height: 24px; padding: 0 8px; border-radius: 12px;
+.lt-ghost { position: absolute; z-index: 25; pointer-events: none; display: flex; align-items: center; max-width: 260px; height: 24px; padding: 0 8px; border-radius: 12px;
   background: #262626; border: 2px solid var(--accent-hi); color: #f2f2f2; font-size: var(--fs-s); white-space: nowrap; overflow: hidden; }
 .lt-ghost-what { font-weight: 600; overflow: hidden; text-overflow: ellipsis; }
 .lt-ghost-act { margin-left: 8px; color: var(--accent-hi); flex: none; }

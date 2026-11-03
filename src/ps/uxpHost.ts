@@ -22,7 +22,10 @@ export async function play(descriptors: object[]): Promise<any[]> {
 const modalDone: ((name: string) => void)[] = [];
 /** Called after each of this plugin's modal commands ends: Photoshop doesn't notify a plugin of the
  *  changes its own commands make. */
-export function onModalDone(cb: (name: string) => void) { modalDone.push(cb); }
+export function onModalDone(cb: (name: string) => void): () => void {
+  modalDone.push(cb);
+  return () => { const i = modalDone.indexOf(cb); if (i >= 0) modalDone.splice(i, 1); };
+}
 
 /** `interactive`: Photoshop dialogs (图层样式) may open while it runs */
 export async function modal<T>(name: string, fn: (ctx: any) => Promise<T>, opts: { interactive?: boolean } = {}): Promise<T> {
@@ -182,12 +185,15 @@ export class UxpHost implements PsHost {
     return { left: v(s.left), top: v(s.top), right: v(s.right), bottom: v(s.bottom) };
   }
 
+  async selectionMask(docId: number, rect: Rect): Promise<Pixels> {
+    return modal("WavePlug 读取选区蒙版", async () =>
+      grayInto(await ps().imaging.getSelection({ documentID: docId, sourceBounds: rect }), rect, 0));
+  }
+
   async activeFillGroup(): Promise<FillGroup | null> {
     const d = ps().app.activeDocument;
-    let l = d?.activeLayers?.[0];
-    if (!l) return null;
-    if (!isFillGroup(l)) l = l.parent;
-    if (!isFillGroup(l)) return null;
+    const l = outermostFillGroup(d?.activeLayers?.[0]);
+    if (!d || !l) return null;
     return this.groupInfo(d, l).catch(e => { log("warn", "active fill group unreadable", l.id, e); return null; });
   }
 
@@ -429,6 +435,23 @@ export class UxpHost implements PsHost {
     });
   }
 
+  /** A result group is the AI layer shown by WaveLayer; selecting its child vN hides
+   *  the visible selection in WaveLayer because variation rows are collapsed into the group. */
+  async selectFillGroup(g: FillGroup): Promise<void> {
+    // Do not steal focus from another document the user opened during a long ComfyUI job.
+    if (ps().app.activeDocument?.id !== g.docId || !this.docExists(g.docId)) return;
+    await modal("WavePlug 选中 AI 图层", async () => {
+      if (ps().app.activeDocument?.id !== g.docId) return;
+      const doc = docById(g.docId);
+      if (!isFillGroup(findLayer(doc.layers, g.layerId))) throw new Error("生成的 AI 图层已不存在");
+      const [result] = await play([{
+        _obj: "select", _target: [{ _ref: "layer", _id: g.layerId }],
+        makeVisible: false, _options: DONT,
+      }]);
+      if (result?._obj === "error") throw new Error(result.message || "无法选中 AI 图层");
+    });
+  }
+
   async setFillVisible(g: FillGroup, visible: boolean): Promise<void> {
     await modal("WavePlug 对比原图", async () => {
       const group = findLayer(docById(g.docId).layers, g.layerId);
@@ -595,10 +618,21 @@ export class UxpHost implements PsHost {
   }
 
   private listeners: [string[], () => void][] = [];
+  private modalListeners: (() => void)[] = [];
 
   onChange(cb: () => void): void {
     let timer: ReturnType<typeof setTimeout> | null = null;
     const fire = () => { if (timer) clearTimeout(timer); timer = setTimeout(cb, 150); };
+    // Photoshop does NOT deliver native action notifications for every batchPlay operation
+    // initiated by this plugin. WaveLayer uses such a modal command to select its rows.
+    // Only selection-affecting commands below fire; do not listen to mask/thumbnail read
+    // modals here or merely viewing an AI group would recursively trigger refresh().
+    const selectionCommands = new Set([
+      "WavePlug 选择图层", "WavePlug 选中 AI 图层", "WavePlug 切换变体",
+      "WavePlug 删除变体", "WavePlug 选择同源智能对象", "WavePlug 选中拆分结果",
+    ]);
+    const off = onModalDone(name => { if (selectionCommands.has(name)) fire(); });
+    this.modalListeners.push(() => { off(); if (timer) clearTimeout(timer); });
     const events = ["select", "set", "make", "delete", "open", "close", "move", "show", "hide", "historyStateChanged"];
     ps().action.addNotificationListener(events, fire);
     this.listeners.push([events, fire]);
@@ -607,5 +641,7 @@ export class UxpHost implements PsHost {
   dispose() {
     for (const [events, fn] of this.listeners) { try { ps().action.removeNotificationListener(events, fn); } catch { /* host gone */ } }
     this.listeners = [];
+    for (const off of this.modalListeners) off();
+    this.modalListeners = [];
   }
 }

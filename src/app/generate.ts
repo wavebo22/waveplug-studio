@@ -8,6 +8,7 @@ import { decodePng } from "../core/image/decode.ts";
 import { dilate, keepInside } from "../core/layers/islands.ts";
 import { MAX_REFERENCES } from "../core/workflow/references.ts";
 import { type Rect, clampRect, expandBy, rectH, rectW } from "../core/image/region.ts";
+import { sameMaskAt } from "../core/image/maskIdentity.ts";
 import { type Comfy, type JobEvent, outputImage, pngSize, utf8 } from "../core/comfy/client.ts";
 import { log } from "./log.ts";
 import { prepareRun } from "../core/workflow/inject.ts";
@@ -34,6 +35,8 @@ export interface RunInput {
   /** add variations to this fill, using its own mask (the current selection is ignored);
    *  without it a new fill is created from the current selection */
   addTo?: FillGroup;
+  /** 再生成: reuse the selected AI layer mask despite any current Photoshop selection. */
+  reuseMask?: boolean;
   /** outpaint profiles: pixels to add on each side (ignored when adding to an existing expand) */
   pads?: Pads;
   /** text-to-image profiles: size to generate. The result goes into `addTo`'s area, else the
@@ -118,6 +121,10 @@ export function crop(p: Pixels, from: Rect, to: Rect): Pixels {
   return { width: w, height: h, channels: ch, data: out };
 }
 
+function sameRect(a: Rect, b: Rect): boolean {
+  return a.left === b.left && a.top === b.top && a.right === b.right && a.bottom === b.bottom;
+}
+
 function paste(mask: Pixels, into: Rect, at: Rect): Pixels {
   const w = rectW(into), h = rectH(into), out = new Uint8Array(w * h);
   for (let y = 0; y < mask.height; y++) {
@@ -148,8 +155,23 @@ export async function runInpaint(host: PsHost, comfy: Comfy, input: RunInput, ho
   // 抠图: an empty name keeps the workflow's own (e.g. 「主体」)
   const promptB = profile.bindings.find(b => b.role === "prompt");
   const prompt = extract && !input.prompt.trim() && promptB ? String(profile.api[promptB.nodeId]?.inputs[promptB.input] ?? "主体") : input.prompt;
-  const target = input.addTo ? await host.refreshFillGroup(input.addTo) : null;
-  const selBounds = input.selectionMask ? input.selectionMask.rect : input.addTo ? null : await host.selectionBounds(doc.id);
+  let target = input.addTo ? await host.refreshFillGroup(input.addTo) : null;
+  const selBounds = input.selectionMask ? input.selectionMask.rect : input.reuseMask ? null : await host.selectionBounds(doc.id);
+  // A rectangular selection may have an entirely different silhouette inside the same bounds.
+  // Never append a variation unless the actual grayscale mask agrees, including soft edges.
+  if (target && selBounds) {
+    const rect = clampRect(selBounds, doc.width, doc.height);
+    let matched = false;
+    if (sameRect(rect, target.rect)) {
+      const selected = input.selectionMask?.pixels ?? await host.selectionMask(doc.id, rect);
+      const mask = blend ? featherInside(selected, blendFeather(rectW(rect), rectH(rect))) : selected;
+      matched = sameMaskAt(mask, rect, await host.groupMask(target), target.rect);
+    }
+    if (!matched) {
+      log("info", "selection mask changed; creating AI layer", target.layerId, JSON.stringify(rect));
+      target = null;
+    }
+  }
   if (!target && !selBounds) throw new Error("请先用选区框出要重绘的区域");
 
   const groupRect = target ? target.rect : clampRect(selBounds!, doc.width, doc.height);
@@ -465,9 +487,23 @@ async function runTxt2img(host: PsHost, comfy: Comfy, input: RunInput, hooks: Ru
   const size = input.size;
   let doc = host.activeDoc();
   if (doc && (!/RGB|CMYK/i.test(doc.mode) || doc.bits !== 8)) throw new Error(`目前支持 RGB / CMYK 8 位文档（当前：${doc.mode} ${doc.bits} 位）`);
-  const target = input.addTo ? await host.refreshFillGroup(input.addTo) : null;
+  let target = input.addTo ? await host.refreshFillGroup(input.addTo) : null;
   if (target && target.kind !== "txt2img") throw new Error("当前选中的不是 AI 生成的图层组");
   if (target) doc = { ...doc!, id: target.docId };
+  // Text-to-image has a fully opaque rectangular layer mask. A new selection with different
+  // pixels or a different rectangle must produce a new AI layer, even at identical bounds.
+  if (doc && target && !input.reuseMask) {
+    const bounds = await host.selectionBounds(doc.id);
+    if (bounds) {
+      const rect = clampRect(bounds, doc.width, doc.height);
+      const matched = sameRect(rect, target.rect)
+        && sameMaskAt(await host.selectionMask(doc.id, rect), rect, await host.groupMask(target), target.rect);
+      if (!matched) {
+        log("info", "txt2img selection mask changed; creating AI layer", target.layerId);
+        target = null;
+      }
+    }
+  }
   // where results go: the group's area, the selection, the whole canvas — or (no document) a new one
   let area: Rect | null = target ? target.rect : null;
   if (!area && doc) {

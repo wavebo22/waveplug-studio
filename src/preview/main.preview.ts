@@ -42,6 +42,15 @@ class MockHost implements PsHost {
   async createDocument(width: number, height: number, name: string) { this.doc = { id: this.doc.id + 1, name, width, height, mode: "RGBColorMode", bits: 8 }; this.docOpen = true; this.sel = null; this.list = []; this.groupSelected = false; return this.doc; }
   docExists() { return true; }
   async selectionBounds() { return this.sel; }
+  async selectionMask(_docId: number, rect: Rect): Promise<Pixels> {
+    const w = rect.right - rect.left, h = rect.bottom - rect.top, data = new Uint8Array(w * h);
+    if (this.sel) {
+      const left = Math.max(rect.left, this.sel.left), right = Math.min(rect.right, this.sel.right);
+      const top = Math.max(rect.top, this.sel.top), bottom = Math.min(rect.bottom, this.sel.bottom);
+      for (let y = top; y < bottom; y++) if (left < right) data.fill(255, (y - rect.top) * w + left - rect.left, (y - rect.top) * w + right - rect.left);
+    }
+    return { width: w, height: h, channels: 1, data };
+  }
   async activeFillGroup() { return this.groupSelected ? this.group : null; }
   listFillGroups() { return this.list.length || this.groupSelected ? [{ layerId: this.group.layerId, name: this.group.name, kind: this.group.kind }, { layerId: 77, name: "价格牌", kind: "inpaint" as const }] : []; }
   async fillGroupById(_d: number, id: number) { return id === this.group.layerId ? this.group : id === 77 ? { ...this.group, kind: "inpaint" as const, layerId: 77, name: "价格牌", rect: { left: 200, top: 200, right: 600, bottom: 500 } } : null; }
@@ -65,6 +74,7 @@ class MockHost implements PsHost {
   async layerThumbnail(_d: number, id: number) { return swatch(id, 64, 64); }
   async clipboardImage(): Promise<Pixels | null> { const w = 40, h = 30; return { width: w, height: h, channels: 3, data: new Uint8Array(w * h * 3).map((_, i) => (i * 37) & 255) }; }
   async variations() { return this.list.map(v => ({ ...v })); }
+  async selectFillGroup(g: FillGroup) { this.group = g; this.groupSelected = true; this.changed(); }
   async setFillVisible() {}
   async placeBelow() {}
   async showVariation(_g: FillGroup, layerId: number) { this.list.forEach(v => { v.visible = v.layerId === layerId; }); }
@@ -168,6 +178,26 @@ class MockLayerTree implements LayerTree {
       L(50, "背景", 12, { locked: true, lockAll: true }),
     ];
   }
+  async placeStaged(entries: import("../core/layers/workbench.ts").StagedLayer[]) {
+    const refs = entries.filter(x => x.docId === 1 && x.layerId > 0);
+    if (!refs.length) throw new Error("预览中没有可用的来源图层");
+    const copies: RawLayer[] = [];
+    for (const ref of refs) {
+      const [a, b] = this.block(ref.layerId);
+      if (a < 0) throw new Error("来源图层已不存在");
+      copies.push(...this.raw.slice(a, b).map(l => ({
+        ...l, id: l.section === "end" ? 0 : this.next++,
+      })));
+    }
+    const groupId = this.next++, groupName = "工作台素材";
+    const start: RawLayer = { id: groupId, name: groupName, kind: 7, section: "start", visible: true, locked: false, mask: false };
+    const end: RawLayer = { id: 0, name: "", kind: 13, section: "end", visible: true, locked: false, mask: false };
+    this.raw.unshift(start, ...copies, end);
+    this.selected = [groupId];
+    await sleep(30);
+    this.changed();
+    return { docId: 1, groupId, groupName, count: refs.length, nestedSkipped: 0 };
+  }
   async read(): Promise<{ docId: number; docKey: string; layers: TreeLayer[]; selected: number[]; width: number; height: number }> { return { docId: 1, docKey: "preview.psd", layers: buildTree(this.raw), selected: [...this.selected], width: 1920, height: 1200 }; }
   async pickColor(hex: string) { return hex === "#3fb59f" ? "#e07ad0" : "#3fb59f"; }
   private next = 90000;
@@ -260,6 +290,33 @@ class MockLayerTree implements LayerTree {
     await sleep(80); this.changed();
     return { done: steps.length, skipped: [] };
   }
+  async copy(_d: number, steps: MoveStep[]) {
+    const copied = new Map<number, number>(), ids: number[] = [], skipped: string[] = [];
+    for (const step of steps) {
+      const [start, end] = this.block(step.id);
+      if (start < 0 || end <= start) { skipped.push("#" + step.id + "：来源已不存在"); continue; }
+      const relId = copied.get(step.rel) ?? step.rel;
+      const [ra, rb] = this.block(relId);
+      if (ra < 0) { skipped.push("#" + step.id + "：目标已不存在"); continue; }
+      const local = new Map<number, number>();
+      const part = this.raw.slice(start, end).map((layer, i) => {
+        if (layer.section === "end") return { ...layer };
+        const id = this.next++;
+        local.set(layer.id, id);
+        return { ...layer, id, name: i ? layer.name : layer.name + " 拷贝" };
+      });
+      for (const layer of part) if (layer.links) layer.links = layer.links.map(id => local.get(id) ?? id);
+      const pos = step.place === "before" ? ra : step.place === "after" ? rb : ra + 1;
+      this.raw.splice(pos, 0, ...part);
+      copied.set(step.id, part[0].id);
+      ids.push(part[0].id);
+    }
+    this.selected = ids;
+    await sleep(80);
+    this.changed();
+    return { done: ids.length, ids, skipped };
+  }
+
   async thumbnails(_d: number, ls: { id: number; mask?: boolean | "vector" }[], _c: { width: number; height: number }, size: number) {
     await sleep(40 * ls.length);
     return ls.map(l => l.mask ? maskPicture(size) : swatch(l.id, size, size));

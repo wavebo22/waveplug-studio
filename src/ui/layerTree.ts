@@ -9,11 +9,12 @@ import { log } from "../app/log.ts";
 import { resultText } from "../core/layers/smart.ts";
 import { ThumbCache, thumbRetryDelay } from "../core/layers/thumbs.ts";
 import { MULTI_EFFECTS } from "../core/layers/effects.ts";
-import { type Filter, type LayerAction, type LayerKind, type LockKey, type MoveStep, type Row, type SmartAction, type TreeLayer, type Where, BLEND_MODES, ancestors, queryActive, clickSelect, contentUsers, canDropToDelete, canDropMaskOnto, dropPlan, dropZone, filterCounts, isVariantLayer, layerMenu, nextLayerAfterDelete, layerTags, linkPeers, lockPlan, packChips, lockedByGroup, sharedColors, selectionAfterLocalClear, visibleRows } from "../core/layers/tree.ts";
+import { type Filter, type LayerAction, type LayerKind, type LockKey, type MoveStep, type Row, type SmartAction, type TreeLayer, type Where, BLEND_MODES, ancestors, queryActive, clickSelect, contentUsers, canDropToDelete, canDropMaskOnto, copyPlan, dropPlan, dropZone, filterCounts, isVariantLayer, layerMenu, nextLayerAfterDelete, layerTags, linkPeers, lockPlan, packChips, lockedByGroup, sharedColors, selectionAfterLocalClear, visibleRows } from "../core/layers/tree.ts";
 import { type LayerTools, type LayerTree, type RunOptions, type TargetPart, ADJUSTMENTS } from "../ps/host.ts";
 import { every, h, icon, isShown, listen, replace, setShown } from "./dom.ts";
 import { type PopItem, createPopup } from "./popupMenu.ts";
 import { createSlider } from "./slider.ts";
+import { createWorkbenchSection } from "./workbenchDemo.ts";
 
 type Status = (text: string, kind?: "info" | "ok" | "error" | "busy") => void;
 
@@ -344,6 +345,7 @@ export function createLayerTreeView(tree: LayerTree, status: Status, tools?: Lay
   openAll.addEventListener("click", () => { for (const l of layers) if (l.kind === "group") expanded().add(l.id); render(); });
   closeAll.addEventListener("click", () => { expanded().clear(); render(); });
 
+
   // 搜索 and 类型: Photoshop's kind filter, with a name search beside it
   const query = { text: "", kinds: new Set<LayerKind>() };
   const searchBox = h("input", { class: "field lt-search", type: "text", placeholder: "搜索图层名" }) as HTMLInputElement;
@@ -376,6 +378,9 @@ export function createLayerTreeView(tree: LayerTree, status: Status, tools?: Lay
   });
 
   const list = h("div", { class: "lt-list sz-" + size });
+  // The workbench lives immediately BELOW the layer list in the same UXP panel.
+  // At rest it occupies no space; a normal layer drag reveals it automatically.
+  const workbench = createWorkbenchSection(tree);
   // No scrolling box: UXP didn't paint the content of a scrolled list (rows complete and in place in
   // the log, blank on screen until hovered). The list is a fixed box holding just the rows that fit;
   // scrolling (wheel, our own scrollbar) changes which layers those rows show, whole rows at a time,
@@ -1443,7 +1448,8 @@ export function createLayerTreeView(tree: LayerTree, status: Status, tools?: Lay
     /** the pointer across the list: where it was pressed (clientX) and now, from a row's left edge (filter chips) */
     x0: number; px: number;
     hover: number | null; overTool: HTMLElement | null;
-    canDelete: boolean; overLeftDelete: boolean;
+    canDelete: boolean; overLeftDelete: boolean; overWorkbench: boolean;
+    pointerX: number; pointerY: number;
     hoverTimer: ReturnType<typeof setTimeout> | null; scroller: ReturnType<typeof setInterval> | null;
   } | null = null;
   let suppressClick = false;
@@ -1454,7 +1460,9 @@ export function createLayerTreeView(tree: LayerTree, status: Status, tools?: Lay
   // a label beside the pointer while dragging: what is dragged and what letting go here would do
   const ghost = h("div", { class: "lt-ghost" });
   setShown(ghost, false);
-  inner.append(marker, hit, ghost);
+  inner.append(marker, hit);
+  // Drag label belongs to the WHOLE WaveLayer panel, not the scroll-clipped layer list.
+  // It stays under the pointer when the workbench appears below the list.
   // A fixed overlay on the left edge of the visible list: no new column and no layout shift.
   // It receives mouse enter/leave only *during* a draggable, deletable item. Never takes a click
   // from the left-hand eye / movement / editing controls in the resting panel.
@@ -1497,7 +1505,8 @@ export function createLayerTreeView(tree: LayerTree, status: Status, tools?: Lay
       target: null, sub: sub?.what ?? null, ftarget: null, ltarget: null, alt: e.altKey,
       x0: e.clientX, px: sub && "x" in sub.what ? sub.what.x : 0,
       hover: null, overTool: null, hoverTimer: null, scroller: null,
-      canDelete: canDropToDelete(layers, ids, sub?.what), overLeftDelete: false };
+      canDelete: canDropToDelete(layers, ids, sub?.what), overLeftDelete: false,
+      overWorkbench: false, pointerX: e.clientX, pointerY: e.clientY };
   }
 
   /** Where all the filters / an effect / the whole style would go at row `idx`: onto that row's layer
@@ -1565,7 +1574,8 @@ export function createLayerTreeView(tree: LayerTree, status: Status, tools?: Lay
       : s.kind === "mask" ? "图层蒙版" : s.kind === "vmask" ? "矢量蒙版"
       : s.kind === "variant" ? nameOf(s.variantId) : "智能滤镜蒙版";
     let act = "", cls = "";
-    if (tool === "delete") { act = s && s.kind !== "filters" && s.kind !== "effects" ? "删除" : s ? "全部清除" : "删除"; cls = " del"; }
+    if (d.overWorkbench && !s) { act = "加入编辑工作台"; cls = ""; }
+    else if (tool === "delete") { act = s && s.kind !== "filters" && s.kind !== "effects" ? "删除" : s ? "全部清除" : "删除"; cls = " del"; }
     else if (tool && s) {
       const ok = tool === "duplicate" && (s.kind === "filter" || s.kind === "effect" && MULTI_EFFECTS.has(s.key));
       act = ok ? "在本图层复制一份" : s.kind === "effect" && tool === "duplicate" ? "这种效果一个图层只能有一个" : "不能放在这里";
@@ -1584,18 +1594,23 @@ export function createLayerTreeView(tree: LayerTree, status: Status, tools?: Lay
     } else if (s) {
       act = d.ltarget === null ? (s.kind === "filters" ? "只能放到智能对象上" : "不能放在这里") : `${d.alt ? "复制" : "移"}到「${nameOf(d.ltarget)}」`;
       cls = d.ltarget === null ? " no" : d.alt ? " copy" : "";
-    } else { act = d.target ? "移动" : "不能放在这里"; cls = d.target ? "" : " no"; }
+    } else {
+      act = d.target ? (d.alt ? "+ 复制" : "移动") : "不能放在这里";
+      cls = d.target ? (d.alt ? " copy" : "") : " no";
+    }
     replace(ghost, h("span", { class: "lt-ghost-what" }, what), act ? h("span", { class: "lt-ghost-act" }, act) : null);
     ghost.className = "lt-ghost" + cls;
     setShown(ghost, true);
-    // below and right of the pointer (a filter chip: where it is along the row), kept inside the list
-    const x = s?.kind === "filter" ? d.px + 14 : LEAD + 24;
-    ghost.style.left = Math.max(4, Math.min(x, (list.clientWidth || 300) - 160)) + "px";
-    ghost.style.top = Math.max(2, Math.min(d.view + 14, (list.clientHeight || 300) - 26)) + "px";
+    // Follow the actual pointer through the layer list AND the embedded workbench.
+    const panel = el.getBoundingClientRect();
+    ghost.style.left = Math.max(4, Math.min(d.pointerX - panel.left + 14,
+      el.clientWidth - (ghost.offsetWidth || 160) - 4)) + "px";
+    ghost.style.top = Math.max(4, Math.min(d.pointerY - panel.top + 12,
+      el.clientHeight - (ghost.offsetHeight || 26) - 4)) + "px";
   }
   function trackDrop() {
     if (!drag || !rows.length) return;
-    if (drag.overTool || drag.overLeftDelete) {
+    if (drag.overTool || drag.overLeftDelete || drag.overWorkbench) {
       setShown(marker, false); drag.target = null; drag.ftarget = null; drag.ltarget = null;
       if (drag.hoverTimer) clearTimeout(drag.hoverTimer);
       drag.hoverTimer = null; drag.hover = null;
@@ -1613,7 +1628,7 @@ export function createLayerTreeView(tree: LayerTree, status: Status, tools?: Lay
     const l = rows[idx].layer, open = filter !== "all" || !collapsed.has(l.id);
     // a smart filter row stands for "below its smart object"
     const where = rows[idx].filter ? "below" : dropZone(l, frac, open);
-    const plan = dropPlan(layers, drag.ids, l.id, where);
+    const plan = drag.alt ? copyPlan(layers, drag.ids, l.id, where) : dropPlan(layers, drag.ids, l.id, where);
     drag.target = plan ? { id: l.id, where, plan } : null;
     // hovering a closed group opens it after a moment
     const opens = where === "inside" && !open && l.children > 0 && plan ? l.id : null;
@@ -1625,14 +1640,15 @@ export function createLayerTreeView(tree: LayerTree, status: Status, tools?: Lay
     if (!plan) { setShown(marker, false); return; }
     setShown(marker, true);
     const indent = LEAD + l.depth * INDENT + (where === "inside" ? 0 : 16);
-    marker.className = "lt-drop" + (where === "inside" ? " into" : "");
+    marker.className = "lt-drop" + (where === "inside" ? " into" : "") + (drag.alt ? " copy" : "");
     marker.style.left = indent + "px";
     marker.style.top = (where === "inside" ? yOf(idx) : yOf(where === "above" ? idx : idx + 1) - 1) + "px";
     marker.style.height = where === "inside" ? heightOf(rows[idx]) + "px" : "";
   }
 
   /** -1 / 1 while the pointer is near (or past) the list's top / bottom edge */
-  const edgeDir = () => !drag || drag.overTool || drag.overLeftDelete ? 0 : drag.view < 22 ? -1 : drag.view > list.clientHeight - 22 ? 1 : 0;
+  const edgeDir = () => !drag || drag.overTool || drag.overLeftDelete || drag.overWorkbench ? 0
+    : drag.view < 22 ? -1 : drag.view > list.clientHeight - 22 ? 1 : 0;
 
   listen(document, "mousemove", e => {
     if (!drag) return;
@@ -1641,11 +1657,16 @@ export function createLayerTreeView(tree: LayerTree, status: Status, tools?: Lay
       // Horizontal movement must also start a drag: the delete rail is on the left edge.
       if (Math.abs(m.clientY - drag.y0) < 5 && Math.abs(m.clientX - drag.x0) < 5) return;
       drag.active = true;
+      if (!drag.sub) workbench.openForDrag();
       list.classList.add("dragging");
       setShown(hit, true);
       setShown(leftDelete, drag.canDelete);
       draw();
     }
+    drag.pointerX = m.clientX;
+    drag.pointerY = m.clientY;
+    drag.overWorkbench = !drag.sub && workbench.isDropTarget(m.clientX, m.clientY);
+    workbench.setDragHover(drag.overWorkbench);
     drag.view = drag.view0 + m.clientY - drag.y0 + drag.fix;
     drag.alt = m.altKey;
     if (drag.sub?.kind === "filter") drag.px = drag.sub.x + m.clientX - drag.x0;
@@ -1674,7 +1695,19 @@ export function createLayerTreeView(tree: LayerTree, status: Status, tools?: Lay
     return d;
   }
   listen(document, "mouseup", e => {
+    const release = e as MouseEvent;
+    const accepted = !!drag?.active && !drag.sub && workbench.isDropTarget(release.clientX, release.clientY);
     const d = endDrag();
+    if (accepted && d && docId !== null) {
+      workbench.add(d.ids.map(layerId => {
+        const layer = layers.find(l => l.id === layerId)!;
+        return { docId: docId!, docKey, layerId, name: layer.name, kind: layer.kind };
+      }));
+      workbench.finishDrag(true);
+      status("已加入工作台 " + d.ids.length + " 个图层；原 PSD 没有修改", "ok");
+      return;
+    }
+    workbench.finishDrag(false);
     // an effect chip pressed and let go without dragging: its switch
     if (!d?.active) { if (d?.sub && "chip" in d.sub) d.sub.toggleOnUp?.(); return; }
     // a chip that was dragged isn't also switched when its press's moment is up
@@ -1684,7 +1717,13 @@ export function createLayerTreeView(tree: LayerTree, status: Status, tools?: Lay
     if (d.sub) { dropSub(d.sub, d, action, (e as MouseEvent).altKey || d.alt); return; }
     if (action === "delete") { if (d.canDelete) void run("delete", d.ids); return; }
     if (tool) void run(tool.action, d.ids);
-    else if (d.target) void drop(d.target.id, d.target.where, d.target.plan, d.ids.length);
+    else if (d.target && list.contains(e.target as Node)) {
+      // Mouseup is authoritative: Alt may have been released just before the pointer.
+      const copy = release.altKey;
+      const plan = copy ? copyPlan(layers, d.ids, d.target.id, d.target.where)
+        : dropPlan(layers, d.ids, d.target.id, d.target.where);
+      if (plan) void drop(d.target.id, d.target.where, plan, plan.length, copy);
+    }
   });
   /** a dragged filter / effect let go: moved or copied (Alt) where it was over, or deleted on the trash */
   function dropSub(s: SubDrag, d: NonNullable<typeof drag>, tool: LayerAction | null, copy: boolean) {
@@ -1725,20 +1764,66 @@ export function createLayerTreeView(tree: LayerTree, status: Status, tools?: Lay
     else if (s.kind === "effect") void run("moveEffect", [s.layerId], JSON.stringify({ ...arg, key: s.key, multi: s.multi }));
     else void run("moveEffects", [s.layerId], JSON.stringify(arg));
   }
-  listen(document, "keydown", e => { if ((e as KeyboardEvent).key === "Escape" && drag?.active) endDrag(); });
+  listen(document, "keydown", e => {
+    if (!drag?.active) return;
+    const key = (e as KeyboardEvent).key;
+    if (key === "Escape") {
+      endDrag();
+      workbench.finishDrag(false);
+    } else if (key === "Alt") {
+      drag.alt = true;
+      track(); // updates copy marker and allowed targets even without pointer movement
+    }
+  });
+  listen(document, "keyup", e => {
+    if (drag?.active && (e as KeyboardEvent).key === "Alt") {
+      drag.alt = false;
+      track(); // Alt released before mouseup => move instead of copy
+    }
+  });
 
-  async function drop(targetId: number, where: Where, plan: MoveStep[], count: number) {
+  async function drop(targetId: number, where: Where, plan: MoveStep[], count: number, copy: boolean) {
     if (docId === null) return;
+    const doc = docId, generation = selectGen;
     if (where === "inside") expanded().add(targetId);
     try {
-      const r = await tree.move(docId, plan);
-      if (r.skipped.length || r.done < count) status(resultText("已移动", { ...r, unit: "个图层" }), r.done ? "ok" : "error");
-    } catch (e) { log("warn", "layer move", e); status(`移动图层失败：${(e as Error).message ?? e}`, "error"); }
-    void refresh();
+      // An earlier Ctrl/Shift selection modal must finish before a drag creates clones.
+      await selectTail;
+      await endPeek(false);
+      if (copy) {
+        status("正在复制 " + count + " 个图层…", "busy");
+        // Let the UXP panel paint before duplicating a potentially large group or artboard.
+        await new Promise<void>(resolve => setTimeout(resolve, 30));
+        const r = await tree.copy(doc, plan);
+        if (r.ids.length && docId === doc && selectGen === generation) {
+          selected = new Set(r.ids);
+          anchor = r.ids[0];
+          focus = null;
+          localClear = null;
+          ownSelect = [...selected].sort().join(",");
+          selectGen++;
+          reveal();
+        }
+        status(r.skipped.length
+          ? "已复制 " + r.done + " 个图层；" + r.skipped.slice(0, 2).join("；")
+          : "已复制 " + r.done + " 个图层", r.done ? (r.skipped.length ? "info" : "ok") : "error");
+      } else {
+        const r = await tree.move(doc, plan);
+        if (r.skipped.length || r.done < count) status(resultText("已移动", { ...r, unit: "个图层" }), r.done ? "info" : "error");
+        else status("已移动 " + r.done + " 个图层", "ok");
+      }
+    } catch (e) {
+      log("warn", copy ? "layer copy" : "layer move", e);
+      status((copy ? "复制" : "移动") + "图层失败：" + ((e as Error).message ?? e), "error");
+    }
+    // The host's onModalDone triggers one debounced view.refresh() after the history
+    // step commits. Do NOT also start an immediate read here: it races the native
+    // move notifications and forces a second 200-400 ms full 200-layer scan.
   }
 
   // ── right-click menu, rename, toolbar ──
   const el = h("section", { class: "lt fill", tabindex: "-1" });
+  el.append(ghost);
   el.addEventListener("mouseenter", () => { pointerIn = true; refocus("hover"); });
   el.addEventListener("mouseleave", () => { pointerIn = false; });
   const popup = createPopup(el);
@@ -2065,7 +2150,8 @@ export function createLayerTreeView(tree: LayerTree, status: Status, tools?: Lay
     h("div", { class: "lt-find" }, searchBox, h("div", { class: "lt-kinds" }, ...kindBtns, h("span", { class: "lt-kinds-sep" }), ...filterBtns)),
     props, opacity.row, fillPct.row,
     list,
-    h("div", { class: "lt-foot" }, h("div", { class: "lt-foot-btns" }, peekBtn, thumbBtn, openAll, closeAll), bar));
+    workbench.el,
+    h("div", { class: "lt-foot" }, h("div", { class: "lt-foot-btns" }, peekBtn, thumbBtn, openAll, closeAll, workbench.toggleButton), bar));
   render();
   return { el, refresh };
 }

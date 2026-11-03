@@ -10,6 +10,8 @@ import { type LayerDeleteResult, type LayerTree, type RunOptions, type TargetPar
 import { docById, findLayer, modal, onModalDone, play, step } from "./uxpHost.ts";
 import { act, selectLayers } from "./uxpTools.ts";
 import { type MaskKind, maskTransferDescriptors } from "./maskTransfer.ts";
+import { type StagedLayer } from "../core/layers/workbench.ts";
+import { placeWorkbenchLayers } from "./uxpWorkbench.ts";
 
 declare const require: (m: string) => any;
 
@@ -146,7 +148,189 @@ async function readRawDom(docId: number): Promise<RawLayer[]> {
   return out.map(l => { const r = byId.get(l.id); return r && l.section !== "end" ? { ...r, section: l.section } : l; });
 }
 
+/** Photoshop sometimes treats PLACEAFTER on a group as entering its last child.
+ * Resolve the requested outside-group drop to a safe sibling anchor instead. */
+interface LayerSlot { parentId: number | null; siblings: any[]; index: number }
+function layerSlot(nodes: any, id: number, parentId: number | null = null): LayerSlot | null {
+  if (!nodes) return null;
+  const siblings: any[] = Array.from(nodes);
+  for (let index = 0; index < siblings.length; index++) {
+    const layer = siblings[index];
+    if (layer.id === id) return { parentId, siblings, index };
+    if (layer.layers?.length) {
+      const child = layerSlot(layer.layers, id, layer.id);
+      if (child) return child;
+    }
+  }
+  return null;
+}
+const isGroupLayer = (layer: any) => layer?.layers != null
+  && (String(layer.kind) === "group" || String(layer.kind) === "LayerKind.group" || typeof layer.layers.length === "number");
+
+interface LayerAnchor { layer: any; place: "before" | "after" | "inside"; bottom: boolean }
+/** Below a group: BEFORE next sibling, or BEFORE group + sendToBack if last. */
+function safeLayerAnchor(doc: any, relative: any, place: "before" | "after" | "inside"): LayerAnchor {
+  if (place !== "after" || !isGroupLayer(relative)) return { layer: relative, place, bottom: false };
+  const at = layerSlot(doc.layers, relative.id);
+  if (!at) throw new Error("找不到目标组的同级位置，已取消放置");
+  const next = at.siblings[at.index + 1];
+  return next ? { layer: next, place: "before", bottom: false }
+    : { layer: relative, place: "before", bottom: true };
+}
+/** Validate the real Photoshop parent and relative order, not just the nominal move API result. */
+function verifyLayerPlacement(doc: any, itemId: number, relativeId: number, place: "before" | "after" | "inside"): void {
+  const item = layerSlot(doc.layers, itemId), relative = layerSlot(doc.layers, relativeId);
+  if (!item || !relative) throw new Error("Photoshop 没有在目标位置找到图层，放置未完成");
+  const parentOk = place === "inside" ? item.parentId === relativeId : item.parentId === relative.parentId;
+  const orderOk = place === "inside" || item.index === relative.index + (place === "after" ? 1 : -1);
+  if (!parentOk || !orderOk) {
+    log("warn", "layer placement mismatch", JSON.stringify({
+      itemId, relativeId, place, actualParent: item.parentId,
+      desiredParent: place === "inside" ? relativeId : relative.parentId,
+      itemIndex: item.index, relativeIndex: relative.index,
+    }));
+    throw new Error("Photoshop 将图层放到了错误位置（可能进入 AI 图层组），操作已取消");
+  }
+}
+
+/** Count AM's hidden layerSectionEnd markers as well as visible descendants.
+ * Photoshop itemIndex is bottom-up: a group occupies [start, children..., end]. */
+function groupContentSlots(layer: any): number {
+  if (!layer?.layers) return 0;
+  let count = 0;
+  for (const child of Array.from(layer.layers) as any[]) {
+    count++; // the child
+    if (child.layers) count += groupContentSlots(child) + 1; // its sectionEnd
+  }
+  return count;
+}
+async function photoshopLayerIndex(docId: number, id: number): Promise<number | null> {
+  try {
+    const [result] = await play([{
+      _obj: "get",
+      _target: [{ _property: "itemIndex" }, { _ref: "layer", _id: id }, { _ref: "document", _id: docId }],
+      _options: { dialogOptions: "silent" },
+    }]);
+    const n = Number(result?.itemIndex?._value ?? result?.itemIndex);
+    return Number.isInteger(n) && n >= 0 ? n : null;
+  } catch (e) {
+    log("info", "layer AM index unavailable", id, e);
+    return null;
+  }
+}
+function placedAsRequested(doc: any, id: number, rel: number, place: "before" | "after" | "inside"): boolean {
+  const a = layerSlot(doc.layers, id), b = layerSlot(doc.layers, rel);
+  return !!a && !!b
+    && (place === "inside" ? a.parentId === rel : a.parentId === b.parentId)
+    && (place === "inside" || a.index === b.index + (place === "after" ? 1 : -1));
+}
+/** Photoshop's UXP DOM sometimes moves a layer INTO the next group when asked to put
+ * it BETWEEN two groups (real log: desired parent 157, actual parent 150).
+ *
+ * Instead of refusing the drag, use Photoshop's native AM move-to-index to insert at
+ * the section boundary. Group end markers, a background layer and the moving layer's
+ * own index cause off-by-one differences, so probe a small range of boundary indices
+ * and verify the actual Photoshop tree after EACH attempt. All attempts occur inside
+ * one suspended history state, so Ctrl+Z still undoes the one drag operation.
+ */
+// The same adjacent groups retain their AM section-boundary offset across drags.
+const learnedGroupBoundary = new Map<string, number>();
+async function moveAtIndex(itemId: number, index: number): Promise<boolean> {
+  if (!Number.isInteger(index) || index < 0) return false;
+  try {
+    const [r] = await play([{
+      _obj: "move", _target: [{ _ref: "layer", _id: itemId }],
+      to: { _ref: "layer", _index: index }, adjustment: false,
+      _options: { dialogOptions: "silent" },
+    }]);
+    return r?._obj !== "error";
+  } catch { return false; }
+}
+async function repairLayerPlacement(doc: any, itemId: number, relativeId: number, place: "before" | "after" | "inside"): Promise<boolean> {
+  if (placedAsRequested(doc, itemId, relativeId, place)) return true;
+  if (place === "inside") return false;
+  const started = Date.now();
+  const rel = findLayer(doc.layers, relativeId), slot = layerSlot(doc.layers, relativeId);
+  if (!rel || !slot) return false;
+  const next = slot.siblings[slot.index + 1], prev = slot.siblings[slot.index - 1];
+  let quickAttempts = 0;
+  const probed = new Set<number>();
+  // Observed real Photoshop: when an AI group is immediately above another group,
+  // five AM moves were needed each time. The successful index was NEXT.itemIndex-1.
+  // Try that index FIRST and remember another offset if Photoshop needs one.
+  if (place === "after" && next && isGroupLayer(rel) && isGroupLayer(next)) {
+    const gap = doc.id + ":" + relativeId + ":" + next.id;
+    const idx = await photoshopLayerIndex(doc.id, next.id);
+    if (idx !== null) {
+      const pref = learnedGroupBoundary.get(gap) ?? -1;
+      for (const offset of [pref, -1, 1, 0, 2, -2]) {
+        const index = idx + offset;
+        if (probed.has(index)) continue;
+        probed.add(index); quickAttempts++;
+        if (await moveAtIndex(itemId, index) && placedAsRequested(doc, itemId, relativeId, place)) {
+          learnedGroupBoundary.set(gap, offset);
+          if (learnedGroupBoundary.size > 96) learnedGroupBoundary.delete(learnedGroupBoundary.keys().next().value!);
+          log("info", "layer group-boundary recovered", JSON.stringify({
+            itemId, relativeId, place, index, attempts: quickAttempts, ms: Date.now() - started, fast: true,
+          }));
+          return true;
+        }
+      }
+    }
+  }
+  const refs: any[] = place === "after" ? [next, rel, prev] : [rel, prev, next];
+  // Keep Photoshop batchPlay calls sequential; concurrent native reads inside one
+  // executeAsModal can race with the preceding layer move on some PS builds.
+  const positions: (number | null)[] = [];
+  for (const x of refs) positions.push(x ? await photoshopLayerIndex(doc.id, x.id) : null);
+  const candidates: number[] = [];
+  const add = (n: number | null) => {
+    if (n === null || !Number.isInteger(n)) return;
+    // Prefer the real boundary, then compensate for the AM insertion convention,
+    // existing background layer and change in the moving source's index.
+    for (const dx of [0, 1, -1, 2, -2, 3, -3, 4, -4]) {
+      const i = n + dx;
+      if (i >= 0 && !probed.has(i) && !candidates.includes(i)) candidates.push(i);
+    }
+  };
+  if (place === "after" && next && positions[0] !== null) add(positions[0] + 1);
+  const relIndex = place === "after" ? positions[1] : positions[0];
+  if (place === "after" && isGroupLayer(rel) && relIndex !== null)
+    add(relIndex - groupContentSlots(rel) - 1);
+  if (place === "before") add(positions[0] === null ? null : positions[0] + 1);
+  for (const n of positions) add(n);
+  // Last sibling, no next anchor: the group end marker is the real gap. Also
+  // consider the parent's own end marker for deeply nested, empty groups.
+  if (slot.parentId !== null) {
+    const parent = findLayer(doc.layers, slot.parentId);
+    const pidx = parent ? await photoshopLayerIndex(doc.id, parent.id) : null;
+    if (pidx !== null && parent)
+      add(pidx - groupContentSlots(parent) - 1);
+  }
+  let attempts = quickAttempts, failures = 0;
+  for (const index of candidates) {
+    if (placedAsRequested(doc, itemId, relativeId, place)) return true;
+    attempts++;
+    if (await moveAtIndex(itemId, index) && placedAsRequested(doc, itemId, relativeId, place)) {
+      log("info", "layer group-boundary recovered", JSON.stringify({
+        itemId, relativeId, place, index, attempts, ms: Date.now() - started, fast: false,
+      }));
+      return true;
+    }
+    failures++;
+  }
+  log("warn", "layer group-boundary recovery exhausted", JSON.stringify({
+    itemId, relativeId, place, candidates: candidates.length + quickAttempts, attempts, failures, ms: Date.now() - started,
+    actual: layerSlot(doc.layers, itemId)?.parentId,
+    expected: layerSlot(doc.layers, relativeId)?.parentId,
+  }));
+  return placedAsRequested(doc, itemId, relativeId, place);
+}
+
 export class UxpLayerTree implements LayerTree {
+  async placeStaged(entries: StagedLayer[]) {
+    return whenFree(() => placeWorkbenchLayers(entries));
+  }
   async read() {
     const d = ps().app.activeDocument;
     if (!d) return null;
@@ -236,13 +420,108 @@ export class UxpLayerTree implements LayerTree {
       let n = 0;
       for (const s of steps) {
         const l = findLayer(doc.layers, s.id), rel = findLayer(doc.layers, s.rel);
-        if (!l || !rel) { skipped.push(`#${s.id}：图层已不存在`); continue; }
-        try { await l.move(rel, place[s.place]); n++; }
-        catch (e) { skipped.push(`${l.name}：${(e as Error)?.message ?? e}`); log("warn", "layer move", l.name, e); }
+        if (!l || !rel) { skipped.push("#" + s.id + "：图层已不存在"); continue; }
+        try {
+          const anchor = safeLayerAnchor(doc, rel, s.place);
+          // Target already directly below a group? No movement required.
+          if (l.id !== anchor.layer.id) {
+            let nativeError: unknown = null;
+            try { await l.move(anchor.layer, place[anchor.place]); }
+            catch (e) { nativeError = e; }
+            if (anchor.bottom && !nativeError && typeof l.sendToBack === "function") {
+              try { await l.sendToBack(); }
+              catch (e) { nativeError = e; }
+            }
+            // A move targeting a group boundary can fail without modifying layers.
+            // Try the exact AM stack index before treating that as a failed drag.
+            if (nativeError && s.place === "inside") throw nativeError;
+            if (nativeError && !isGroupLayer(anchor.layer) && !isGroupLayer(rel)) throw nativeError;
+          }
+          if (!await repairLayerPlacement(doc, l.id, rel.id, s.place))
+            verifyLayerPlacement(doc, l.id, rel.id, s.place);
+          n++;
+        } catch (e) {
+          // A placement error is not a successfully skipped move: reject the history step,
+          // instead of silently leaving the original layer nested in the AI result group.
+          if (/放到了错误位置|组外置底/.test(String((e as Error)?.message ?? e))) throw e;
+          skipped.push(String(l.name) + "：" + ((e as Error)?.message ?? e));
+          log("warn", "layer move", l.name, e);
+        }
       }
       return n;
     });
     return { done, skipped };
+  }
+
+  /** Photoshop Layer.duplicate(relativeLayer, placement) preserves complete layer groups,
+   *  including masks, smart-object shared references and all AI variation children.
+   *  MoveStep.rel may refer to an earlier source: resolve it to the new clone, not the original.
+   */
+  async copy(docId: number, steps: MoveStep[]): Promise<{ done: number; skipped: string[]; ids: number[] }> {
+    requireActiveDoc(docId);
+    return whenFree(() => step("WavePlug 复制图层", docId, async () => {
+      requireActiveDoc(docId);
+      const doc = docById(docId), P = ps().constants.ElementPlacement;
+      const place = { before: P.PLACEBEFORE, after: P.PLACEAFTER, inside: P.PLACEINSIDE };
+      const cloneOf = new Map<number, any>(), ids: number[] = [], skipped: string[] = [];
+      for (const s of steps) {
+        const source = findLayer(doc.layers, s.id);
+        const rel = cloneOf.get(s.rel) ?? findLayer(doc.layers, s.rel);
+        if (!source || !rel) {
+          skipped.push("#" + s.id + "：来源或目标图层已不存在");
+          continue;
+        }
+        let clone: any = null;
+        try {
+          const anchor = safeLayerAnchor(doc, rel, s.place);
+          // Duplicating beside itself is valid, but never use PLACEAFTER on an AI group.
+          if (source.id === anchor.layer.id) {
+            if (s.place === "inside") throw new Error("不能把图层组复制进自身");
+            clone = await source.duplicate();
+            if (anchor.place === "after") await clone.move(source, P.PLACEAFTER);
+          } else {
+            try { clone = await source.duplicate(anchor.layer, place[anchor.place]); }
+            catch (error) {
+              if (s.place === "inside" || (!isGroupLayer(anchor.layer) && !isGroupLayer(rel))) throw error;
+              // Photoshop can refuse a group-relative duplicate. Make the copy beside
+              // its original, then place it using the exact native AM layer index.
+              log("info", "layer duplicate relative failed, retry by AM index", String((error as Error)?.message ?? error));
+              clone = await source.duplicate();
+            }
+          }
+          if (!clone || !Number.isFinite(clone.id)) throw new Error("Photoshop 未返回新图层 ID");
+          if (anchor.bottom && typeof clone.sendToBack === "function") {
+            try { await clone.sendToBack(); }
+            catch (e) { log("info", "copy sendToBack unavailable; index recovery", e); }
+          }
+          if (!await repairLayerPlacement(doc, clone.id, rel.id, s.place))
+            verifyLayerPlacement(doc, clone.id, rel.id, s.place);
+          cloneOf.set(s.id, clone);
+          ids.push(clone.id);
+        } catch (e) {
+          // A failed move after an initial duplicate must not leave a stray copy behind.
+          if (clone && !ids.includes(clone.id)) {
+            try { await clone.delete(); }
+            catch (cleanup) {
+              log("error", "copy cleanup failed", clone.id, cleanup);
+              throw new Error("复制落点错误且清理副本失败，已停止操作，请检查图层并撤销");
+            }
+          }
+          skipped.push(String(source.name) + "：" + ((e as Error)?.message ?? e));
+          log("warn", "layer drag copy", JSON.stringify(s), e);
+        }
+      }
+      if (ids.length) {
+        // Select new clones rather than their sources. WaveLayer sees group IDs for AI layers.
+        try { await selectLayers(ids); }
+        catch (e) {
+          skipped.push("复制成功，但自动选中副本失败：" + ((e as Error)?.message ?? e));
+          log("warn", "layer drag copy select", ids.join(","), e);
+        }
+      }
+      log("info", "layer drag copy finished", JSON.stringify({ docId, count: ids.length, ids, skipped }));
+      return { done: ids.length, skipped, ids };
+    }));
   }
 
   async thumbnails(docId: number, layers: { id: number; mask?: boolean | "vector"; bounds?: Bounds }[], canvas: { width: number; height: number }, size: number): Promise<(string | null | undefined)[]> {

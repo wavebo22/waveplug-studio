@@ -5,6 +5,7 @@ import { type Comfy, ComfyError } from "../core/comfy/client.ts";
 import type { Rect } from "../core/image/region.ts";
 import { asApiGraph } from "../core/workflow/api.ts";
 import { MAX_SEED, randomSeed } from "../core/workflow/inject.ts";
+import { normalizeVariationCount } from "../core/workflow/variationCount.ts";
 import { type Binding, type Profile, type TaskType, ROLE_LABEL, carryOver, inpaintLike, newProfile, validateProfile } from "../core/workflow/profile.ts";
 import { isBlendGraph, recognize } from "../core/workflow/recognize.ts";
 import { uiToApi } from "../core/workflow/uiToApi.ts";
@@ -82,28 +83,13 @@ export function mountApp(root: HTMLElement, svc: Services) {
   let comfy: Comfy = svc.comfy(settings.comfyUrl);
   let conn: Conn = { state: "checking", text: "连接中…" };
   let doc: DocInfo | null = null, sel: Rect | null = null, group: FillGroup | null = null;
-  // The panel's current fill stays put while other layers are selected; it only changes when an AI
-  // fill group (or a layer in it) is selected, another fill is picked in the panel, or a new fill is made.
-  const pinned = new Map<number, number>();
-  let fills: { layerId: number; name: string }[] = [];
-  let lastActive = "", lastGroupKey = "";
-  // explicit choice of the context chip for the current selection (add to the fill / make a new one)
-  let choice: { sel: string; add: boolean } | null = null;
-  const selKey = (r: Rect | null) => r ? `${r.left},${r.top},${r.right},${r.bottom}` : "";
-  const near = (a: Rect, b: Rect) => Math.abs(a.left - b.left) <= 2 && Math.abs(a.top - b.top) <= 2 && Math.abs(a.right - b.right) <= 2 && Math.abs(a.bottom - b.bottom) <= 2;
-  /** true: the next 生成 adds variations to the current fill; false: it creates a new fill */
+  // Variations follow the selected Photoshop AI layer.
+  let lastGroupKey = "";
+  const near = (a: Rect, b: Rect) => a.left === b.left && a.top === b.top && a.right === b.right && a.bottom === b.bottom;
   const willAdd = () => {
     if (!group || group.kind !== mode || mode === "upscale") return false;
-    // 扩图: with no extension set, 生成 adds variations to the current expansion
     if (mode === "outpaint") return !padTotal();
-    if (choice && choice.sel === selKey(sel)) return choice.add;
     if (!sel) return true;
-    if (mode === "txt2img") {
-      // a generated image is fitted inside its selection: same area = inside it, spanning its width or height
-      const r = group.rect, d = 2;
-      const inside = r.left >= sel.left - d && r.top >= sel.top - d && r.right <= sel.right + d && r.bottom <= sel.bottom + d;
-      return inside && (Math.abs((r.right - r.left) - (sel.right - sel.left)) <= d || Math.abs((r.bottom - r.top) - (sel.bottom - sel.top)) <= d);
-    }
     return near(sel, group.rect);
   };
   let variations: Variation[] = [];
@@ -119,22 +105,42 @@ export function mountApp(root: HTMLElement, svc: Services) {
   // ── skeleton ──
   const connEl = h("button", { class: "conn", title: "ComfyUI 连接设置", onClick: () => openSettings() });
   const targetEl = h("span", { class: "target" });
-  targetEl.addEventListener("click", () => {
-    // inpaint: only with a selection (without one there is nothing new to fill); 文生图: always
-    if (!group || group.kind !== mode || mode === "outpaint" || mode === "upscale" || (inpaintLike(mode) && !sel)) return;
-    choice = { sel: selKey(sel), add: !willAdd() };
-    renderHistory(); renderSelection(); renderAction();
-  });
   const historyEl = h("div", { class: "history vars" });
   const varPromptEl = h("div", { class: "var-prompt" });
   const varCountEl = h("span", { class: "hint" });
-  const fillSel = h("select", { class: "field fill-sel", title: "当前填充（切换其他图层不会改变它）" }) as HTMLSelectElement;
-  fillSel.addEventListener("change", () => { if (doc) { pinned.set(doc.id, Number(fillSel.value)); choice = null; void refresh(); } });
   const regenBtn = h("button", { class: "regen", onClick: () => void regenerate() }, icon("refresh", 12), h("span", null, "再生成"));
   const flowName = h("span", { class: "flow-name" });
   const flowBtn = h("button", { class: "flow-btn", title: "切换、导入或校准工作流", onClick: () => openWorkflows() }, icon("flow", 14), flowName, icon("chevron", 12));
-  const countSel = h("select", { class: "field count-sel", title: "这次生成几个变体" }, ...[1, 2, 3, 4].map(n => h("option", { value: String(n) }, `× ${n}`))) as HTMLSelectElement;
-  countSel.addEventListener("change", () => { if (pstate && profile) { pstate.count = Number(countSel.value); store.saveState(profile.id, pstate); } });
+  // UXP's native select can fail to commit a new choice during panel refreshes.
+  // A numeric field commits on input and change, without being reset while focused.
+  const countLabel = h("span", { class: "count-label", title: "本次生成数量" }, "×");
+  const countInput = h("input", { class: "field count-input", type: "number", min: "1", max: "4", step: "1",
+    value: "1", title: "本次生成数量（1～4）", "aria-label": "生成数量" }) as HTMLInputElement;
+  let countEditing = false, countEditingProfile: string | null = null;
+  const saveCount = (n: number) => {
+    if (!pstate || !profile || pstate.count === n) return;
+    pstate.count = n;
+    store.saveState(profile.id, pstate);
+  };
+  const commitCount = () => {
+    // A mode/profile switch during an edit must not save the old digit to the new workflow.
+    if (countEditing && countEditingProfile !== (profile?.id ?? null)) {
+      countInput.value = String(normalizeVariationCount(pstate?.count));
+      countEditing = false;
+      return;
+    }
+    const raw = countInput.value.trim();
+    const n = raw ? normalizeVariationCount(raw) : normalizeVariationCount(pstate?.count);
+    countInput.value = String(n);
+    saveCount(n);
+  };
+  countInput.addEventListener("focus", () => { countEditing = true; countEditingProfile = profile?.id ?? null; });
+  countInput.addEventListener("input", () => {
+    // Store a valid single digit immediately; partial values wait for change/blur.
+    if (/^[1-4]$/.test(countInput.value)) saveCount(Number(countInput.value));
+  });
+  countInput.addEventListener("change", commitCount);
+  countInput.addEventListener("blur", () => { commitCount(); countEditing = false; });
   const compareBtn = h("button", { class: "icon-btn sm compare", title: "按住查看原图（隐藏当前填充）" }, icon("eye", 14));
   const prompt = h("textarea", { class: "prompt", rows: 4 }) as HTMLTextAreaElement;
   const refsEl = h("div", { class: "refs" });
@@ -250,11 +256,10 @@ export function mountApp(root: HTMLElement, svc: Services) {
       h("section", { class: "card" },
         prompt, promptHint, favEl, exRemoveRow, refsEl,
         h("div", { class: "ctx-row" }, targetEl, selEl),
-        h("div", { class: "gen-row" }, countSel, genBtn),
+        h("div", { class: "gen-row" }, countLabel, countInput, genBtn),
         progEl),
       h("section", { class: "card" },
         h("div", { class: "card-head" }, h("span", { class: "label" }, "变体"), varCountEl, h("span", { class: "grow" }), compareBtn, regenBtn),
-        fillSel,
         historyEl, varPromptEl),
       h("section", { class: "card adv" }, advHead, advBody)), genView), toolsView.el), mainEl),
     (footEl.append(statusEl, h("span", { class: "ver" }, svc.version)), footEl),
@@ -302,19 +307,14 @@ export function mountApp(root: HTMLElement, svc: Services) {
 
   function renderHistory() {
     const add = willAdd();
-    targetEl.textContent = add ? `添加到「${group!.name}」` : mode === "outpaint" ? "新建扩图" : mode === "txt2img" ? "新建生成" : mode === "upscale" ? (upLayerMode() ? "智能对象" : "新文档") : mode === "blend" ? "新建融图" : mode === "extract" ? "新建抠图" : "新建填充";
-    targetEl.title = mode === "upscale" ? (upLayerMode() ? "结果放在原图层上方，是同样大小的智能对象（里面是放大后的图片），原图层隐藏" : "放大结果放进一个新文档，原文档不改动")
-      : mode === "txt2img"
-      ? (add ? `新变体加入「${group!.name}」，放在它原来的位置。点击改为新建` : group?.kind === "txt2img" ? `新建一组生成结果。点击改为添加到「${group.name}」` : "生成结果放进选区；没有选区时铺满画布；没有打开文档时新建文档")
-      : mode === "outpaint"
-      ? (add ? `新变体加入「${group!.name}」，使用它原来的扩展尺寸。拖动上面的画布边缘可改为新建扩图` : "按上面设定的尺寸扩展画布，并生成扩展部分")
-      : !group ? "用当前选区新建一个 AI 填充"
-      : add ? `新变体加入「${group.name}」，使用它原来的遮罩${sel ? "。点击改为用当前选区新建填充" : ""}`
-      : `当前选区和「${group.name}」不同，将新建填充。点击改为添加到「${group.name}」`;
-    targetEl.className = "target " + (add ? "cont" : "new") + (group && group.kind === mode && (mode === "txt2img" || (sel && inpaintLike(mode))) ? " switchable" : "");
-    replace(fillSel, ...fills.map(f => h("option", { value: String(f.layerId) }, f.name)));
-    fillSel.hidden = fills.length < 1;
-    fillSel.value = group ? String(group.layerId) : "";
+    const selectionBased = !!sel && inpaintLike(mode);
+    targetEl.textContent = selectionBased ? "按蒙版自动分组" : add && group ? "当前 AI 图层 · " + group.name
+      : mode === "outpaint" ? "新建扩图" : mode === "txt2img" ? "新建生成"
+      : mode === "upscale" ? (upLayerMode() ? "智能对象" : "新文档")
+      : mode === "blend" ? "新建融图" : mode === "extract" ? "新建抠图" : "新建填充";
+    targetEl.title = selectionBased ? "仅当选区蒙版与当前 AI 图层逐像素相同时增加变体，否则新建 AI 图层"
+      : add ? "沿用当前选中 AI 图层的蒙版继续生成变体" : "新建 AI 图层；选择其他 AI 图层即可查看对应变体";
+    targetEl.className = "target " + (add && !selectionBased ? "cont" : "new");
     const ratio = group ? (group.rect.bottom - group.rect.top) / Math.max(1, group.rect.right - group.rect.left) : 1;
     const h0 = Math.round(Math.max(56, Math.min(132, 96 * ratio)));
     const tiles: HTMLElement[] = variations.map(v => {
@@ -348,11 +348,16 @@ export function mountApp(root: HTMLElement, svc: Services) {
     if (!group || loadingThumbs) return;
     loadingThumbs = true;
     try {
-      for (const v of variations) {
-        const key = `${group.docId}:${v.layerId}`;
-        if (thumbs.has(key)) continue;
-        try { thumbs.set(key, await svc.host.thumbnail(group, v.layerId, 128)); } catch (e) { log("warn", "thumbnail", e); thumbs.set(key, ""); }
-        renderHistory();
+      // WaveLayer selection can change while a thumbnail read is in flight.
+      // Re-evaluate the current AI group after each read, not a stale variation list.
+      while (group) {
+        const target: FillGroup = group;
+        const v = variations.find(x => !thumbs.has(target.docId + ":" + x.layerId));
+        if (!v) break;
+        const key = target.docId + ":" + v.layerId;
+        try { thumbs.set(key, await svc.host.thumbnail(target, v.layerId, 128)); }
+        catch (e) { log("warn", "thumbnail", e); thumbs.set(key, ""); }
+        if (group?.docId === target.docId && group.layerId === target.layerId) renderHistory();
       }
     } finally { loadingThumbs = false; }
   }
@@ -372,13 +377,16 @@ export function mountApp(root: HTMLElement, svc: Services) {
     prompt.hidden = mode === "upscale";
     exRemoveRow.hidden = mode !== "extract";
     exRemoveBox.checked = settings.extractRemove !== false;
-    countSel.hidden = mode === "upscale" && upLayerMode();
+    countInput.hidden = countLabel.hidden = mode === "upscale" && upLayerMode();
     t2iRatio.value = settings.t2iRatio ?? T2I_FOLLOW;
     t2iLong.value = String(settings.t2iLong ?? 1536);
     flowName.textContent = profile ? profile.name : mode === "outpaint" ? "导入扩图工作流" : mode === "txt2img" ? "导入文生图工作流" : mode === "upscale" ? "导入放大工作流" : mode === "blend" ? "导入融图工作流" : mode === "extract" ? "导入抠图工作流" : "导入工作流";
     flowBtn.title = profile ? `工作流：${profile.name}（点击切换、导入或校准）` : "导入 ComfyUI 工作流";
     flowBtn.classList.toggle("warn", !!profile && validateProfile(profile).length > 0);
-    countSel.value = String(pstate?.count ?? 1);
+    // Do not overwrite partially typed digits while a Photoshop/ComfyUI refresh runs.
+    if (!countEditing || countEditingProfile !== (profile?.id ?? null)) {
+      countInput.value = String(normalizeVariationCount(pstate?.count));
+    }
     const allowEmpty = profile?.options.allowEmptyPrompt;
     // UXP's native textarea can merge its placeholder into the typed text, so the hint lives outside it
     promptHint.textContent = mode === "txt2img" ? "描述想要生成的画面"
@@ -593,21 +601,12 @@ export function mountApp(root: HTMLElement, svc: Services) {
     try {
       doc = svc.host.activeDoc();
       sel = doc ? await svc.host.selectionBounds(doc.id) : null;
-      fills = doc ? svc.host.listFillGroups(doc.id) : [];
       const active = doc ? await svc.host.activeFillGroup() : null;
-      // only a *newly* selected fill layer takes over, so picking another fill in the panel sticks
-      const activeKey = active ? `${active.docId}:${active.layerId}` : "";
-      if (doc && active && activeKey !== lastActive && pinned.get(doc.id) !== active.layerId) {
-        pinned.set(doc.id, active.layerId); choice = null;
-        if (active.kind !== mode && !run) switchTo = active.kind; // selecting an expansion opens 扩图 and vice versa
-      }
-      lastActive = activeKey;
-      const pin = doc ? pinned.get(doc.id) : undefined;
-      group = doc && pin !== undefined ? await svc.host.fillGroupById(doc.id, pin) : null;
-      if (doc && !group && pin !== undefined && !fills.some(f => f.layerId === pin)) pinned.delete(doc.id);
+      group = active;
+      if (active && active.kind !== mode && !run) switchTo = active.kind;
       variations = group ? await svc.host.variations(group) : [];
-      const now = group ? `${group.docId}:${group.layerId}` : "";
-      if (now !== lastGroupKey) { log("info", "current fill", now || "none", active ? "(selected)" : pin !== undefined ? "(pinned)" : ""); lastGroupKey = now; }
+      const now = group ? String(group.docId) + ":" + String(group.layerId) : "";
+      if (now !== lastGroupKey) { log("info", "current fill", now || "none", active ? "(selected)" : ""); lastGroupKey = now; }
     } catch (e) { log("warn", "refresh failed", e); }
     finally { refreshing = false; }
     if (switchTo) setMode(switchTo);
@@ -1147,12 +1146,16 @@ export function mountApp(root: HTMLElement, svc: Services) {
     const p = profile, ps = pstate;
     run = { stage: "准备中…", progress: null, detail: "", signal: { aborted: false } };
     const current = run;
+    // Remember the actual group written to the PSD, including a partially successful run.
+    // A new AI result is represented as one group in WaveLayer, not its vN child layer.
+    const written = { group: null as FillGroup | null };
     stash = null;
     renderAll();
     try {
       const res = await runInpaint(svc.host, comfy, {
         profile: p, prompt: again ? again.prompt : cleanPrompt(prompt.value), seed: ps.seedMode === "fixed" ? ps.seed : null, params: effectiveParams(p, ps),
         addTo: again ? again.addTo : willAdd() ? group ?? undefined : undefined,
+        reuseMask: !!again,
         pads: modeOf(p) === "outpaint" ? { ...pads } : undefined,
         size: modeOf(p) === "txt2img" ? t2iSize() : undefined,
         scale: modeOf(p) === "upscale" ? upScale() : undefined,
@@ -1167,11 +1170,12 @@ export function mountApp(root: HTMLElement, svc: Services) {
         progress: (f, t) => { current.progress = f; current.detail = t ?? ""; renderAction(); renderHistory(); },
         promptQueued: id => { current.promptId = id; },
         variationAdded: (g, v) => {
+          written.group = g;
           // the canvas has grown: clear the extension at once, so a later failure / cancel
           // can't leave it set and expand the canvas a second time
           if (g.kind === "outpaint" && group?.layerId !== g.layerId && padTotal()) { pads = { left: 0, right: 0, top: 0, bottom: 0 }; expander.setPads(pads); }
           if (group?.layerId !== g.layerId) variations = [];
-          group = g; pinned.set(g.docId, g.layerId); choice = null;
+          group = g;
           variations = [...variations.map(x => ({ ...x, visible: false })), v]; renderHistory();
         },
         debug: settings.debugFiles ? svc.debugSave : undefined,
@@ -1191,6 +1195,16 @@ export function mountApp(root: HTMLElement, svc: Services) {
       else setStatus(current.signal.aborted ? "已取消" : (e as Error).message, current.signal.aborted ? "info" : "error");
     } finally {
       run = null;
+      // Do this after all variants and optional cutout-removal work finish. Photoshop's
+      // placeEvent leaves the vN child selected; WaveLayer treats its parent as one AI layer.
+      const writtenGroup = written.group;
+      if (writtenGroup) {
+        try { await svc.host.selectFillGroup(writtenGroup); }
+        catch (e) {
+          log("warn", "select generated AI layer failed", writtenGroup.layerId, e);
+          setStatus("图片已生成，但自动选中 AI 图层失败：" + (e as Error).message, "error");
+        }
+      }
       renderAll();
       await refresh();
       void loadDocThumb(true);

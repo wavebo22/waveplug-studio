@@ -80,6 +80,8 @@ export interface PsHost {
   docExists(id: number): boolean;
   /** Bounds of the active selection, or null when there is none. */
   selectionBounds(docId: number): Promise<Rect | null>;
+  /** Exact grayscale pixels of the active selection (not just its rectangular bounds). */
+  selectionMask(docId: number, rect: Rect): Promise<Pixels>;
   /** The fill group the active layer is (or is inside), else null. */
   activeFillGroup(): Promise<FillGroup | null>;
   /** All AI fill groups in the document (top to bottom). */
@@ -110,6 +112,8 @@ export interface PsHost {
 
   variations(g: FillGroup): Promise<Variation[]>;
   showVariation(g: FillGroup, layerId: number): Promise<void>;
+  /** Selects the outer AI result group so Photoshop and WaveLayer highlight the same AI layer. */
+  selectFillGroup(g: FillGroup): Promise<void>;
   /** Shows / hides the whole fill (compare with the original). Not recorded in history. */
   setFillVisible(g: FillGroup, visible: boolean): Promise<void>;
   deleteVariation(g: FillGroup, layerId: number): Promise<void>;
@@ -176,6 +180,9 @@ export interface LayerDeleteResult {
 
 /** WavePlug 图层 panel: the active document's layer tree, kept in step with Photoshop's Layers panel. */
 export interface LayerTree {
+  /** Insert all staged references into the active PSD inside one new layer group (single undo step).
+   *  Source PSDs must still be open. Nothing is removed from the workbench or source PSDs. */
+  placeStaged(entries: import("../core/layers/workbench.ts").StagedLayer[]): Promise<import("./uxpWorkbench.ts").WorkbenchPlacementResult>;
   /** All layers top to bottom with their status, and the selected ids; null without a document.
    *  `docKey`: the document across sessions (its file, or its name before it is saved). */
   read(): Promise<{ docId: number; docKey: string; layers: TreeLayer[]; selected: number[]; width: number; height: number } | null>;
@@ -192,6 +199,9 @@ export interface LayerTree {
   setVisible(docId: number, ids: number[], visible: boolean): Promise<void>;
   /** Runs the moves (core/layers/tree.ts dropPlan) as one undo step. */
   move(docId: number, steps: MoveStep[]): Promise<ToolResult>;
+  /** Alt-drag duplicates whole layers/groups (including AI variants), positions the copies in
+   *  list order and selects only the copies, all in one Photoshop undo state. */
+  copy(docId: number, steps: MoveStep[]): Promise<{ done: number; skipped: string[]; ids: number[] }>;
   /** Small pictures of the layers, each the whole `canvas` at most `size` px each way (like Photoshop's
    *  own): null for a layer without one, undefined when Photoshop couldn't read it just now; `mask`:
    *  the layer mask. One modal call. */

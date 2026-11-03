@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { type MenuItem, type RawLayer, ancestors, effectsOf, isVariantLayer, packChips, rawProblem, buildTree, clickSelect, contentUsers, deleteTargets, nextLayerAfterDelete, planLayerDeletion, canDropToDelete, canDropMaskOnto, dropPlan, dropZone, filterCounts, layerMenu, layerTags, linkPeers, lockPlan, lockedByGroup, sharedColors, selectionAfterLocalClear, visibleRows } from "../src/core/layers/tree.ts";
+import { type MenuItem, type RawLayer, ancestors, effectsOf, isVariantLayer, packChips, rawProblem, buildTree, clickSelect, contentUsers, deleteTargets, nextLayerAfterDelete, planLayerDeletion, canDropToDelete, canDropMaskOnto, copyPlan, dropPlan, dropZone, filterCounts, layerMenu, layerTags, linkPeers, lockPlan, lockedByGroup, sharedColors, selectionAfterLocalClear, visibleRows } from "../src/core/layers/tree.ts";
 import { ThumbCache, frameThumb, thumbArea } from "../src/core/layers/thumbs.ts";
 
 const raw = (id: number, name: string, kind: number, extra: Partial<RawLayer> = {}): RawLayer =>
@@ -220,6 +220,78 @@ test("拖动: move plans keep the dragged layers' order", () => {
   assert.deepEqual(dropPlan(t, [1, 24], 30, "above"), [{ id: 1, rel: 20, place: "after" }, { id: 24, rel: 1, place: "after" }]);
   // Photoshop lists the background as a pixel layer with background: true
   assert.equal(buildTree([raw(5, "背景", 1, { background: true })])[0].kind, "background");
+});
+
+test("Alt 拖动: 普通单图层/多选复制，保留原层及其排序", () => {
+  const t = buildTree(doc());
+  // Alt-copy allows placing a clone beside itself, unlike ordinary moves.
+  assert.deepEqual(copyPlan(t, [1], 1, "above"), [{ id: 1, rel: 1, place: "before" }]);
+  assert.deepEqual(copyPlan(t, [1], 1, "below"), [{ id: 1, rel: 1, place: "after" }]);
+  assert.equal(dropPlan(t, [1], 1, "below"), null);
+  // Top-to-bottom order is based on the document, not Ctrl-click order.
+  assert.deepEqual(copyPlan(t, [24, 21], 1, "below"), [
+    { id: 21, rel: 1, place: "after" },
+    { id: 24, rel: 21, place: "after" },
+  ]);
+  // When inserting above, each clone is placed before the fixed target.
+  assert.deepEqual(copyPlan(t, [24, 21], 1, "above"), [
+    { id: 21, rel: 1, place: "before" },
+    { id: 24, rel: 1, place: "before" },
+  ]);
+  assert.deepEqual(copyPlan(t, [24, 21], 20, "inside"), [
+    { id: 21, rel: 21, place: "before" },
+    { id: 24, rel: 21, place: "before" },
+  ]);
+});
+
+test("Alt 拖动: 复制完整组/AI 变体组；禁止写入 AI 组内部及自包含循环", () => {
+  const t = buildTree(doc());
+  assert.deepEqual(copyPlan(t, [23, 22, 20], 1, "above"), [
+    { id: 20, rel: 1, place: "before" },
+  ]); // selected children belong to their copied parent, not separate copies
+  assert.deepEqual(copyPlan(t, [10], 20, "above"), [
+    { id: 10, rel: 20, place: "before" },
+  ]); // the entire AI group is copied, with both variant layers
+  assert.equal(copyPlan(t, [1], 10, "inside"), null);
+  assert.equal(copyPlan(t, [1], 11, "above"), null);
+  assert.equal(copyPlan(t, [10], 11, "above"), null);
+  assert.equal(copyPlan(t, [20], 20, "inside"), null);
+  assert.equal(copyPlan(t, [20], 23, "above"), null);
+  assert.equal(copyPlan(t, [20], 21, "inside"), null);
+  assert.deepEqual(copyPlan(t, [20], 20, "below"), [
+    { id: 20, rel: 20, place: "after" },
+  ]);
+  assert.equal(copyPlan(t, [1], 999, "above"), null);
+  const locked = buildTree([
+    raw(1, "未锁定来源", 1),
+    raw(2, "锁定组", 7, { locked: true, lockAll: true }),
+    raw(3, "组内图层", 1), end(),
+  ]);
+  assert.equal(copyPlan(locked, [1], 2, "inside"), null);
+  assert.equal(copyPlan(locked, [1], 3, "above"), null);
+  assert.deepEqual(copyPlan(locked, [1], 2, "above"), [{ id: 1, rel: 2, place: "before" }]);
+});
+
+test("Alt 拖动: 折叠组/空组/背景边界复制", () => {
+  const t = buildTree(doc());
+  assert.deepEqual(copyPlan(t, [1, 10], 22, "inside"), [
+    { id: 1, rel: 23, place: "before" },
+    { id: 10, rel: 23, place: "before" },
+  ]);
+  const empty = buildTree([raw(1, "A", 1), raw(2, "空组", 7), end(), raw(3, "背景", 1, { background: true })]);
+  assert.deepEqual(copyPlan(empty, [1, 3], 2, "inside"), [
+    { id: 1, rel: 2, place: "inside" },
+    { id: 3, rel: 1, place: "after" },
+  ]);
+  // Background cannot be the last insertion point, but it can be duplicated.
+  assert.equal(copyPlan(empty, [1], 3, "below"), null);
+  assert.deepEqual(copyPlan(empty, [3], 3, "above"), [
+    { id: 3, rel: 2, place: "after" },
+  ]);
+  const onlyBg = buildTree([raw(9, "背景", 1, { background: true })]);
+  assert.deepEqual(copyPlan(onlyBg, [9], 9, "above"), [
+    { id: 9, rel: 9, place: "before" },
+  ]);
 });
 
 test("拖动: impossible drops", () => {

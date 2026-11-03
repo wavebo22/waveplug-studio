@@ -511,6 +511,53 @@ export function dropPlan(layers: TreeLayer[], dragIds: number[], targetId: numbe
   return first ? ids.map(id => ({ id, rel: first.id, place: "before" })) : chain({ id: ids[0], rel: targetId, place: "inside" });
 }
 
+/**
+ * Alt-drag uses copies of the dragged top-level items, leaving the original hierarchy untouched.
+ * A step that refers to an earlier dragged source will instead refer to its newly created copy
+ * (the Photoshop host maintains that mapping). This keeps multi-selection order when inserting
+ * below a layer or into an empty group.
+ *
+ * Unlike a move, a copy may be placed beside its original. Never insert INTO an AI result group,
+ * or next to its hidden variant children: WaveLayer represents that whole group as one AI layer.
+ */
+export function copyPlan(layers: TreeLayer[], sourceIds: number[], targetId: number, where: Where): MoveStep[] | null {
+  const byId = new Map(layers.map(l => [l.id, l]));
+  const target = byId.get(targetId);
+  if (!target) return null;
+  const sources = new Set(sourceIds);
+  const ids = layers.filter(l => sources.has(l.id) && !ancestors(layers, l.id).some(id => sources.has(id))).map(l => l.id);
+  if (!ids.length) return null;
+  const parents = ancestors(layers, targetId);
+  // A locked destination group cannot accept a new child. Its contents must also not be
+  // modified by inserting copies next to one of its existing children.
+  if (parents.some(id => byId.get(id)?.lockAll)) return null;
+  // Duplicating a group beside/inside one of its own children would unexpectedly put the
+  // duplicate under its original; disallow that as for a normal move.
+  if (parents.some(id => sources.has(id))) return null;
+  if (where === "inside") {
+    if (target.kind !== "group" || target.lockAll || isVariantLayer(target) || sources.has(targetId)) return null;
+  } else if (parents.some(id => isVariantLayer(byId.get(id)!))) return null;
+
+  const chain = (first: MoveStep): MoveStep[] => [
+    first, ...ids.slice(1).map((id, i) => ({ id, rel: ids[i], place: "after" as const })),
+  ];
+  // Photoshop will not accept a layer BELOW the locked background. ABOVE it, place the copies
+  // below the previous top-level sibling, or directly above Background when it is the only one.
+  if (target.kind === "background") {
+    if (where === "below") return null;
+    const prev = layers.filter(l => l.parentId === target.parentId && l.id !== targetId).pop();
+    return prev ? copyPlan(layers, sourceIds, prev.id, "below")
+      : chain({ id: ids[0], rel: targetId, place: "before" });
+  }
+  if (where === "above") return ids.map(id => ({ id, rel: targetId, place: "before" }));
+  if (where === "below") return chain({ id: ids[0], rel: targetId, place: "after" });
+
+  // Copying into a group doesn't remove any original child; insert copies at the top.
+  const first = layers.find(l => l.parentId === targetId);
+  return first ? ids.map(id => ({ id, rel: first.id, place: "before" }))
+    : chain({ id: ids[0], rel: targetId, place: "inside" });
+}
+
 // ── right-click menu ──
 
 /** Commands the layer panel sends to Photoshop (see LayerTree.run). */
