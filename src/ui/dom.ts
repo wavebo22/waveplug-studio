@@ -64,7 +64,49 @@ const PATHS: Record<string, string> = {
   folder: "M3 6h5l2 2h7v8H3z",
   refresh: "M16 10a6 6 0 1 1-1.8-4.3M16 4v3h-3",
   paste: "M7 3h6v3H7zM5 5H4v12h12V5h-1M7 10h6M7 13h4",
+  link: "M8.5 11.5l3-3M7.5 9.5L6 11a2.5 2.5 0 0 0 3.5 3.5L11 13M12.5 10.5L14 9a2.5 2.5 0 0 0-3.5-3.5L9 7",
+  mask: "M3 4h14v12H3zM10 13a3 3 0 1 0 0-6 3 3 0 0 0 0 6z",
+  adjust: "M10 3a7 7 0 1 0 0 14 7 7 0 0 0 0-14zM10 3v14M10 6l3.5-2M10 10h6.5M10 14l3.5 2",
+  newLayer: "M4 4h12v12H4zM10 7v6M7 10h6",
+  trash: "M4 6h12M8 6V4h4v2M6 6l1 10h6l1-10",
+  clip: "M6 3v6a2 2 0 0 0 2 2h7M12 8l3 3-3 3",
+  text: "M5 5V4h10v1M10 4v12M8 16h4",
+  shape: "M10 3l6 7-6 7-6-7zM10 3v14",
+  fill: "M4 4h12v12H4zM4 4l12 12",
+  smart: "M5 3h7l3 3v11H5zM12 3v3h3M8 10h4v4H8z",
+  folderOpen: "M3 6h5l2 2h6v2M3 6v10h12l3-6H6l-3 6",
+  move: "M10 3v14M3 10h14M8 5l2-2 2 2M8 15l2 2 2-2M5 8l-2 2 2 2M15 8l2 2-2 2",
+  brush: "M14 3l3 3-7 7-3-3zM7 10l-2 2c-1 1-.5 3-2.5 4 2.5.5 4.5 0 5.5-1l2-2",
+  copies: "M7 7h9v9H7zM4 13V4h9",
+  single: "M5 5h10v10H5z",
+  external: "M9 5H4v11h11v-5M12 3h5v5M17 3l-7 7",
+  vector: "M6 15L10 6l4 9M4 14h4v3H4zM12 14h4v3h-4zM8 3h4v3H8z",
+  filters: "M8 5a5 5 0 1 0 0 10 5 5 0 0 0 0-10zM12 5a5 5 0 1 0 0 10 5 5 0 0 0 0-10z",
+  checker: "M4 4h12v12H4zM4 4h4v4H4zM12 4h4v4h-4zM8 8h4v4H8zM4 12h4v4H4zM12 12h4v4h-4z",
+  lock: "M6.5 9V7a3.5 3.5 0 0 1 7 0v2M5 9h10v8H5z",
   eye: "M2 10s3-5.5 8-5.5 8 5.5 8 5.5-3 5.5-8 5.5S2 10 2 10zM10 12.3a2.3 2.3 0 1 0 0-4.6 2.3 2.3 0 0 0 0 4.6z",
+  // the 图层 panel's set, drawn in the manner of Photoshop's Layers panel (outline + solid parts, FILLS)
+  psEye: "M2 10c2-3.6 4.8-5.5 8-5.5s6 1.9 8 5.5c-2 3.6-4.8 5.5-8 5.5S4 13.6 2 10z",
+  psLock: "M7 9V6.8a3 3 0 0 1 6 0V9",
+  psLink: "M8.6 11.4l2.8-2.8M9.2 6.6l1.4-1.4a2.8 2.8 0 0 1 4 4l-1.4 1.4M10.8 13.4l-1.4 1.4a2.8 2.8 0 0 1-4-4l1.4-1.4",
+  psMask: "M3 4h14v12H3z",
+  psAdjust: "M10 3.5a6.5 6.5 0 1 0 0 13 6.5 6.5 0 0 0 0-13z",
+  psFolder: "M2.5 5.5h5l1.5 1.5h8.5v9h-15z",
+  psFolderOpen: "M2.5 15.5v-10h5l1.5 1.5h6.5v2.5M2.5 15.5h12.5l2.5-6.5H5z",
+  psTrash: "M4.5 6h11M8 6V4.5h4V6M6 6l.8 10h6.4l.8-10M8.5 8.5v5M11.5 8.5v5",
+  psClip: "M6 4v6.5a1.5 1.5 0 0 0 1.5 1.5H15M12.5 9.5L15 12l-2.5 2.5",
+  psText: "",
+  psNew: "M5 3.5h7l3 3v10H5zM10 8.5v5M7.5 11h5",
+  psSmart: "M3.5 4.5h13v11h-13zM7 8h6v4H7z",
+};
+
+/** solid parts drawn over an icon's outline (pupil, lock body …) */
+const FILLS: Record<string, string> = {
+  psEye: "M10 7.3a2.7 2.7 0 1 1 0 5.4 2.7 2.7 0 0 1 0-5.4z",
+  psLock: "M5 9h10v8H5z",
+  psMask: "M10 6.8a3.2 3.2 0 1 1 0 6.4 3.2 3.2 0 0 1 0-6.4z",
+  psAdjust: "M10 3.5a6.5 6.5 0 0 0 0 13z",
+  psText: "M4.5 4h11v2.4h-4.3V16H8.8V6.4H4.5z",
 };
 
 export function icon(name: keyof typeof PATHS | string, size = 14): SVGElement {
@@ -82,8 +124,24 @@ export function icon(name: keyof typeof PATHS | string, size = 14): SVGElement {
   p.setAttribute("stroke-linecap", "round");
   p.setAttribute("stroke-linejoin", "round");
   svg.append(p);
+  if (FILLS[name]) {
+    const f = document.createElementNS(ns, "path");
+    f.setAttribute("d", FILLS[name]);
+    f.setAttribute("fill", "currentColor");
+    svg.append(f);
+  }
   return svg;
 }
+
+/** Shows or hides `el` by its display style and the presence of the `hidden` attribute (added /
+ *  removed, never set to "false": in UXP an element once hidden through the property may not come
+ *  back, which left list rows blank). */
+export function setShown(el: HTMLElement, on: boolean) {
+  if (on) el.removeAttribute("hidden"); else el.setAttribute("hidden", "");
+  el.style.display = on ? "" : "none";
+}
+
+export const isShown = (el: HTMLElement) => el.style.display !== "none" && !el.hasAttribute("hidden");
 
 export function replace(el: Element, ...children: (Child | Child[])[]) {
   el.textContent = "";

@@ -31,6 +31,29 @@
         "width": 360,
         "height": 760
       }
+    },
+    {
+      "type": "panel",
+      "id": "layers",
+      "label": {
+        "default": "WavePlug 图层"
+      },
+      "minimumSize": {
+        "width": 220,
+        "height": 200
+      },
+      "maximumSize": {
+        "width": 800,
+        "height": 2000
+      },
+      "preferredDockedSize": {
+        "width": 300,
+        "height": 560
+      },
+      "preferredFloatingSize": {
+        "width": 320,
+        "height": 600
+      }
     }
   ],
   "requiredPermissions": {

@@ -24,6 +24,10 @@
 
 * { box-sizing: border-box; }
 html, body { margin: 0; padding: 0; height: 100%; }
+/* no text selection in the panels: a click on selected text starts a drag in UXP (a hand cursor, the
+   button under it does nothing); typing fields and the diagnosis output keep theirs */
+body { user-select: none; }
+input, textarea { user-select: text; }
 body {
   background: var(--bg); color: var(--text);
   font-family: "Segoe UI", "Microsoft YaHei UI", -apple-system, "PingFang SC", sans-serif;
@@ -335,3 +339,317 @@ button, .ub { font: inherit; color: inherit; background: none; border: 0; paddin
 .check-row .slim-size { flex: none; font-size: var(--fs); color: var(--accent); }
 .slim-detail { margin: 2px 0 0 22px; line-height: 1.45; }
 .slim-warn { margin: 0 0 10px; padding: 6px 8px; border-left: 3px solid #f0b54a; color: var(--text); line-height: 1.45; }
+
+/* WavePlug 图层 panel list (virtual list: rows are absolutely placed inside a tall inner box) */
+.lt .lt-head-btn { white-space: nowrap; height: 22px; padding: 0 7px; font-size: var(--fs-s); color: var(--text); border: 1px solid var(--field-line); border-radius: var(--r); }
+.lt-head-btn:hover { background: var(--hover); border-color: var(--accent); }
+.lt-head-btn.is-disabled { opacity: .45; }
+.lt-seg { margin-bottom: 8px; }
+.lt-filter { height: 24px; font-size: var(--fs-s); color: var(--text); }
+.lt-filter.is-disabled { opacity: .45; }
+.lt-list { position: relative; overflow: hidden; border: 1px solid var(--field-line); border-radius: var(--r); background: var(--field); }
+.lt-inner { position: relative; }
+.lt-empty { position: absolute; left: 0; right: 0; top: 10px; text-align: center; font-size: var(--fs); }
+.lt-row { position: relative; width: 100%; flex: none; height: var(--lt-row); display: flex; align-items: center; padding-right: 6px; cursor: default; color: var(--text); font-size: var(--fs); border-bottom: 1px solid rgba(255, 255, 255, .04); }
+.lt-row.hover { background: var(--hover); }
+.lt-row.on { background: rgba(63, 181, 159, .30); }
+.lt-row.on.hover { background: rgba(63, 181, 159, .38); }
+.lt-row.context .lt-name { color: var(--muted); }
+.lt-row.off .lt-name { color: var(--muted); }
+.lt-eye { width: 30px; height: 100%; flex: none; display: flex; align-items: center; justify-content: center; color: var(--text); cursor: pointer; border-right: 1px solid rgba(255, 255, 255, .06); }
+.lt-eye.hidden::after { content: ""; width: 8px; height: 8px; border: 1px solid var(--faint); border-radius: 2px; }
+.lt-eye:hover { background: var(--hover); }
+.lt-body { flex: 1 1 auto; min-width: 0; display: flex; align-items: center; height: 100%; padding-left: 4px; }
+.lt-indent { flex: none; height: 1px; }
+.lt-twisty { width: 16px; height: 100%; flex: none; display: flex; align-items: center; justify-content: center; font-size: 12px; color: var(--text); cursor: pointer; }
+.lt-mark { width: 18px; flex: none; display: flex; align-items: center; justify-content: center; color: var(--muted); margin-right: 4px; }
+.lt-kind { font-size: 11px; font-weight: 700; color: var(--muted); }
+.lt-name { flex: 1 1 auto; min-width: 0; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
+.lt-tags { flex: none; display: flex; align-items: center; margin-left: 6px; }
+.lt-tag { margin-left: 3px; padding: 0 5px; height: 18px; line-height: 16px; border-radius: 3px; font-size: var(--fs-s); border: 1px solid var(--field-line); color: var(--text); white-space: nowrap; }
+.lt-tag.own { color: var(--accent-hi); border-color: var(--accent); }
+.lt-tag.shared { color: #f5c062; border-color: #f0b54a; }
+.lt-tag.link { color: #8cbcff; border-color: #6aa8ff; }
+.lt-tag.edit { color: #7fd8a4; border-color: var(--ok); }
+.lt-tag.content { color: #f29a8a; border-color: var(--err); }
+.lt-tag.ai { color: #cdb2ff; border-color: #b08cff; }
+.lt-tag.mask { color: var(--text); }
+.lt-lock { margin-left: 5px; color: var(--warn); display: flex; }
+
+/* WavePlug 图层 panel: the layer list filling the whole panel */
+#layers-app { height: 100%; }
+.lp { display: flex; flex-direction: column; height: 100%; padding: 8px; }
+.lt.fill { flex: 1 1 auto; display: flex; flex-direction: column; min-height: 0; }
+.lt.fill .lt-list { flex: 1 1 auto; min-height: 60px; }
+.lp-status { flex: none; min-height: 18px; margin-top: 4px; color: var(--muted); }
+.lp-status.error { color: var(--err); }
+.lp-status.ok { color: var(--ok); }
+
+/* 图层列表: thumbnails and drag to reorder */
+.lt-row { user-select: none; }
+.lt-mark.has-thumb { width: var(--lt-mark); margin-right: 6px; }
+.lt-thumb { position: relative; box-sizing: border-box; width: var(--lt-thumb); height: var(--lt-thumb); border-radius: 2px; overflow: hidden; border: 2px solid rgba(255, 255, 255, .14);
+  background-color: #8a8a8a; background-image: linear-gradient(45deg, #b0b0b0 25%, transparent 25%, transparent 75%, #b0b0b0 75%), linear-gradient(45deg, #b0b0b0 25%, transparent 25%, transparent 75%, #b0b0b0 75%); background-size: 8px 8px; background-position: 0 0, 4px 4px; }
+.lt-thumb img { display: block; width: 100%; height: 100%; object-fit: contain; }
+.lt-list.dragging .lt-row { cursor: move; }
+.lt-row.moving { opacity: .45; }
+.lt-drop { position: absolute; right: 4px; height: 2px; background: var(--accent-hi); pointer-events: none; z-index: 2; }
+.lt-drop.into { height: var(--lt-row); background: rgba(63, 181, 159, .18); border: 2px solid var(--accent-hi); border-radius: 3px; }
+/* narrow panels: the name keeps room, the status cells give way (their tooltip still tells) */
+.lt-name { min-width: 56px; }
+.lt-tags { flex: 0 1 auto; min-width: 0; overflow: hidden; }
+.lt-filter { flex: 1 1 auto; padding: 0 6px; white-space: nowrap; }
+.lt-hit { position: absolute; left: 0; right: 0; top: 0; z-index: 3; cursor: move; }
+
+/* 图层 panel: masks, clipping, fx, menus, toolbar */
+.lt.fill { position: relative; }
+.lt-mask { margin-right: 6px; flex: none; background: #fff; }
+.lt-mask.off::after { content: ""; position: absolute; left: 0; top: 0; right: 0; bottom: 0;
+  background: linear-gradient(45deg, transparent 46%, var(--err) 46%, var(--err) 54%, transparent 54%), linear-gradient(-45deg, transparent 46%, var(--err) 46%, var(--err) 54%, transparent 54%); }
+.lt-mask:hover, .lt-fx:hover { outline: 1px solid var(--accent-hi); }
+/* the picture or mask Photoshop paints on, on every selected layer: a green frame (the 2 px border every thumbnail has, so nothing moves) */
+.lt-thumb.lt-target { border-color: var(--accent-hi); }
+/* Alt+click: the mask is shown alone (or in red) in the document window */
+.lt-mask.viewing { border-color: #fff; }
+/* the chain between picture and mask (and mask and vector mask): fills the whole gap between the two
+   thumbnails (taking back the first one's 6 px margin), so it sits centred; empty when unlinked */
+.lt-mlink { width: 18px; flex: none; align-self: stretch; display: flex; align-items: center; justify-content: center; margin: 0 0 0 -6px; color: var(--muted); cursor: pointer; }
+.lt-mlink:hover { color: var(--accent-hi); background: rgba(255, 255, 255, .06); }
+.lt-clip { width: 16px; flex: none; display: flex; align-items: center; justify-content: center; color: var(--text); }
+.lt-name.clip-base { text-decoration: underline; }
+.lt-fx { margin-left: 5px; padding: 0 3px; font-style: italic; font-weight: 700; font-size: var(--fs); color: var(--text); cursor: pointer; border-radius: 2px; }
+.lt-fx.off { color: var(--faint); }
+.lt-rename { position: absolute; right: 6px; height: 22px; z-index: 4; background: var(--bg); color: var(--text); border: 1px solid var(--accent); border-radius: 3px; font: inherit; padding: 0 6px; }
+.lt-bar { flex: none; display: flex; justify-content: flex-end; align-items: center; margin-left: auto; }
+.lt-foot { flex: none; display: flex; flex-wrap: wrap; align-items: center; margin-top: 6px; padding-top: 4px; border-top: 1px solid var(--card-line); }
+.lt-foot-btns { display: flex; align-items: center; }
+.lt-foot-btns > * { margin-right: 4px; }
+.lt-info { flex: none; height: 16px; line-height: 16px; margin: -4px 0 6px; font-size: var(--fs-s); color: var(--text); opacity: .8; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.lt-tool { width: 30px; height: 28px; margin-left: 2px; border-radius: var(--r); color: var(--text); }
+.lt-tool:hover { background: var(--hover); }
+.lt-tool.is-disabled { opacity: .35; }
+.lt-tool.drop-on { background: rgba(63, 181, 159, .35); outline: 1px solid var(--accent-hi); }
+.lt-tool-fx { font-style: italic; font-weight: 700; font-size: 13px; }
+.pm { position: absolute; z-index: 20; min-width: 170px; overflow-y: auto; padding: 4px 0; background: #2b2b2b; border: 1px solid rgba(255, 255, 255, .22); border-radius: 5px; box-shadow: 0 4px 14px rgba(0, 0, 0, .5); }
+.pm-item { display: flex; align-items: center; height: 26px; padding: 0 12px; font-size: var(--fs); color: #f0f0f0; cursor: default; white-space: nowrap; }
+.pm-item:hover { background: var(--accent); color: var(--accent-ink); }
+.pm-item.off { color: #8a8a8a; }
+.pm-item.off:hover { background: none; color: #8a8a8a; }
+.pm-label { flex: 1 1 auto; }
+.pm-hint { margin-left: 18px; font-size: var(--fs-s); color: #a8a8a8; }
+.pm-item:hover .pm-hint { color: var(--accent-ink); }
+.pm-sep { height: 1px; margin: 4px 0; background: rgba(255, 255, 255, .14); }
+/* 图层颜色: colour squares in a menu (the current one framed; "no colour" crossed out in red) */
+.pm-swatches { display: flex; flex-wrap: wrap; padding: 4px 9px; }
+.pm-swatch { position: relative; width: 22px; height: 22px; margin: 3px; border-radius: 3px; border: 2px solid rgba(255, 255, 255, .25); cursor: pointer; }
+.pm-swatch:hover { border-color: #f0f0f0; }
+.pm-swatch.on { border-color: #fff; }
+.pm-swatch.none { background: #3a3a3a; overflow: hidden; }
+.pm-swatch.none::after { content: ""; position: absolute; left: 0; top: 0; right: 0; bottom: 0;
+  background: linear-gradient(45deg, transparent 44%, var(--err) 44%, var(--err) 56%, transparent 56%); }
+.lt-fx, .lt-lock { flex: none; }
+/* layer kinds and properties as icons */
+.lt-kind { display: flex; align-items: center; justify-content: center; color: var(--muted); }
+.lt-kind.k-group { color: #e3c06b; }
+.lt-kind.k-text { color: #9fc4ff; }
+.lt-kind.k-adjustment, .lt-kind.k-fill { color: #c9a8ff; }
+.lt-kind.k-shape { color: #8fd8b0; }
+.lt-badge { position: absolute; right: 0; bottom: 0; width: 12px; height: 12px; display: flex; align-items: center; justify-content: center; background: rgba(0, 0, 0, .75); color: #fff; border-top-left-radius: 2px; }
+.lt-badge.k-variant { width: 13px; height: 13px; color: #ffd76a; cursor: pointer; }
+.lt-badge.k-smart { width: 13px; height: 13px; cursor: pointer; }
+.lt-badge.k-smart.link { color: #82b6ff; }
+.lt-badge.k-smart.c0 { color: #f0b54a; } .lt-badge.k-smart.c1 { color: #5fcbb6; } .lt-badge.k-smart.c2 { color: #ec86d6; } .lt-badge.k-smart.c3 { color: #82b6ff; }
+.lt-badge.k-smart.c4 { color: #b8e06a; } .lt-badge.k-smart.c5 { color: #ff9470; } .lt-badge.k-smart.c6 { color: #b9a2ff; } .lt-badge.k-smart.c7 { color: #6be0e8; }
+.lt-chain { flex: none; margin-left: 5px; display: flex; color: #8cbcff; }
+.lt-lock.part { opacity: .55; }
+/* shared contents: one colour per content; layers linked with the selection */
+.lt-row { padding-left: 4px; }
+.lt-stripe { position: absolute; left: 0; top: 2px; bottom: 2px; width: 4px; border-radius: 2px; }
+.lt-stripe.c0 { background: #f0b54a; }
+.lt-tag.shared.c0 { color: #f0b54a; border-color: #f0b54a; }
+.lt-stripe.c1 { background: #5fcbb6; }
+.lt-tag.shared.c1 { color: #5fcbb6; border-color: #5fcbb6; }
+.lt-stripe.c2 { background: #ec86d6; }
+.lt-tag.shared.c2 { color: #ec86d6; border-color: #ec86d6; }
+.lt-stripe.c3 { background: #82b6ff; }
+.lt-tag.shared.c3 { color: #82b6ff; border-color: #82b6ff; }
+.lt-stripe.c4 { background: #b8e06a; }
+.lt-tag.shared.c4 { color: #b8e06a; border-color: #b8e06a; }
+.lt-stripe.c5 { background: #ff9470; }
+.lt-tag.shared.c5 { color: #ff9470; border-color: #ff9470; }
+.lt-stripe.c6 { background: #b9a2ff; }
+.lt-tag.shared.c6 { color: #b9a2ff; border-color: #b9a2ff; }
+.lt-stripe.c7 { background: #6be0e8; }
+.lt-tag.shared.c7 { color: #6be0e8; border-color: #6be0e8; }
+/* rows tinted while the selection is on: copies of its shared content and the layers linked with it,
+   in a paler shade of the selection's green (a closed group holding a copy, paler still) */
+.lt-row.peer { background: rgba(63, 181, 159, .15); }
+.lt-row.peer.hover { background: rgba(63, 181, 159, .22); }
+.lt-row.peer.inside { background: rgba(63, 181, 159, .08); }
+.lt-chain.peer { color: #fff; background: #4f86d9; border-radius: 3px; padding: 0 1px; }
+.lt .card-head .lt-peers { display: flex; align-items: center; height: 20px; padding: 0 6px; border-radius: 10px; font-size: var(--fs-s); color: #cfe0ff; background: rgba(79, 134, 217, .35); border: 1px solid #4f86d9; }
+.lt-peers:hover { background: rgba(79, 134, 217, .55); }
+.lt .card-head > * { flex: none; white-space: nowrap; }
+.lt .card-head > .muted { flex: 0 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+.lt .card-head > .grow { flex: 1 1 auto; }
+/* 可移动 / 可编辑 switches after the eye; nesting guide lines */
+.lt-toggle { width: 24px; height: 100%; flex: none; display: flex; align-items: center; justify-content: center; color: var(--muted); cursor: pointer; }
+.lt-toggle:hover { background: var(--hover); color: var(--text); }
+.lt-toggle.off { color: var(--warn); opacity: .9; }
+.lt-toggle.off .icon { opacity: .45; }
+.lt-toggle.off::after { content: ""; position: absolute; width: 14px; height: 2px; background: var(--warn); transform: rotate(-45deg); }
+.lt-toggle { position: relative; }
+.lt-indent { display: flex; flex: none; height: 100%; }
+.lt-guide { width: 7px; margin-left: 6px; height: 100%; flex: none; border-left: 1px solid rgba(255, 255, 255, .38); }
+.lt-row.on .lt-guide { border-left-color: rgba(255, 255, 255, .55); }
+/* status cells as icons */
+.lt-tag { display: flex; align-items: center; height: 20px; padding: 0 3px; }
+.lt-count { margin-left: 2px; font-size: var(--fs-s); font-weight: 700; }
+/* 智能滤镜 rows */
+.lt-filter-row .lt-name { color: var(--text); }
+.lt-filter-row.off .lt-name { color: var(--faint); }
+.lt-filter-mask { background: #fff; width: 26px; height: 16px; }
+.lt-filter-mask.none { background: #555; }
+.lt-filter-mask.viewing { border-color: #fff; }
+.lt-filter-mask:not(.none) { cursor: pointer; }
+.lt-kind.k-filter { color: var(--muted); }
+.lt-tag.filters { color: #cfd6de; }
+.lt-tag.filters.off { color: var(--faint); }
+/* top of the 图层 panel: search, kinds, blend mode / opacity / fill, locks */
+.lt-find { display: flex; align-items: center; margin-bottom: 6px; }
+.lt-search { flex: 1 1 auto; min-width: 60px; height: 26px; }
+.lt-kinds { display: flex; flex: none; margin-left: 4px; }
+.lt-kindbtn, .lt-lockbtn { width: 26px; height: 26px; border-radius: var(--r); color: var(--muted); }
+.lt-kindbtn:hover, .lt-lockbtn:hover { background: var(--hover); color: var(--text); }
+.lt-kindbtn.on { background: var(--accent); color: var(--accent-ink); }
+.lt-lockbtn.on { background: rgba(227, 176, 75, .25); color: var(--warn); outline: 1px solid var(--warn); }
+.lt-lockbtn.is-disabled, .lt-kindbtn.is-disabled { opacity: .35; }
+.lt-props, .lt-locks { display: flex; align-items: center; margin-bottom: 6px; }
+.lt-mode { flex: 1 1 auto; min-width: 70px; height: 26px; }
+.lt-pct { width: 54px; height: 26px; flex: none; padding: 0 4px; }
+.lt-pct-label { flex: none; margin: 0 4px 0 8px; font-size: var(--fs-s); color: var(--text); }
+.lt-locks .lt-pct-label { margin-left: 0; }
+.lt-locks .lt-lockbtn { margin-right: 2px; }
+/* fixed status columns (blank when the row has nothing there) */
+.lt-col { flex: none; display: flex; align-items: center; justify-content: center; height: 22px; color: var(--muted); }
+.lt-col.col-type { width: 30px; }
+.lt-col.col-content, .lt-col.col-chain, .lt-col.col-lock, .lt-col.col-fx { width: 20px; }
+.lt-col.col-filters { width: 28px; }
+.lt-col .lt-count { margin-left: 1px; font-size: 10px; font-weight: 700; }
+.lt-col.own { color: var(--accent-hi); }
+.lt-col.link { color: #8cbcff; }
+.lt-col.ai { color: #cdb2ff; }
+.lt-col.edit { color: #7fd8a4; }
+.lt-col.content { color: #f29a8a; }
+.lt-col.filters { color: #cfd6de; }
+.lt-col.filters.off { color: var(--faint); }
+.lt-col.shared.c0 { color: #f0b54a; } .lt-col.shared.c1 { color: #5fcbb6; } .lt-col.shared.c2 { color: #ec86d6; } .lt-col.shared.c3 { color: #82b6ff; }
+.lt-col.shared.c4 { color: #b8e06a; } .lt-col.shared.c5 { color: #ff9470; } .lt-col.shared.c6 { color: #b9a2ff; } .lt-col.shared.c7 { color: #6be0e8; }
+.lt-col.lt-fx { margin-left: 0; padding: 0; }
+.lt-col.lt-chain, .lt-col.lt-lock { margin-left: 0; }
+/* 不透明度 / 填充 sliders */
+.lt-props .lt-locks { margin: 0 0 0 6px; flex: none; }
+.lt-pct-row { display: flex; align-items: center; margin-bottom: 4px; }
+.lt-pct-row .lt-pct-label { width: 34px; margin: 0; }
+.lt-slider { flex: 1 1 auto; min-width: 60px; margin: 0 6px; }
+.lt-pct-unit { flex: none; margin-left: 3px; font-size: var(--fs-s); color: var(--muted); }
+.lt-col.col-type { width: 26px; }
+.lt-col.col-content, .lt-col.col-chain, .lt-col.col-lock, .lt-col.col-fx { width: 18px; }
+.lt-col.col-filters { width: 24px; }
+.lt-name { min-width: 40px; }
+/* hover tooltips (UXP shows no title attributes) */
+.lp { position: relative; }
+.tip { position: absolute; z-index: 40; padding: 5px 8px; border-radius: 4px; background: #1d1d1d; border: 1px solid rgba(255, 255, 255, .25); box-shadow: 0 3px 10px rgba(0, 0, 0, .5); color: #f2f2f2; font-size: var(--fs); line-height: 1.45; pointer-events: none; }
+/* 不透明度 / 填充: our own compact slider */
+.lt-pct-row { height: 26px; margin-bottom: 2px; }
+.sl { flex: 1 1 auto; min-width: 60px; height: 20px; margin: 0 8px 0 4px; display: flex; align-items: center; cursor: pointer; }
+.sl-track { position: relative; flex: 1 1 auto; height: 4px; border-radius: 2px; background: rgba(255, 255, 255, .18); }
+.sl-fill { position: absolute; left: 0; top: 0; bottom: 0; border-radius: 2px; background: var(--accent); }
+.sl-knob { position: absolute; top: -5px; width: 14px; height: 14px; margin-left: -7px; border-radius: 7px; background: #f2f2f2; border: 1px solid rgba(0, 0, 0, .4); }
+.sl.off { opacity: .4; cursor: default; }
+.lt-pct-row .lt-pct { height: 24px; }
+.lt-col.shared { color: var(--text); }
+.sl { margin: 0 10px 0 10px; }
+/* a closed group holding copies of the selected content; effect rows */
+.lt-stripe.inside { opacity: .55; width: 4px; }
+.lt-kind.k-fx { font-style: italic; font-weight: 700; font-size: var(--fs); color: var(--text); }
+/* top area: no squeezing on narrow panels */
+.lt-find { flex-wrap: wrap; }
+.lt-find .lt-search { min-width: 120px; margin-bottom: 4px; }
+.lt-kinds { margin-bottom: 4px; }
+.lt-seg .lt-filter { min-width: 0; overflow: hidden; text-overflow: ellipsis; padding: 0 4px; }
+.lt-props { flex-wrap: wrap; }
+.lt-props .lt-mode { min-width: 96px; margin-bottom: 2px; }
+.lt-pct-row { height: 24px; margin-bottom: 0; }
+.lt-pct-box { position: relative; flex: none; width: 46px; height: 22px; }
+.lt-pct-val { display: flex; align-items: center; justify-content: flex-end; height: 22px; padding: 0 4px; border-radius: 3px; font-size: var(--fs); color: var(--text); cursor: text; font-variant-numeric: tabular-nums; }
+.lt-pct-val:hover { background: var(--hover); }
+.lt-pct-val.off { color: var(--faint); }
+.lt-pct-edit { position: absolute; right: 0; top: -3px; width: 52px; z-index: 5; font: inherit; color: var(--text); background: var(--bg); border: 1px solid var(--accent); border-radius: 3px; padding: 0 4px; }
+/* effects on one row as chips */
+.lt-chips { flex: 1 1 auto; min-width: 0; display: flex; align-items: center; overflow: hidden; }
+.lt-chip { flex: none; margin-right: 4px; padding: 0 6px; height: 20px; line-height: 18px; border-radius: 10px; border: 1px solid var(--field-line); font-size: var(--fs-s); color: var(--text); white-space: nowrap; cursor: pointer; }
+.lt-chip:hover { border-color: var(--accent); }
+.lt-chip.off { color: var(--faint); border-style: dashed; }
+.lt-vchip { flex: none; display: flex; align-items: center; margin-right: 4px; height: 24px; padding: 0 6px 0 2px; border-radius: 3px; border: 1px solid var(--field-line); font-size: var(--fs-s); color: var(--text); white-space: nowrap; cursor: pointer; }
+.lt-vchip:hover { border-color: var(--accent); }
+.lt-vchip.on { border-color: var(--accent); background: rgba(63, 181, 159, .30); }
+.lt-vdel { display: flex; align-items: center; justify-content: center; width: 12px; height: 12px; margin-left: 3px; border-radius: 6px; color: var(--text); visibility: hidden; }
+.lt-vchip:hover .lt-vdel { visibility: visible; }
+.lt-vdel:hover { background: #d9534f; color: #fff; }
+.lt-vpic { position: relative; width: 28px; height: 18px; margin-right: 4px; border-radius: 2px; overflow: hidden;
+  background-color: #8a8a8a; background-image: linear-gradient(45deg, #b0b0b0 25%, transparent 25%, transparent 75%, #b0b0b0 75%), linear-gradient(45deg, #b0b0b0 25%, transparent 25%, transparent 75%, #b0b0b0 75%); background-size: 8px 8px; background-position: 0 0, 4px 4px; }
+.lt-toggle.inherit { color: var(--faint); opacity: .5; cursor: default; }
+.lt-mode, .lt-search { width: auto; }
+.lt-props .lt-mode { flex: 1 1 96px; }
+.lt-find .lt-search { flex: 1 1 120px; }
+/* groups stand apart from layers: a tinted band, bold name, bigger folder; their lock in front */
+.lt-row.group { background: rgba(255, 255, 255, .055); border-bottom-color: rgba(0, 0, 0, .35); }
+.lt-row.group.hover { background: rgba(255, 255, 255, .1); }
+.lt-row.group.on { background: rgba(63, 181, 159, .30); }
+.lt-row.group .lt-name { font-weight: 700; }
+.lt-row.group .lt-kind.k-group .icon { width: 17px; height: 17px; }
+.lt-toggle.lt-grouplock.on { color: var(--warn); }
+.lt-toggle.lt-grouplock.on .icon { opacity: 1; }
+.lt-eye.none { cursor: default; } .lt-eye.none:hover { background: none; }
+/* a row never spills onto the next */
+/* the rows in view flow below a spacer (no absolute positions: UXP left moved rows in place) */
+.lt-spacer { height: 0; }
+/* repaint nudges (see layerTree repaint): the two looks can't be told apart */
+/* the list's height is set from the panel's (see layerTree fitList), not grown as a flex item */
+/* per-row repaint nudge (see layerTree repaint): looks the same */
+.lt-row.pa { opacity: .999; }
+.lt-row.moving.pa { opacity: .45; }
+/* the list doesn't scroll itself: rows that fit, our own scrollbar (see layerTree) */
+.lt-inner.with-bar { padding-right: 10px; }
+.lt-hit { bottom: 0; }
+.lt-sbar { position: absolute; top: 0; right: 0; bottom: 0; width: 9px; z-index: 2; background: rgba(0, 0, 0, .15); }
+.lt-sthumb { position: absolute; left: 1px; right: 1px; border-radius: 4px; background: rgba(255, 255, 255, .35); cursor: default; }
+.lt-sthumb:hover { background: rgba(255, 255, 255, .55); }
+.lt-sthumb.a { border-radius: 4px; }
+.lt-head-btn.off { color: var(--muted); }
+.lt-pic { width: 100%; height: 100%; background-repeat: no-repeat; background-position: center; background-size: contain; }
+
+/* 缩略图 size (无 / 小 / 中 / 大): row height, thumbnail box, the box's column; set on the list */
+.lt-list { --lt-row: 44px; --lt-short: 32px; --lt-thumb: 38px; --lt-mark: 40px; }
+.lt-list.sz-off, .lt-list.sz-s { --lt-row: 32px; --lt-short: 28px; --lt-thumb: 26px; --lt-mark: 28px; }
+.lt-list.sz-l { --lt-row: 60px; --lt-short: 38px; --lt-thumb: 54px; --lt-mark: 56px; }
+/* groups and sub-rows (effects, smart filters, variations) are shorter (layerTree SIZES.short) */
+.lt-row.short { height: var(--lt-short); }
+.lt-list.sz-l .lt-badge { width: 16px; height: 16px; }
+.lt-size { display: flex; align-items: center; flex: none; margin-right: 6px; }
+.lt-size-label { font-size: var(--fs-s); color: var(--muted); margin-right: 4px; }
+.lt-size-btn { height: 22px; min-width: 24px; padding: 0 5px; font-size: var(--fs-s); color: var(--muted); border: 1px solid var(--field-line); border-left-width: 0; }
+.lt-size-btn.first { border-left-width: 1px; border-radius: var(--r) 0 0 var(--r); }
+.lt-size-btn:last-child { border-radius: 0 var(--r) var(--r) 0; }
+.lt-size-btn:hover { background: var(--hover); color: var(--text); }
+.lt-size-btn.on { background: rgba(63, 181, 159, .30); color: var(--text); }
+/* 画板: one rounded box per artboard over its rows (layerTree drawBoards), its layers inside it, the
+   artboard's own row filled with its colour (set on the row) */
+.lt-board { position: absolute; left: 2px; border: 3px solid; border-radius: 8px; pointer-events: none; z-index: 1; }
+.lt-row.ab { width: auto; margin: 0 5px; }
+.lt-row.ab-head, .lt-row.ab-head .lt-name, .lt-row.ab-head .lt-eye, .lt-row.ab-head .lt-toggle, .lt-row.ab-head .lt-twisty, .lt-row.ab-head .lt-kind { color: #151515; }
+.lt-row.ab-head .lt-name { font-weight: 700; }
+.lt-row.ab-head .lt-guide { border-left-color: rgba(0, 0, 0, .35); }
+.lt-row.ab-head.on::after { content: ""; position: absolute; left: 0; top: 0; right: 0; bottom: 0; background: rgba(255, 255, 255, .28); pointer-events: none; }
+.lt-row.ab-head { border-radius: 5px 5px 0 0; }

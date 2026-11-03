@@ -19,8 +19,15 @@ export async function play(descriptors: object[]): Promise<any[]> {
   return ps().action.batchPlay(descriptors, {});
 }
 
-export async function modal<T>(name: string, fn: (ctx: any) => Promise<T>): Promise<T> {
-  return ps().core.executeAsModal(fn, { commandName: name });
+const modalDone: ((name: string) => void)[] = [];
+/** Called after each of this plugin's modal commands ends: Photoshop doesn't notify a plugin of the
+ *  changes its own commands make. */
+export function onModalDone(cb: (name: string) => void) { modalDone.push(cb); }
+
+/** `interactive`: Photoshop dialogs (图层样式) may open while it runs */
+export async function modal<T>(name: string, fn: (ctx: any) => Promise<T>, opts: { interactive?: boolean } = {}): Promise<T> {
+  try { return await ps().core.executeAsModal(fn, { commandName: name, ...opts }); }
+  finally { for (const cb of modalDone) { try { cb(name); } catch (e) { log("warn", "modal done", e); } } }
 }
 
 /** Runs `fn` as one undo step named `name` in document `docId`. */

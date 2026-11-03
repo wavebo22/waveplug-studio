@@ -387,7 +387,10 @@ export function mountApp(root: HTMLElement, svc: Services) {
       : mode === "blend" ? `可选：补充光影要求，例如 夕阳暖光、木桌上的倒影；留空 = ${(profile && emptyMeaning(profile)) || "默认融图提示词"}`
       : allowEmpty ? `描述要画进选区的内容；留空 = ${(profile && emptyMeaning(profile)) || "移除选区内的内容"}` : "描述要画进选区的内容";
     prompt.title = promptHint.textContent;
-    prompt.value = pstate?.prompt ?? "";
+    // only when it differs: setting the value moves the caret to the end, in the middle of an edit
+    // (this runs on connection / workflow updates while the user types)
+    const text = pstate?.prompt ?? "";
+    if (prompt.value !== text) prompt.value = text;
     promptHint.hidden = !!prompt.value || mode === "upscale";
     renderFav();
   }

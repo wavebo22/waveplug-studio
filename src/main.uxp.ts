@@ -4,8 +4,10 @@ import { ComfyClient } from "./core/comfy/client.ts";
 import type { Services } from "./app/services.ts";
 import { UxpHost } from "./ps/uxpHost.ts";
 import { UxpTools } from "./ps/uxpTools.ts";
+import { UxpLayerTree } from "./ps/uxpLayers.ts";
 import { log, setLogSink } from "./app/log.ts";
 import { mountApp } from "./ui/app.ts";
+import { mountLayersPanel } from "./ui/layersPanel.ts";
 import { diagnose, uxpFetch } from "./ps/net.ts";
 
 declare const require: (m: string) => any;
@@ -40,11 +42,13 @@ log("info", "uxp", JSON.stringify(uxp.versions ?? {}), "host", JSON.stringify(ux
 
 const host = new UxpHost();
 // lets the development loader detach this build's Photoshop listeners before loading a new one
-(globalThis as any).__waveplugDispose = () => host.dispose();
+const layerTree = new UxpLayerTree();
+(globalThis as any).__waveplugDispose = () => { host.dispose(); layerTree.dispose(); };
 
 const services: Services = {
   host,
   tools: new UxpTools(),
+  layers: layerTree,
   comfy: base => new ComfyClient(base, { fetch: uxpFetch, WebSocket }),
   diagnose,
   debugSave: DEV ? (name, png) => {
@@ -86,9 +90,45 @@ const services: Services = {
   devReload: DEV ? () => (globalThis as any).__waveplugDevReload() : undefined,
 };
 
+// Two panels: WavePlug Studio and WavePlug 图层 (the layer list on its own, dockable like
+// Photoshop's Layers panel). The development loader registers them itself (setup can only run once,
+// before the build is read); an older loader without them shows the Studio panel only.
+interface Panels { root(name: PanelName): HTMLElement; isShown(name: PanelName): boolean; onShow(cb: (name: PanelName, shown: boolean) => void): void }
+type PanelName = "studio" | "layers";
+function releasePanels(): Panels {
+  const roots = { studio: document.getElementById("app")!, layers: document.getElementById("layers-app")! };
+  const shown = { studio: false, layers: false };
+  const listeners: ((name: PanelName, shown: boolean) => void)[] = [];
+  const on = (name: PanelName, value: boolean, arg: any) => {
+    const node = arg?.node ?? arg;
+    if (value && node?.appendChild && roots[name].parentNode !== node) node.appendChild(roots[name]);
+    shown[name] = value;
+    listeners.forEach(cb => cb(name, value));
+  };
+  const panel = (name: PanelName) => ({ show: (a: any) => on(name, true, a), hide: (a: any) => on(name, false, a) });
+  uxp.entrypoints.setup({ panels: { studio: panel("studio"), layers: panel("layers") } });
+  return { root: n => roots[n], isShown: n => shown[n], onShow: cb => listeners.push(cb) };
+}
+const panels: Panels | null = DEV ? (globalThis as any).__waveplugPanels ?? null : releasePanels();
+/** the element a panel mounts into: the loader's root holds a fresh #app / #layers-app */
+const mountPoint = (name: PanelName, id: string): HTMLElement | null =>
+  (panels?.root(name).querySelector("#" + id) as HTMLElement | null) ?? panels?.root(name) ?? document.getElementById(id);
+
+const appEl = mountPoint("studio", "app")!;
 try {
-  mountApp(document.getElementById("app")!, services);
+  mountApp(appEl, services);
 } catch (e) {
   log("error", "mount failed", e);
-  document.getElementById("app")!.textContent = "WavePlug Studio 启动失败：" + (e as Error).message;
+  appEl.textContent = "WavePlug Studio 启动失败：" + (e as Error).message;
+}
+if (panels) {
+  const layersEl = mountPoint("layers", "layers-app")!;
+  try {
+    const lp = mountLayersPanel(layersEl, services, () => panels.isShown("layers"));
+    panels.onShow((name, shown) => { if (name === "layers" && shown) lp.show(); });
+    if (panels.isShown("layers")) lp.show();
+  } catch (e) {
+    log("error", "layers panel mount failed", e);
+    layersEl.textContent = "WavePlug 图层 启动失败：" + (e as Error).message;
+  }
 }

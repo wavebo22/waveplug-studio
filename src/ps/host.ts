@@ -10,6 +10,7 @@ import type { Rect } from "../core/image/region.ts";
 import type { Side, TaskType } from "../core/workflow/profile.ts";
 import type { ToolLayer, ToolResult } from "../core/layers/smart.ts";
 import type { DocScan, SlimKind } from "../core/layers/slim.ts";
+import type { LayerAction, MoveStep, TreeLayer } from "../core/layers/tree.ts";
 
 export type Pads = Record<Side, number>;
 
@@ -165,3 +166,47 @@ export interface LayerTools {
   /** Photoshop's 清理 → 全部 (history, clipboard, caches); can't be undone */
   purgeMemory(): Promise<void>;
 }
+
+/** WavePlug 图层 panel: the active document's layer tree, kept in step with Photoshop's Layers panel. */
+export interface LayerTree {
+  /** All layers top to bottom with their status, and the selected ids; null without a document.
+   *  `docKey`: the document across sessions (its file, or its name before it is saved). */
+  read(): Promise<{ docId: number; docKey: string; layers: TreeLayer[]; selected: number[]; width: number; height: number } | null>;
+  /** Photoshop's colour picker starting from `hex` ("#rrggbb"): the colour chosen, or null when cancelled. */
+  pickColor(hex: string): Promise<string | null>;
+  /** Selects `ids` and runs a layer command on them (one undo step). `arg`: the new name (rename),
+   *  the adjustment (adjustment, a key of ADJUSTMENTS), "on" / "off" (toggleMask, toggleEffects). */
+  run(docId: number, action: LayerAction, ids: number[], arg?: string, opts?: RunOptions): Promise<void>;
+  /** Makes exactly `ids` the selected layers (none when empty). */
+  select(docId: number, ids: number[]): Promise<void>;
+  /** Shows / hides `ids` (one Photoshop call, however many: a drag down the eye column). */
+  setVisible(docId: number, ids: number[], visible: boolean): Promise<void>;
+  /** Runs the moves (core/layers/tree.ts dropPlan) as one undo step. */
+  move(docId: number, steps: MoveStep[]): Promise<ToolResult>;
+  /** Small pictures of the layers, each the whole `canvas` at most `size` px each way (like Photoshop's
+   *  own): null for a layer without one, undefined when Photoshop couldn't read it just now; `mask`:
+   *  the layer mask. One modal call. */
+  thumbnails(docId: number, layers: { id: number; mask?: boolean | "vector"; bounds?: { left: number; top: number; right: number; bottom: number } }[], canvas: { width: number; height: number }, size: number): Promise<(string | null | undefined)[]>;
+  /** Called when layers may have been painted on / transformed: the edited ids, or "all" after an undo. */
+  onEdited(cb: (ids: number[] | "all") => void): void;
+  /** Called (debounced) when the layers may have changed, by the user or by the panel's own commands. */
+  onChange(cb: () => void): void;
+  /** Called when the user targets the active layer's pixels or one of its masks in Photoshop itself
+   *  (Photoshop doesn't tell the panel about its own commands). */
+  onTarget(cb: (part: TargetPart) => void): void;
+}
+
+/** `above`: a new layer / group / adjustment goes above this group rather than into it (an AI result
+ *  group, which the panel shows as one layer), in the same undo step */
+export interface RunOptions { above?: number }
+
+/** what of the active layer Photoshop paints on: its pixels, layer mask, vector mask or smart filter mask */
+export type TargetPart = "layer" | "mask" | "vmask" | "filterMask";
+
+/** 新建填充或调整图层 menu: key, label */
+export const ADJUSTMENTS: [string, string][] = [
+  ["solidColor", "纯色（前景色）"], ["brightness", "亮度/对比度"], ["levels", "色阶"], ["curves", "曲线"], ["exposure", "曝光度"],
+  ["vibrance", "自然饱和度"], ["hueSaturation", "色相/饱和度"], ["colorBalance", "色彩平衡"], ["blackAndWhite", "黑白"],
+  ["photoFilter", "照片滤镜"], ["channelMixer", "通道混合器"], ["invert", "反相"], ["posterize", "色调分离"], ["threshold", "阈值"],
+  ["selectiveColor", "可选颜色"],
+];

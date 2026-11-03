@@ -2,13 +2,14 @@
 
 import type { Comfy } from "../core/comfy/client.ts";
 import type { Profile, TaskType } from "../core/workflow/profile.ts";
-import type { LayerTools, PsHost } from "../ps/host.ts";
+import type { LayerTools, LayerTree, PsHost } from "../ps/host.ts";
 
 export interface PickedImage { name: string; bytes: Uint8Array; url: string }
 
 export interface Services {
   host: PsHost;
   tools: LayerTools;
+  layers: LayerTree;
   /** Created on demand from the configured address. */
   comfy(base: string): Comfy;
   pickJson(): Promise<{ name: string; text: string } | null>;

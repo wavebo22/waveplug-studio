@@ -8,10 +8,12 @@ import { uiToApi } from "../core/workflow/uiToApi.ts";
 import { recognize } from "../core/workflow/recognize.ts";
 import { newProfile } from "../core/workflow/profile.ts";
 import type { Services } from "../app/services.ts";
-import type { ActiveLayer, Capture, DocInfo, FillGroup, LayerInfo, LayerTools, Pads, PsHost, Variation, VariationMask } from "../ps/host.ts";
+import type { ActiveLayer, Capture, DocInfo, FillGroup, LayerInfo, LayerTools, LayerTree, Pads, PsHost, Variation, VariationMask } from "../ps/host.ts";
+import { type LayerAction, type MoveStep, type RawLayer, type TreeLayer, buildTree } from "../core/layers/tree.ts";
 import { type ToolLayer, editablePlan, sameSourceIds, selectedContents, uniquePlan } from "../core/layers/smart.ts";
 import type { DocScan, SlimKind } from "../core/layers/slim.ts";
 import { mountApp } from "../ui/app.ts";
+import { mountLayersPanel } from "../ui/layersPanel.ts";
 
 const HUES = [168, 24, 210, 280, 96, 340];
 function swatch(n: number, w = 96, h = 72): string {
@@ -130,6 +132,142 @@ class MockTools implements LayerTools {
   async splitIslands() { const so = this.layers.filter(l => l.selected && l.kind === "smartObject").length; return this.done({ done: this.pixels().done + so, skipped: [], note: so ? `${so} 个智能对象已栅格化` : undefined }); }
 }
 
+/** 图层列表: a poster with AI results, shared / linked smart objects, and a big group of 3000 layers. */
+/** a white ellipse on black, like a typical layer mask */
+function maskPicture(size: number): string {
+  const c = document.createElement("canvas"); c.width = size; c.height = Math.round(size * 0.625);
+  const g = c.getContext("2d")!;
+  g.fillStyle = "#000"; g.fillRect(0, 0, c.width, c.height);
+  g.fillStyle = "#fff"; g.beginPath(); g.ellipse(c.width / 2, c.height / 2, c.width * .3, c.height * .35, 0, 0, 7); g.fill();
+  return c.toDataURL();
+}
+
+class MockLayerTree implements LayerTree {
+  private raw: RawLayer[];
+  selected = [21];
+  constructor(private changed: () => void, private listen: (cb: () => void) => void) {
+    const L = (id: number, name: string, kind: number, extra: Partial<RawLayer> = {}): RawLayer => ({ id, name, kind, section: kind === 7 ? "start" : "content", visible: true, locked: false, mask: false, width: 120, height: 80, ...extra });
+    const end = (): RawLayer => ({ id: 0, name: "", kind: 13, section: "end", visible: true, locked: false, mask: false });
+    const many: RawLayer[] = [];
+    for (let i = 0; i < 3000; i++) many.push(L(10000 + i, `碎片 ${i + 1}`, i % 7 === 0 ? 5 : 1, i % 7 === 0 ? { contentId: "frag" + (i % 3), file: "碎片.png" } : { visible: i % 11 !== 0 }));
+    this.raw = [
+      L(1, "标题文字", 3, { links: [32] }),
+      L(10, "AI填充 · 橘子汁", 7), L(11, "v3 · 橘子汁，玻璃杯", 5, { mask: true, contentId: "v3" }), L(12, "v2 · 橘子汁", 5, { mask: true, visible: false, contentId: "v2" }), L(13, "v1 · 橘子汁", 5, { mask: true, visible: false, contentId: "v1" }), end(),
+      L(14, "AI扩图 · ←200 →200 ↑0 ↓0", 7), L(15, "v1", 1), end(),
+      L(20, "徽章组", 7, { artboard: true }),
+      L(21, "徽章", 5, { contentId: "a", file: "徽章.psb", effects: true, effectList: [
+        { key: "bevelEmboss", multi: -1, name: "斜面和浮雕", enabled: true }, { key: "frameFX", multi: 0, name: "描边", enabled: true }, { key: "frameFX", multi: 1, name: "描边", enabled: true },
+        { key: "innerShadow", multi: -1, name: "内阴影", enabled: true }, { key: "innerGlow", multi: -1, name: "内发光", enabled: true }, { key: "chromeFX", multi: -1, name: "光泽", enabled: true },
+        { key: "solidFill", multi: -1, name: "颜色叠加", enabled: true }, { key: "gradientFill", multi: -1, name: "渐变叠加", enabled: true }, { key: "patternFill", multi: -1, name: "图案叠加", enabled: true },
+        { key: "outerGlow", multi: -1, name: "外发光", enabled: true }, { key: "dropShadow", multi: -1, name: "投影", enabled: true }] }), L(22, "徽章 拷贝", 5, { contentId: "a", file: "徽章.psb" }),
+      L(23, "内层", 7), L(24, "徽章 拷贝 2", 5, { contentId: "a", file: "徽章.psb", mask: true }), L(25, "LOGO", 5, { contentId: "l", linked: true, file: "logo.ai" }), end(),
+      end(),
+      L(31, "色彩平衡 1", 2, { clipped: true }), L(33, "阴影", 1, { clipped: true, mask: true, maskOn: false, maskLinked: false }),
+      L(30, "产品图", 5, { contentId: "b", file: "产品.png", filters: [{ name: "表面模糊", enabled: true }, { name: "亮度/对比度", enabled: false }], filtersOn: true, filterMask: true }), L(34, "空白图层", 1, { width: 0, height: 0, mask: true }), L(32, "形状 1", 4, { locked: true, lockPosition: true, links: [1], vmask: true }), L(35, "带矢量蒙版", 1, { vmask: true, mask: true }),
+      L(40, "碎片（3000 个图层）", 7, { artboard: true, color: "violet" }), ...many, end(),
+      L(50, "背景", 12, { locked: true, lockAll: true }),
+    ];
+  }
+  async read(): Promise<{ docId: number; docKey: string; layers: TreeLayer[]; selected: number[]; width: number; height: number }> { return { docId: 1, docKey: "preview.psd", layers: buildTree(this.raw), selected: [...this.selected], width: 1920, height: 1200 }; }
+  async pickColor(hex: string) { return hex === "#3fb59f" ? "#e07ad0" : "#3fb59f"; }
+  private next = 90000;
+  /** enough of each command to see the list react */
+  async run(_d: number, action: LayerAction, ids: number[], arg?: string) {
+    const L = (name: string, kind = 1): RawLayer => ({ id: this.next++, name, kind, section: kind === 7 ? "start" : "content", visible: true, locked: false, mask: false, width: 120, height: 80 });
+    const at = () => Math.max(0, this.raw.findIndex(x => ids.includes(x.id) && x.section !== "end"));
+    const each = (f: (l: RawLayer) => void) => this.raw.filter(x => ids.includes(x.id) && x.section !== "end").forEach(f);
+    // Photoshop selects the layer a mask / the pixels are targeted on
+    if (action.startsWith("target")) this.selected = [...ids];
+    switch (action) {
+      case "newLayer": this.raw.splice(at(), 0, L("图层 " + (this.next - 89999))); break;
+      case "newGroup": this.raw.splice(at(), 0, L("组 " + (this.next - 89999), 7), { id: 0, name: "", kind: 13, section: "end", visible: true, locked: false, mask: false }); break;
+      case "duplicate": each(l => { if (l.section === "content") this.raw.splice(this.raw.indexOf(l), 0, { ...l, id: this.next++, name: l.name + " 拷贝" }); }); break;
+      case "delete": for (const id of ids) { if (this.raw.some(x => x.id === id && x.section !== "end")) { const [a, b] = this.block(id); this.raw.splice(a, b - a); } } break;
+      case "rename": each(l => { l.name = arg ?? l.name; }); break;
+      case "deleteVariant": { const v = this.raw.find(x => x.id === Number(arg)); if (v) { const shown = v.visible; this.raw.splice(this.raw.indexOf(v), 1); const [a, b] = this.block(ids[0]); const rest = this.raw.slice(a + 1, b).filter(x => /^v\d+/.test(x.name)); if (shown && rest.length) rest[rest.length - 1].visible = true; } break; }
+      case "setColor": each(l => { l.color = arg; }); break;
+      case "showVariant": { const [a, b] = this.block(ids[0]); for (const x of this.raw.slice(a + 1, b)) if (/^v\d+/.test(x.name)) x.visible = x.id === Number(arg); break; }
+      case "addMask": case "addMaskHide": each(l => { l.mask = true; l.maskOn = true; }); break;
+      case "deleteMask": case "applyMask": each(l => { l.mask = false; }); break;
+      case "toggleMask": each(l => { l.maskOn = arg === "on"; }); break;
+      case "deleteVectorMask": each(l => { l.vmask = false; }); break;
+      case "deleteFilterMask": each(l => { l.filterMask = false; }); break;
+      case "toggleVectorMask": each(l => { l.vmaskOn = arg === "on"; }); break;
+      case "toggleMaskLink": { const o = JSON.parse(arg ?? "{}"); each(l => { if (o.vector) l.vmaskLinked = o.on; else l.maskLinked = o.on; }); break; }
+      case "clip": each(l => { l.clipped = true; }); break;
+      case "unclip": each(l => { l.clipped = false; }); break;
+      case "pasteStyle": each(l => { l.effects = true; l.effectsOn = true; }); break;
+      case "clearStyle": each(l => { l.effects = false; }); break;
+      case "toggleEffects": each(l => { l.effectsOn = arg === "on"; }); break;
+      case "lock": each(l => { l.locked = true; l.lockAll = true; }); break;
+      case "setLock": {
+        for (const { id, locks: k } of JSON.parse(arg ?? "[]")) {
+          const l = this.raw.find(x => x.id === id && x.section !== "end");
+          if (!l) continue;
+          l.lockAll = !!k.protectAll; l.lockPosition = !!k.protectPosition; l.lockPixels = !!k.protectComposite; l.lockTransparency = !!k.protectTransparency;
+          l.locked = l.lockAll || l.lockPosition || l.lockPixels || l.lockTransparency;
+        }
+        break;
+      }
+      case "toggleFilter": {
+        const { index } = JSON.parse(arg ?? "{}");
+        each(l => {
+          const fs = l.filters ?? [];
+          if (!index) { const on = !fs.some(f => f.enabled); fs.forEach(f => { f.enabled = on; }); }
+          else if (fs[index - 1]) fs[index - 1].enabled = !fs[index - 1].enabled;
+          l.filtersOn = fs.some(f => f.enabled);
+        });
+        break;
+      }
+      case "moveFilter": {
+        const { from, toLayer, toPos } = JSON.parse(arg ?? "{}");
+        const a = this.raw.find(x => x.id === ids[0])!, b = this.raw.find(x => x.id === toLayer)!;
+        const [f] = a.filters!.splice(from, 1);
+        (b.filters ??= []).splice(toPos, 0, f);
+        break;
+      }
+      case "toggleEffect": {
+        const { key, multi, on } = JSON.parse(arg ?? "{}");
+        each(l => { const e = l.effectList?.find(x => x.key === key && x.multi === multi); if (e) e.enabled = on; });
+        break;
+      }
+      case "setProps": { const p = JSON.parse(arg ?? "{}"); each(l => { if (p.mode) l.mode = p.mode; if (p.opacity !== undefined) l.opacity = p.opacity; if (p.fill !== undefined) l.fill = p.fill; }); break; }
+      case "link": each(l => { l.links = ids.filter(x => x !== l.id); }); break;
+      case "unlink": each(l => { l.links = []; }); this.raw.forEach(l => { l.links = l.links?.filter(x => !ids.includes(x)); }); break;
+      case "unlock": each(l => { l.locked = false; l.lockAll = false; }); break;
+      case "adjustment": this.raw.splice(at(), 0, L(arg + " 1", 2)); break;
+      default: console.log("mock layer command", action, ids, arg);
+    }
+    await sleep(60); this.changed();
+  }
+  async select(_d: number, ids: number[]) { await sleep(60); this.selected = ids; this.changed(); }
+  async setVisible(_d: number, ids: number[], visible: boolean) { for (const l of this.raw) if (ids.includes(l.id)) l.visible = visible; await sleep(60); this.changed(); }
+  /** a layer's records in the flat list: itself, or a group from its start to its end marker */
+  private block(id: number): [number, number] {
+    const a = this.raw.findIndex(x => x.id === id && x.section !== "end");
+    if (this.raw[a].section !== "start") return [a, a + 1];
+    let depth = 0;
+    for (let i = a; i < this.raw.length; i++) { if (this.raw[i].section === "start") depth++; else if (this.raw[i].section === "end" && !--depth) return [a, i + 1]; }
+    return [a, this.raw.length];
+  }
+  async move(_d: number, steps: MoveStep[]) {
+    for (const s of steps) {
+      const [a, b] = this.block(s.id), part = this.raw.splice(a, b - a);
+      const [ra, rb] = this.block(s.rel);
+      this.raw.splice(s.place === "before" ? ra : s.place === "after" ? rb : ra + 1, 0, ...part);
+    }
+    await sleep(80); this.changed();
+    return { done: steps.length, skipped: [] };
+  }
+  async thumbnails(_d: number, ls: { id: number; mask?: boolean | "vector" }[], _c: { width: number; height: number }, size: number) {
+    await sleep(40 * ls.length);
+    return ls.map(l => l.mask ? maskPicture(size) : swatch(l.id, size, size));
+  }
+  onEdited() {}
+  onTarget() {}
+  onChange(cb: () => void) { this.listen(cb); }
+}
+
 class MockComfy implements Comfy {
   readonly base = "http://127.0.0.1:8188";
   online = true;
@@ -194,7 +332,7 @@ async function boot() {
     localStorage.setItem("wp.state." + p.id, JSON.stringify({ prompt: "磨砂玻璃瓶，瓶身有细小水珠，柔和侧光", params: {}, seedMode: "random", seed: 0 }));
   }
   const svc: Services = {
-    host, comfy: () => comfy, tools: new MockTools(() => host.changed()),
+    host, comfy: () => comfy, tools: new MockTools(() => host.changed()), layers: new MockLayerTree(() => host.changed(), cb => host.onChange(cb)),
     async pickJson() { return null; },
     async pickImage() { return { name: "参考.png", bytes: new Uint8Array(), url: swatch(3, 80, 80) }; },
     async saveImage() { return true; },
@@ -203,6 +341,7 @@ async function boot() {
     version: "0.1.0 preview",
   };
   mountApp(document.getElementById("app")!, svc);
+  mountLayersPanel(document.getElementById("layers-app")!, svc, () => true).show();
 
   // dev controls outside the panel
   const ctl = document.getElementById("controls")!;

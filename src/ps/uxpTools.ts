@@ -22,14 +22,14 @@ const DONT = { dialogOptions: "dontDisplay" };
 const layerRef = (id: number) => ({ _ref: "layer", _id: id });
 
 /** Runs one action; batchPlay reports most failures as an "error" result instead of throwing. */
-async function act(desc: object): Promise<any> {
+export async function act(desc: object): Promise<any> {
   const [r] = await play([{ ...desc, _options: DONT }]);
   if (r?._obj === "error") throw new Error(r.message || `Photoshop 无法执行「${(desc as any)._obj}」`);
   return r;
 }
 
 /** Makes exactly `ids` the selected layers. */
-async function selectLayers(ids: number[]): Promise<void> {
+export async function selectLayers(ids: number[]): Promise<void> {
   for (const [i, id] of ids.entries()) {
     await act({ _obj: "select", _target: [layerRef(id)], makeVisible: false, layerID: [id],
       ...(i ? { selectionModifier: { _enum: "selectionModifierType", _value: "addToSelection" } } : {}) });
