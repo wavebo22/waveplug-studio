@@ -5,6 +5,7 @@ import { log } from "../app/log.ts";
 import { type Bounds, frameThumb, thumbArea } from "../core/layers/thumbs.ts";
 import type { ToolResult } from "../core/layers/smart.ts";
 import { type LayerAction, type MoveStep, type RawLayer, buildTree, effectsOf, EFFECTS, rawProblem } from "../core/layers/tree.ts";
+import { addEffect, effectItem, hasEffects, removeEffect } from "../core/layers/effects.ts";
 import { type LayerTree, type RunOptions, type TargetPart, ADJUSTMENTS } from "./host.ts";
 import { docById, findLayer, modal, onModalDone, play, step } from "./uxpHost.ts";
 import { act, selectLayers } from "./uxpTools.ts";
@@ -410,17 +411,102 @@ export class UxpLayerTree implements LayerTree {
       }));
       return;
     }
+    if (action === "moveEffect" || action === "moveEffects" || action === "deleteEffect") {
+      // dragging in the effects: one effect (or the whole style) onto another layer moves it, Alt+drag
+      // copies it, onto the trash deletes it — Photoshop's Layers panel. Done on the layers' layerEffects
+      // (core/layers/effects.ts), each set on its layer while that is selected; the selection is put back.
+      const { key, multi, toLayer, copy } = JSON.parse(arg ?? "{}");
+      const src = ids[0];
+      const fxOf = async (id: number) => (await play([{ _obj: "get", _target: [{ _property: "layerEffects" }, { _ref: "layer", _id: id }, { _ref: "document", _id: docId }] }]))[0]?.layerEffects;
+      const setFx = async (id: number, fx: Record<string, any> | null) => {
+        await selectLayers([id]);
+        await act(fx && hasEffects(fx) ? { _obj: "set", _target: [{ _ref: "property", _property: "layerEffects" }, target], to: fx } : { _obj: "disableLayerStyle", _target: [target] });
+      };
+      const [t] = await play([{ _obj: "get", _target: [{ _property: "targetLayersIDs" }, { _ref: "document", _id: docId }] }]);
+      const keep: number[] = (t?.targetLayersIDs ?? []).map((x: any) => Number(x._id));
+      await whenFree(() => step("WavePlug " + label, docId, async () => {
+        const sfx = await fxOf(src);
+        if (!hasEffects(sfx)) throw new Error("这个图层已经没有图层样式了");
+        try {
+          if (action === "deleteEffect") {
+            if (!effectItem(sfx, key, multi)) throw new Error("这个效果已经不在了");
+            await setFx(src, removeEffect(sfx, key, multi));
+          } else if (action === "moveEffects") {
+            // the whole style: in place of the destination's (as 粘贴图层样式 does)
+            await setFx(toLayer, sfx);
+            if (!copy) await setFx(src, null);
+          } else {
+            const item = effectItem(sfx, key, multi);
+            if (!item) throw new Error("这个效果已经不在了");
+            const before = effectsOf(await fxOf(toLayer)).filter(e => e.key === key).length;
+            await setFx(toLayer, addEffect(await fxOf(toLayer), key, item));
+            const after = effectsOf(await fxOf(toLayer)).filter(e => e.key === key).length;
+            if (after < Math.max(1, before)) { log("warn", "effect move", key, multi, before, after); throw new Error("Photoshop 没有加上这个效果"); }
+            if (!copy) await setFx(src, removeEffect(sfx, key, multi));
+          }
+        } finally { if (keep.length) await selectLayers(keep).catch(e => log("warn", "reselect", e)); }
+      }));
+      log("info", "effect drag", action, JSON.stringify({ src, toLayer, key, multi, copy: !!copy }));
+      return;
+    }
+    if (action === "moveFilters" || action === "deleteFilters") {
+      // the 智能滤镜 row: all of a smart object's filters dragged onto another smart object (moved; Alt:
+      // copied) or onto the trash (cleared). duplicate / delete of the filterFX class, as scripts do it
+      // (Adobe community, r-bin); counts are checked afterwards.
+      const { toLayer, copy } = JSON.parse(arg ?? "{}");
+      const src = ids[0];
+      const count = async (id: number) => ((await play([{ _obj: "get", _target: [{ _property: "smartObject" }, { _ref: "layer", _id: id }, { _ref: "document", _id: docId }] }]))[0]?.smartObject?.filterFX ?? []).length;
+      const all = (id: number) => [{ _ref: "filterFX" }, { _ref: "layer", _id: id }];
+      const n = await count(src), m = action === "moveFilters" ? await count(toLayer) : 0;
+      if (!n) throw new Error("这个智能对象已经没有智能滤镜了");
+      await whenFree(() => step("WavePlug " + label, docId, async () => {
+        await selectLayers([src]);
+        if (action === "moveFilters") {
+          await act({ _obj: "duplicate", _target: all(src), to: { _ref: "layer", _id: toLayer } });
+          const got = await count(toLayer);
+          log("info", "smart filters copied", JSON.stringify({ src, toLayer, n, before: m, after: got }));
+          if (got !== m + n && got !== n) throw new Error("Photoshop 没有复制这些智能滤镜");
+          if (copy) return;
+        }
+        await act({ _obj: "delete", _target: all(src) });
+        if (await count(src)) throw new Error("Photoshop 没有删除这些智能滤镜");
+      }));
+      return;
+    }
+    if (action === "deleteFilter") {
+      // one smart filter onto the trash; numbered like the switches (see "toggleFilter"), checked by its id
+      const { pos } = JSON.parse(arg ?? "{}");
+      const src = ids[0];
+      const read = async () => ((await play([{ _obj: "get", _target: [{ _property: "smartObject" }, { _ref: "layer", _id: src }, { _ref: "document", _id: docId }] }]))[0]?.smartObject?.filterFX ?? []).map((f: any) => Number(f?.filterID));
+      const a0 = await read(), n = a0.length;
+      if (a0[pos] === undefined) throw new Error("这个智能滤镜已经不在了");
+      const want = a0.filter((_: number, i: number) => i !== pos).join();
+      for (const reversed of [filtersReversed, !filtersReversed]) {
+        const i = reversed ? n - pos : pos + 1;
+        try {
+          await whenFree(() => step("WavePlug " + label, docId, async () => {
+            await selectLayers([src]);
+            await act({ _obj: "delete", _target: [{ _ref: "filterFX", _index: i }, target] });
+            if ((await read()).join() !== want) throw new Error("deleted another one");
+          }));
+          if (reversed !== filtersReversed) { filtersReversed = reversed; log("info", "smart filter order", reversed ? "reversed" : "as listed"); }
+          return;
+        } catch (e) { log("info", "smart filter delete", pos, i, String((e as Error)?.message ?? e)); }
+      }
+      throw new Error("Photoshop 不接受删除这个智能滤镜");
+    }
     if (action === "moveFilter") {
       // Photoshop doesn't document how a smart filter is moved: likely numberings are tried one by one,
       // each as its own undo step that is checked (by the filters' ids) and rolled back if it didn't
       // land where wanted; the one that works is remembered.
-      const { from, toLayer, toPos } = JSON.parse(arg ?? "{}");
+      // `copy` (Alt+drag): the filter duplicated there instead, the source keeping its own
+      const { from, toLayer, toPos, copy } = JSON.parse(arg ?? "{}");
       const src = ids[0], same = toLayer === src;
       const read = async (id: number) => {
         const [r] = await play([{ _obj: "get", _target: [{ _property: "smartObject" }, { _ref: "layer", _id: id }, { _ref: "document", _id: docId }] }]);
         return (r?.smartObject?.filterFX ?? []).map((f: any) => ({ id: Number(f?.filterID), name: String(f?.name ?? "") }));
       };
-      const a0 = await read(src), b0 = same ? a0 : await read(toLayer), n = a0.length, len = same ? n : b0.length + 1;
+      const a0 = await read(src), b0 = same ? a0 : await read(toLayer), n = a0.length, len = same && !copy ? n : b0.length + 1;
       if (!a0[from]) throw new Error("这个智能滤镜已经不在了");
       const want = same ? (() => { const x = a0.map((f: any) => f.id); const [m] = x.splice(from, 1); x.splice(toPos, 0, m); return x; })() : null;
       const fromIdx = [filtersReversed ? n - from : from + 1, filtersReversed ? from + 1 : n - from];
@@ -435,25 +521,26 @@ export class UxpLayerTree implements LayerTree {
         try {
           await whenFree(() => step("WavePlug " + label, docId, async () => {
             await selectLayers([src]);
-            await act({ _obj: "move", _target: [{ _ref: "filterFX", _index: tr.f }, target], to: tr.to });
-            const a1 = await read(src);
-            const ok = same ? a1.map((f: any) => f.id).join() === want!.join()
-              : a1.length === n - 1 && (await read(toLayer)).length === b0.length + 1 && (await read(toLayer))[toPos]?.name === a0[from].name;
+            await act({ _obj: copy ? "duplicate" : "move", _target: [{ _ref: "filterFX", _index: tr.f }, target], to: tr.to });
+            const a1 = await read(src), b1 = same ? a1 : await read(toLayer);
+            const ok = copy ? a1.length === (same ? n + 1 : n) && b1.length === b0.length + 1 && b1[toPos]?.name === a0[from].name && a0.every((f: any) => b1.some((g: any) => g.id === f.id) || !same)
+              : same ? a1.map((f: any) => f.id).join() === want!.join()
+              : a1.length === n - 1 && b1.length === b0.length + 1 && b1[toPos]?.name === a0[from].name;
             if (!ok) throw new Error("landed elsewhere");
           }));
           filterMove = { f: tr.f, dt: tr.t - toPos };
-          log("info", "smart filter move", JSON.stringify({ from, toPos, same, used: { f: tr.f, t: tr.t } }));
+          log("info", "smart filter move", JSON.stringify({ from, toPos, same, copy: !!copy, used: { f: tr.f, t: tr.t, to: tr.to } }));
           return;
         } catch (e) {
           // the step was rolled back; make sure of it before trying the next numbering
-          const back = await read(src);
-          if (back.map((f: any) => f.id).join() !== a0.map((f: any) => f.id).join()) {
+          const back = await read(src), backTo = same ? back : await read(toLayer);
+          if (back.map((f: any) => f.id).join() !== a0.map((f: any) => f.id).join() || backTo.length !== b0.length) {
             log("warn", "smart filter move not rolled back", JSON.stringify({ tr: { f: tr.f, t: tr.t }, e: String((e as Error)?.message ?? e) }));
             throw new Error("移动智能滤镜没有成功，滤镜顺序可能变了，请用 Ctrl+Z 检查");
           }
         }
       }
-      log("warn", "smart filter move failed", JSON.stringify({ from, toPos, same, n, tried: tries.length }));
+      log("warn", "smart filter move failed", JSON.stringify({ from, toPos, same, copy: !!copy, n, tried: tries.length }));
       throw new Error("Photoshop 不接受这个智能滤镜的移动");
     }
     if (action === "toggleEffect") {
@@ -677,7 +764,8 @@ const ACTION_NAMES: Partial<Record<LayerAction, string>> = {
   clearStyle: "清除图层样式", toggleEffects: "显示/隐藏图层样式", link: "链接图层", unlink: "取消链接图层", lock: "锁定图层", unlock: "解除锁定",
   solo: "只显示此图层", editContents: "编辑智能对象内容", toggleFilter: "显示/隐藏智能滤镜", toggleEffect: "显示/隐藏图层效果", moveFilter: "移动智能滤镜", effectStyle: "编辑图层效果", setColor: "图层颜色", loadSelection: "载入选区",
   addVectorMask: "添加矢量蒙版", deleteVectorMask: "删除矢量蒙版", toggleVectorMask: "停用/启用矢量蒙版", targetVectorMask: "选择矢量蒙版",
-  toggleMaskLink: "链接/取消链接蒙版", targetLayer: "选择图层", targetFilterMask: "选择智能滤镜蒙版", deleteFilterMask: "删除智能滤镜蒙版", viewMask: "查看蒙版", editFilter: "编辑智能滤镜", showVariant: "切换变体", deleteVariant: "删除变体", setProps: "图层属性", setLock: "锁定/解锁图层", adjustment: "新建调整图层",
+  toggleMaskLink: "链接/取消链接蒙版", moveEffect: "移动图层效果", moveEffects: "移动图层样式", deleteEffect: "删除图层效果", moveFilters: "移动智能滤镜", deleteFilter: "删除智能滤镜", deleteFilters: "清除智能滤镜",
+  targetLayer: "选择图层", targetFilterMask: "选择智能滤镜蒙版", deleteFilterMask: "删除智能滤镜蒙版", viewMask: "查看蒙版", editFilter: "编辑智能滤镜", showVariant: "切换变体", deleteVariant: "删除变体", setProps: "图层属性", setLock: "锁定/解锁图层", adjustment: "新建调整图层",
 };
 
 /** 新建调整图层: the adjustment as Photoshop's own default */

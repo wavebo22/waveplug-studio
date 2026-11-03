@@ -395,6 +395,28 @@ button, .ub { font: inherit; color: inherit; background: none; border: 0; paddin
 .lt-row.moving { opacity: .45; }
 .lt-drop { position: absolute; right: 4px; height: 2px; background: var(--accent-hi); pointer-events: none; z-index: 2; }
 .lt-drop.into { height: var(--lt-row); background: rgba(63, 181, 159, .18); border: 2px solid var(--accent-hi); border-radius: 3px; }
+/* Alt held while dragging a filter / effect: a copy lands there (amber instead of green) */
+.lt-drop.copy { background: #f0b840; }
+.lt-drop.into.copy { background: rgba(240, 184, 64, .16); border-color: #f0b840; }
+/* a filter chip's new place along its row: an upright bar between chips */
+.lt-drop.vbar { right: auto; width: 3px; border-radius: 2px; }
+/* the chip being dragged, left faded where it was */
+.lt-chip.held { opacity: .4; border-style: dashed; border-color: var(--accent-hi); }
+/* the label beside the pointer while dragging: what, and what letting go here does (green move, amber
+   copy, red delete, gray not here) */
+.lt-ghost { position: absolute; z-index: 6; pointer-events: none; display: flex; align-items: center; max-width: 260px; height: 24px; padding: 0 8px; border-radius: 12px;
+  background: #262626; border: 2px solid var(--accent-hi); color: #f2f2f2; font-size: var(--fs-s); white-space: nowrap; overflow: hidden; }
+.lt-ghost-what { font-weight: 600; overflow: hidden; text-overflow: ellipsis; }
+.lt-ghost-act { margin-left: 8px; color: var(--accent-hi); flex: none; }
+.lt-ghost.copy { border-color: #f0b840; }
+.lt-ghost.copy .lt-ghost-act { color: #f0b840; }
+.lt-ghost.del { border-color: var(--err); }
+.lt-ghost.del .lt-ghost-act { color: var(--err); }
+.lt-ghost.no { border-color: #777; }
+.lt-ghost.no .lt-ghost-act { color: #aaa; }
+/* fx / 智能滤镜 icons open their rows: lit while open */
+.lt-fx.open, .lt-subcell.open { color: var(--accent-hi); }
+.lt-subcell { cursor: pointer; }
 /* narrow panels: the name keeps room, the status cells give way (their tooltip still tells) */
 .lt-name { min-width: 56px; }
 .lt-tags { flex: 0 1 auto; min-width: 0; overflow: hidden; }

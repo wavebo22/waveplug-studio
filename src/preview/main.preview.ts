@@ -176,6 +176,7 @@ class MockLayerTree implements LayerTree {
     const L = (name: string, kind = 1): RawLayer => ({ id: this.next++, name, kind, section: kind === 7 ? "start" : "content", visible: true, locked: false, mask: false, width: 120, height: 80 });
     const at = () => Math.max(0, this.raw.findIndex(x => ids.includes(x.id) && x.section !== "end"));
     const each = (f: (l: RawLayer) => void) => this.raw.filter(x => ids.includes(x.id) && x.section !== "end").forEach(f);
+    console.info("[mock] run", action, JSON.stringify(ids), arg ?? "");
     // Photoshop selects the layer a mask / the pixels are targeted on
     if (action.startsWith("target")) this.selected = [...ids];
     switch (action) {

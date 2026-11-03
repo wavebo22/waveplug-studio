@@ -228,12 +228,12 @@ export interface Row { layer: TreeLayer; context: boolean; filter?: SubRow }
 /** An AI result group holding only its variations: listed as one layer (变体图层) whose variations
  *  are picked from a row under it, while Photoshop keeps the group. */
 export const isVariantLayer = (l: TreeLayer) => !!l.ai && l.ai.variations > 0 && l.ai.variations === l.children;
-/** a row under a layer: `kind` effects (index 0: 效果, all of them; 1…: each), smart filters
- *  (index 0: 智能滤镜; 1…: each) or a variant layer's variations (index 0) */
+/** a row under a layer: `kind` effects (效果) or smart filters (智能滤镜), each effect / filter a chip on
+ *  it, or a variant layer's variations; `index` is always 0 */
 export interface SubRow {
   kind: "effects" | "filters" | "variants"; index: number; name: string; enabled: boolean; effect?: Effect;
-  /** effects / variants: which line of chips this row is (0 first) and the chips (places in
-   *  effectList / ai.ids) on it */
+  /** which line of chips this row is (0 first) and the chips (places in effectList / filters /
+   *  ai.ids) on it */
   line?: number; chips?: number[];
 }
 
@@ -254,15 +254,15 @@ export function queryMatch(l: TreeLayer, q?: Query): boolean {
 }
 
 export function visibleRows(layers: TreeLayer[], collapsed: ReadonlySet<number>, f: Filter, users: Map<string, number>, openSubs: ReadonlySet<number> = new Set(), q?: Query): Row[] {
-  // a layer opened with its twisty shows its effects (one row, each effect a chip) and smart filters
+  // `openSubs`: a layer's id opens its effects (or a variant layer's variations), minus its id its
+  // smart filters — each a row under it, each effect / filter a chip on that row
   const withFilters = (rows: Row[]): Row[] => rows.flatMap(r => {
     const l = r.layer;
     if (isVariantLayer(l) && !r.context && openSubs.has(l.id)) return [r, { layer: l, context: false, filter: { kind: "variants", index: 0, name: "变体", enabled: true } }];
-    if (r.context || (!l.filters.length && !l.effectList.length) || !openSubs.has(l.id)) return [r];
+    if (r.context || (!l.filters.length && !l.effectList.length)) return [r];
     const out: Row[] = [r];
-    if (l.effectList.length) out.push({ layer: l, context: false, filter: { kind: "effects", index: 0, name: "效果", enabled: l.effectsOn } });
-    if (l.filters.length) out.push({ layer: l, context: false, filter: { kind: "filters", index: 0, name: "智能滤镜", enabled: l.filtersOn } },
-      ...l.filters.map((x, i) => ({ layer: l, context: false, filter: { kind: "filters" as const, index: i + 1, name: x.name, enabled: x.enabled } })));
+    if (l.effectList.length && openSubs.has(l.id)) out.push({ layer: l, context: false, filter: { kind: "effects", index: 0, name: "效果", enabled: l.effectsOn } });
+    if (l.filters.length && openSubs.has(-l.id)) out.push({ layer: l, context: false, filter: { kind: "filters", index: 0, name: "智能滤镜", enabled: l.filtersOn } });
     return out;
   });
   return withFilters(baseRows(layers, collapsed, f, users, q));
@@ -372,7 +372,8 @@ export type LayerAction =
   | "convertSmart" | "rasterize" | "addMask" | "addMaskHide" | "deleteMask" | "applyMask" | "toggleMask" | "targetMask"
   | "clip" | "unclip" | "copyStyle" | "pasteStyle" | "clearStyle" | "toggleEffects" | "link" | "unlink" | "lock" | "unlock" | "setLock" | "solo" | "adjustment" | "editContents" | "toggleFilter" | "setProps" | "toggleEffect" | "moveFilter" | "effectStyle" | "showVariant" | "deleteVariant" | "setColor" | "loadSelection"
   | "addVectorMask" | "deleteVectorMask" | "toggleVectorMask" | "targetVectorMask" | "toggleMaskLink" | "viewMask" | "editFilter"
-  | "targetLayer" | "targetFilterMask" | "deleteFilterMask";
+  | "targetLayer" | "targetFilterMask" | "deleteFilterMask"
+  | "moveEffect" | "moveEffects" | "deleteEffect" | "moveFilters" | "deleteFilter" | "deleteFilters";
 
 /** 智能对象 tools offered in the menu (they act on the selection, like on the 工具 page) */
 export type SmartAction = "makeUnique" | "selectSameSource" | "makeEditable" | "unpack";

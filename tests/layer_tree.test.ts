@@ -177,16 +177,17 @@ test("锁定: one lock on or off, the others kept; groups only lock as a whole",
   assert.deepEqual(ids(lockPlan(t, [4, 5], "all", false)), [4]);
 });
 
-test("智能滤镜: rows under their smart object, foldable, and a status icon", () => {
+test("智能滤镜: one row under their smart object (each filter a chip on it), foldable, and a status icon", () => {
   const t = buildTree([
     raw(1, "图层 2", 5, { contentId: "a", file: "a.psb", filters: [{ name: "亮度/对比度", enabled: true }, { name: "表面模糊", enabled: false }], filtersOn: true }),
     raw(2, "背景", 1, { background: true }),
   ]);
-  // folded by default; opened with the twisty
+  // folded by default; opened from the 智能滤镜 icon (minus the layer's id; its id opens the effects)
   assert.deepEqual(visibleRows(t, new Set(), "all", contentUsers(t)).map(r => r.layer.id), [1, 2]);
-  const rows = visibleRows(t, new Set(), "all", contentUsers(t), new Set([1]));
-  assert.deepEqual(rows.map(r => [r.layer.id, r.filter?.index ?? null, r.filter?.name ?? null]), [[1, null, null], [1, 0, "智能滤镜"], [1, 1, "亮度/对比度"], [1, 2, "表面模糊"], [2, null, null]]);
-  assert.equal(rows[3].filter!.enabled, false);
+  assert.deepEqual(visibleRows(t, new Set(), "all", contentUsers(t), new Set([1])).map(r => r.layer.id), [1, 2]);
+  const rows = visibleRows(t, new Set(), "all", contentUsers(t), new Set([-1]));
+  assert.deepEqual(rows.map(r => [r.layer.id, r.filter?.index ?? null, r.filter?.name ?? null]), [[1, null, null], [1, 0, "智能滤镜"], [2, null, null]]);
+  assert.equal(t[0].filters[1].enabled, false);
   assert.ok(layerTags(t[0], contentUsers(t)).some(x => x.text === "智能滤镜" && x.count === 2));
 });
 

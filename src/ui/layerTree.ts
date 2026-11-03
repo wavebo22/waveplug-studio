@@ -8,6 +8,7 @@
 import { log } from "../app/log.ts";
 import { resultText } from "../core/layers/smart.ts";
 import { ThumbCache } from "../core/layers/thumbs.ts";
+import { MULTI_EFFECTS } from "../core/layers/effects.ts";
 import { type Filter, type LayerAction, type LayerKind, type LockKey, type MoveStep, type Row, type SmartAction, type TreeLayer, type Where, BLEND_MODES, ancestors, queryActive, clickSelect, contentUsers, dropPlan, dropZone, filterCounts, isVariantLayer, layerMenu, layerTags, linkPeers, lockPlan, packChips, lockedByGroup, sharedColors, visibleRows } from "../core/layers/tree.ts";
 import { type LayerTools, type LayerTree, type RunOptions, type TargetPart, ADJUSTMENTS } from "../ps/host.ts";
 import { h, icon, isShown, replace, setShown } from "./dom.ts";
@@ -126,7 +127,7 @@ export function createLayerTreeView(tree: LayerTree, status: Status, tools?: Lay
   // Double-clicks act by where they land: the thumbnail opens 图层样式, the status icons open a
   // smart object's content; elsewhere they do nothing. A press on either part marks `downZone` before
   // the row sees it.
-  type Zone = "thumb" | "status" | "name" | "variant" | "filter";
+  type Zone = "thumb" | "status" | "name" | "variant";
   let downZone: Zone | null = null;
   /** where on the row the last left / right press was (its click acts on that part) */
   let pressZone: Zone | null = null;
@@ -371,7 +372,7 @@ export function createLayerTreeView(tree: LayerTree, status: Status, tools?: Lay
     eye.addEventListener("click", e => {
       e.stopPropagation();
       const s = r.sub;
-      if (s?.kind === "effects" && s.line || s?.kind === "variants") return;
+      if (s?.line || s?.kind === "variants") return;
       if (s?.kind === "effects") {
         if (!s.index) void run("toggleEffects", [r.id], s.enabled ? "off" : "on");
         else void run("toggleEffect", [r.id], JSON.stringify({ key: s.effect!.key, multi: s.effect!.multi, on: !s.enabled }));
@@ -413,8 +414,7 @@ export function createLayerTreeView(tree: LayerTree, status: Status, tools?: Lay
         return;
       }
       // an artboard's row: a double-click anywhere but its name picks its frame colour
-      const m = e as MouseEvent, zone = downZone ?? (r.sub?.kind === "effects" || (!r.sub && layers.find(x => x.id === r.id)?.artboard) ? "thumb"
-        : r.sub?.kind === "filters" && r.sub.index > 0 ? "filter" : null);
+      const m = e as MouseEvent, zone = downZone ?? (r.sub?.kind === "effects" || (!r.sub && layers.find(x => x.id === r.id)?.artboard) ? "thumb" : null);
       downZone = null;
       pressZone = zone;
       if (m.button === 2) { openRowMenu(r.id); return; }
@@ -425,15 +425,15 @@ export function createLayerTreeView(tree: LayerTree, status: Status, tools?: Lay
         drag = null;
         suppressClick = true;
         setTimeout(() => { suppressClick = false; }, DOUBLE_CLICK);
-        // a smart filter: that filter's dialog again
-        if (zone === "filter" && r.sub) { void run("editFilter", [r.id], JSON.stringify({ pos: r.sub.index - 1 })); return; }
         onDouble(r.id, zone);
         return;
       }
       lastDown = { id: r.id, at: now, zone };
-      // a smart filter can be dragged (reordered, or onto another smart object); other sub rows only select
+      // the 智能滤镜 / 效果 rows drag as in Photoshop: all the filters, or the whole style, onto another
+      // layer (Alt copies) or the trash; their chips drag one by one (filterChips / effectChips)
       if (!r.sub) startDrag(r.id, m);
-      else if (r.sub.kind === "filters" && r.sub.index > 0) startDrag(r.id, m, { pos: r.sub.index - 1, row: r.index });
+      else if (r.sub.kind === "filters") startDrag(r.id, m, { what: { kind: "filters", layerId: r.id }, row: r.index });
+      else if (r.sub.kind === "effects") startDrag(r.id, m, { what: { kind: "effects", layerId: r.id }, row: r.index });
     });
     el.addEventListener("mouseover", () => peekAt(r.id));
     el.addEventListener("contextmenu", e => e.preventDefault());
@@ -449,40 +449,42 @@ export function createLayerTreeView(tree: LayerTree, status: Status, tools?: Lay
     return r;
   }
 
-  /** A smart filter row: the 智能滤镜 row (all of them) or one filter, under its smart object. */
+  /** The 效果 / 智能滤镜 row under a layer: an eye for all of them and each effect / filter a chip
+   *  (several lines when they don't fit; only the first has the eye and the mark). */
   function fillFilter(r: RowEl, row: Row, index: number) {
     const l = row.layer, f = row.filter!, sel = selected.has(l.id), fx = f.kind === "effects";
     const allOn = fx ? l.effectsOn : l.filtersOn;
-    const moving = !!drag?.active && !!drag.filter && drag.filter.layerId === l.id && drag.filter.pos === f.index - 1 && !fx;
-    // effects may take several lines of chips: only the first has the eye and the fx mark
-    const more = fx && !!f.line;
-    const key = ["f", f.kind, l.id, f.index ? "" : framed(l), l.filterMask, maskView?.id === l.id && maskView.filter, f.index, f.name, f.enabled, allOn, l.depth, sel, moving, f.line, (f.chips ?? []).join(), fx ? l.effectList.map(e => e.name + +e.enabled).join() : ""].join("|");
+    const ds = drag?.active ? drag.sub : null;
+    const moving = !!ds && ds.layerId === l.id && (ds.kind === "filters" && !fx || ds.kind === "effects" && fx);
+    // the chip being dragged is drawn faded where it was
+    const held = !ds || ds.layerId !== l.id ? "" : ds.kind === "filter" && !fx ? "f" + ds.pos : ds.kind === "effect" && fx ? ds.key + ds.multi : "";
+    const more = !!f.line;
+    const key = ["f", f.kind, l.id, more ? "" : framed(l), l.filterMask, maskView?.id === l.id && maskView.filter, f.name, f.enabled, allOn, l.depth, sel, moving, held, f.line, (f.chips ?? []).join(),
+      fx ? l.effectList.map(e => e.name + +e.enabled).join() : l.filters.map(x => x.name + +x.enabled).join(), size].join("|");
     r.index = index;
     setShown(r.el, true);
     if (key === r.key) return;
     r.key = key; r.id = l.id; r.sub = f;
-    const shown = f.enabled && (f.index === 0 || allOn);
-    r.el.className = "lt-row lt-filter-row" + (sel ? " on" : "") + (shown ? "" : " off") + (moving ? " moving" : "") + (r.el === hoverEl ? " hover" : "");
+    r.el.className = "lt-row lt-filter-row" + (sel ? " on" : "") + (f.enabled ? "" : " off") + (moving ? " moving" : "") + (r.el === hoverEl ? " hover" : "");
     (r.el.firstChild as HTMLElement).className = "lt-stripe";
     replace(r.eye, f.enabled && !more ? ic("eye", 14) : null);
     r.eye.className = "lt-eye" + (more ? " none" : f.enabled ? "" : " hidden");
     r.eye.style.backgroundColor = "";
-    r.eye.title = fx ? (f.index ? (f.enabled ? "隐藏这个效果" : "显示这个效果") : (f.enabled ? "隐藏全部效果" : "显示全部效果"))
-      : f.index ? (f.enabled ? "隐藏这个滤镜" : "显示这个滤镜") : (f.enabled ? "隐藏全部智能滤镜" : "显示全部智能滤镜");
+    r.eye.title = more ? "" : fx ? (f.enabled ? "隐藏全部效果" : "显示全部效果") : (f.enabled ? "隐藏全部智能滤镜" : "显示全部智能滤镜");
     replace(r.move); r.move.className = "lt-toggle"; r.move.title = "";
     replace(r.edit); r.edit.className = "lt-toggle"; r.edit.title = "";
     replace(r.name, f.name);
     r.name.className = "lt-name";
-    replace(r.body, h("div", { class: "lt-indent" }, ...Array.from({ length: l.depth + (f.index ? 2 : 1) }, () => h("span", { class: "lt-guide" }))),
+    const places = f.chips ?? (fx ? l.effectList : l.filters).map((_, i) => i);
+    replace(r.body, h("div", { class: "lt-indent" }, ...Array.from({ length: l.depth + 1 }, () => h("span", { class: "lt-guide" }))),
       fx ? h("div", { class: "lt-mark" }, more ? null : h("span", { class: "lt-kind k-fx" }, "fx"))
-        : f.index ? h("div", { class: "lt-mark" }, h("span", { class: "lt-kind k-filter" }, ic("sliders", 13)))
-        : h("div", { class: "lt-mark has-thumb" }, filterMaskCell(l)),
-      fx ? effectChips(l, f.chips ?? l.effectList.map((_, i) => i)) : r.name);
-    r.el.title = fx ? (f.index ? `图层样式：${f.name}（双击打开图层样式）` : `${l.name} 的图层样式（双击打开）`)
-      : f.index ? `智能滤镜：${f.name}（双击：重新打开设置；可拖动调整顺序，或拖到别的智能对象上）` : `${l.name} 的智能滤镜（${l.filters.length} 个）`;
+        : h("div", { class: "lt-mark has-thumb" }, more ? null : filterMaskCell(l)),
+      fx ? effectChips(l, places, index, held) : filterChips(l, places, index, held));
+    r.el.title = fx ? `${l.name} 的图层样式（双击打开）。拖动这一行到别的图层上：移动整个样式（按住 Alt 复制，替换那个图层原有的样式）；拖到垃圾桶：清除`
+      : `${l.name} 的智能滤镜，从右往左依次应用（和 PS 里从下往上一样）。拖动这一行到别的智能对象上：移动全部（按住 Alt 复制）；拖到垃圾桶：全部清除`;
   }
 
-  /** Effect chips need more than one line when they don't fit: the effects row becomes as many rows
+  /** Effect / filter chips need more than one line when they don't fit: the row becomes as many rows
    *  as it takes (fixed-height rows keep the list virtual). Chip widths are estimated from their text. */
   function layoutEffects(rs: Row[]): Row[] {
     const w = list.clientWidth || 300;
@@ -496,35 +498,75 @@ export function createLayerTreeView(tree: LayerTree, status: Status, tools?: Lay
         const lines = packChips(order.map(() => VCHIP_W), avail);
         return lines.map((chips, line) => ({ ...r, filter: { ...r.filter!, line, chips: chips.map(k => order[k]) } }));
       }
-      if (r.filter?.kind !== "effects") return [r];
-      const avail = w - LEAD - (r.layer.depth + 1) * INDENT - 22 - 10;
-      const lines = packChips(r.layer.effectList.map(e => chipW(e.name)), avail);
+      if (r.filter?.kind !== "effects" && r.filter?.kind !== "filters") return [r];
+      const fx = r.filter.kind === "effects";
+      // after the fx mark, or the filter mask's box
+      const avail = w - LEAD - (r.layer.depth + 1) * INDENT - (fx ? 22 : SIZES[size].thumb + 8) - 10;
+      const lines = packChips((fx ? r.layer.effectList : r.layer.filters).map(e => chipW(e.name)), avail);
       return lines.map((chips, line) => ({ ...r, filter: { ...r.filter!, line, chips } }));
     });
   }
 
-  /** 图层样式 on one row: each effect a chip, click to switch it, double-click for the dialog */
-  function effectChips(l: TreeLayer, places: number[]): HTMLElement {
+  /** A chip's clicks: a press waits a moment, so a second press makes it a double-click (`edit`)
+   *  rather than two `toggle`s — told from the presses, as UXP can lose the second click event; the
+   *  native dblclick backs it up. A press can also start dragging the chip (`what`): then nothing
+   *  is switched; held still, the switch comes on release. */
+  function chipPress(chip: HTMLElement, layerId: number, row: number, toggle: () => void, edit: () => void, what: (m: MouseEvent) => SubDrag) {
+    let pending: ReturnType<typeof setTimeout> | null = null, editedAt = 0;
+    const twice = () => {
+      if (pending) { clearTimeout(pending); pending = null; }
+      if (Date.now() - editedAt < DOUBLE_CLICK) return;
+      editedAt = Date.now();
+      edit();
+    };
+    chip.addEventListener("mousedown", ev => {
+      ev.stopPropagation();
+      const m = ev as MouseEvent;
+      if (m.button !== 0) return;
+      if (pending) { twice(); return; }
+      const grabbed = what(m);
+      startDrag(layerId, m, { what: grabbed, row });
+      pending = setTimeout(() => {
+        pending = null;
+        if ("dragged" in grabbed && grabbed.dragged) return;
+        const s = drag?.sub;
+        if (s === grabbed && "chip" in s) { if (!drag!.active) s.toggleOnUp = toggle; return; } // still held: decided on release
+        toggle();
+      }, CHIP_DOUBLE);
+    });
+    chip.addEventListener("click", ev => ev.stopPropagation());
+    chip.addEventListener("dblclick", ev => { ev.stopPropagation(); twice(); });
+  }
+
+  /** where a chip sits from its row's left edge, and the pointer pressed on it (for dragging it along the row) */
+  const xInRow = (el: HTMLElement) => { let x = 0, e: HTMLElement | null = el; while (e && !e.classList.contains("lt-row")) { x += e.offsetLeft; e = e.offsetParent as HTMLElement | null; } return x; };
+
+  /** 图层样式 on one row: each effect a chip, click to switch it, double-click for the dialog, drag it
+   *  onto another layer (move; Alt: copy), onto 新建图层 (another one here) or the trash (delete) */
+  function effectChips(l: TreeLayer, places: number[], row: number, held: string): HTMLElement {
     return h("div", { class: "lt-chips" }, ...places.map(i => l.effectList[i]).map(e => {
-      const chip = h("span", { class: "lt-chip" + (e.enabled && l.effectsOn ? "" : " off"), title: `${e.name}：单击${e.enabled ? "隐藏" : "显示"}，双击打开图层样式` }, e.name);
-      // A press waits a moment: a second press makes it a double-click (edit), not two switches. Told
-      // from the presses, as UXP can lose the second click event; the native dblclick backs it up.
-      let pending: ReturnType<typeof setTimeout> | null = null, editedAt = 0;
-      const edit = () => {
-        if (pending) { clearTimeout(pending); pending = null; }
-        if (Date.now() - editedAt < DOUBLE_CLICK) return;
-        editedAt = Date.now();
-        void run("effectStyle", [l.id], JSON.stringify({ key: e.key, multi: e.multi }));
-      };
-      chip.addEventListener("mousedown", ev => {
-        ev.stopPropagation();
-        const m = ev as MouseEvent;
-        if (m.button !== 0) return;
-        if (pending) { edit(); return; }
-        pending = setTimeout(() => { pending = null; void run("toggleEffect", [l.id], JSON.stringify({ key: e.key, multi: e.multi, on: !e.enabled })); }, CHIP_DOUBLE);
-      });
-      chip.addEventListener("click", ev => ev.stopPropagation());
-      chip.addEventListener("dblclick", ev => { ev.stopPropagation(); edit(); });
+      const chip = h("span", { class: "lt-chip" + (e.enabled && l.effectsOn ? "" : " off") + (held === e.key + e.multi ? " held" : ""),
+        title: `${e.name}：单击${e.enabled ? "隐藏" : "显示"}，双击打开图层样式。拖到别的图层上移动（按住 Alt 复制），拖到「新建图层」按钮上在本图层再加一个，拖到垃圾桶删除` }, e.name);
+      chipPress(chip, l.id, row,
+        () => void run("toggleEffect", [l.id], JSON.stringify({ key: e.key, multi: e.multi, on: !e.enabled })),
+        () => void run("effectStyle", [l.id], JSON.stringify({ key: e.key, multi: e.multi })),
+        () => ({ kind: "effect", layerId: l.id, key: e.key, multi: e.multi, name: e.name, chip }));
+      return chip;
+    }));
+  }
+
+  /** 智能滤镜 on one row, in Photoshop's order (it applies them bottom up: here right to left): click
+   *  to switch one, double-click for its dialog, drag it along the row (reorder) or onto another smart
+   *  object (move; Alt: copy), onto 新建图层 (a copy here) or the trash (delete) */
+  function filterChips(l: TreeLayer, places: number[], row: number, held: string): HTMLElement {
+    return h("div", { class: "lt-chips" }, ...places.map(i => {
+      const f = l.filters[i];
+      const chip = h("span", { class: "lt-chip lt-fchip" + (f.enabled && l.filtersOn ? "" : " off") + (held === "f" + i ? " held" : ""),
+        title: `智能滤镜：${f.name}。单击${f.enabled ? "隐藏" : "显示"}，双击重新打开设置。左右拖动调整顺序，拖到别的智能对象上移动（按住 Alt 复制），拖到「新建图层」按钮上复制一份，拖到垃圾桶删除` }, f.name);
+      chipPress(chip, l.id, row,
+        () => void run("toggleFilter", [l.id], JSON.stringify({ index: i + 1 })),
+        () => void run("editFilter", [l.id], JSON.stringify({ pos: i })),
+        m => ({ kind: "filter", layerId: l.id, pos: i, name: f.name, chip, x: xInRow(chip) + (typeof m.offsetX === "number" ? m.offsetX : 0) }));
       return chip;
     }));
   }
@@ -566,11 +608,10 @@ export function createLayerTreeView(tree: LayerTree, status: Status, tools?: Lay
   function fill(r: RowEl, row: Row, index: number) {
     if (row.filter?.kind === "variants") { fillVariants(r, row, index); return; }
     if (row.filter) { fillFilter(r, row, index); return; }
-    // filtered lists show every match whatever is collapsed; a smart object's twisty folds its filters
+    // filtered lists show every match whatever is collapsed
     const l = row.layer, sel = selected.has(l.id), vl = isVariantLayer(l);
-    // groups fold their layers; other layers fold their effects and smart filters; a variant layer
-    // (an AI group shown as one layer) its variations
-    const subs = vl || l.kind !== "group" && (l.filters.length > 0 || l.effectList.length > 0);
+    // open: a group's layers shown; another layer's effects (its smart filters: openSubs has minus its
+    // id); a variant layer's (an AI group shown as one layer) variations
     const open = l.kind !== "group" || vl ? openSubs().has(l.id) : filter !== "all" || !collapsed.has(l.id);
     // a variant layer's picture is its shown variation's
     const shown = vl && thumbsOn ? l.ai!.shown : null;
@@ -578,7 +619,7 @@ export function createLayerTreeView(tree: LayerTree, status: Status, tools?: Lay
     const maskThumb = l.mask && thumbsOn ? thumbs().get(maskKey(l.id)) : undefined;
     const vmaskThumb = l.vmask && thumbsOn ? thumbs().get(vmaskKey(l.id)) : undefined;
     const key = [l.id, l.name, l.visible, l.locked, l.lockAll, l.lockPosition, l.lockPixels, l.lockTransparency, groupLocked.has(l.id), l.links.length, peers.has(l.id), sharedColor(l), l.mask, l.maskOn, l.clipped, l.clipBase, l.effects, l.effectsOn, l.depth, l.children, l.ai?.variations, l.smart?.contentId, l.smart?.linked, l.smart?.file, l.filters.length, l.filtersOn, l.effectList.map(e => +e.enabled).join(""), groupColor.get(l.id),
-      users.get(l.smart?.contentId ?? "") ?? 0, sel, open, row.context, moving, thumbs().version(l.id), thumbs().version(maskKey(l.id)), thumbs().version(vmaskKey(l.id)), l.vmask, l.vmaskOn, l.maskLinked, l.vmaskLinked, l.color, customOf(l.id), maskView?.id === l.id, hasPicture(l), framed(l), thumbW(l), shown, shown !== null ? thumbs().version(shown) : 0, l.ai?.shown, colsKey].join("|");
+      users.get(l.smart?.contentId ?? "") ?? 0, sel, open, row.context, moving, thumbs().version(l.id), thumbs().version(maskKey(l.id)), thumbs().version(vmaskKey(l.id)), l.vmask, l.vmaskOn, l.maskLinked, l.vmaskLinked, l.color, customOf(l.id), maskView?.id === l.id, hasPicture(l), framed(l), thumbW(l), openSubs().has(-l.id), shown, shown !== null ? thumbs().version(shown) : 0, l.ai?.shown, colsKey].join("|");
     r.index = index;
     setShown(r.el, true);
     if (key === r.key) return;
@@ -610,9 +651,10 @@ export function createLayerTreeView(tree: LayerTree, status: Status, tools?: Lay
     r.edit.className = "lt-toggle" + (bare ? "" : byGroup ? " inherit" : l.lockPixels ? " off" : "");
     r.edit.title = bare ? "" : byGroup ? "所在的图层组已全部锁定" : l.lockPixels ? "图像像素已锁定：单击解锁" : "可编辑：单击锁定图像像素";
     // a variant layer opens its variations from the ✦ on its picture, not a twisty
-    const folds = vl ? false : l.kind === "group" ? l.children > 0 : subs;
+    // effects and smart filters open from their status icons (fx / 智能滤镜), not a twisty
+    const folds = !vl && l.kind === "group" && l.children > 0;
     replace(r.twisty, folds ? (open ? "▾" : "▸") : "");
-    r.twisty.title = !folds ? "" : vl ? (open ? "收起变体" : "展开变体") : l.kind === "group" ? (open ? "折叠" : "展开") : (open ? "收起效果和智能滤镜" : "展开效果和智能滤镜");
+    r.twisty.title = !folds ? "" : open ? "折叠" : "展开";
     replace(r.name, l.name);
     r.name.className = "lt-name" + (l.clipBase ? " clip-base" : "");
     const pictured = hasPicture(l) || shown !== null;
@@ -722,9 +764,11 @@ export function createLayerTreeView(tree: LayerTree, status: Status, tools?: Lay
 
   /** fx: the layer has effects; click opens 图层样式 */
   function fxCell(l: TreeLayer): HTMLElement {
-    const cell = h("span", { class: "lt-col col-fx lt-fx" + (l.effectsOn ? "" : " off"), title: l.effectsOn ? "图层样式：单击打开" : "图层样式已隐藏：单击打开" }, "fx");
+    const open = openSubs().has(l.id);
+    const cell = h("span", { class: "lt-col col-fx lt-fx" + (l.effectsOn ? "" : " off") + (open ? " open" : ""),
+      title: (l.effectsOn ? "图层样式" : "图层样式（已隐藏）") + `：单击${open ? "收起" : "展开"}效果；双击缩略图打开图层样式` }, "fx");
     cell.addEventListener("mousedown", e => e.stopPropagation());
-    cell.addEventListener("click", e => { e.stopPropagation(); void run("layerStyle", [l.id]); });
+    cell.addEventListener("click", e => { e.stopPropagation(); toggleSub(l.id); });
     return cell;
   }
 
@@ -744,10 +788,16 @@ export function createLayerTreeView(tree: LayerTree, status: Status, tools?: Lay
     const box = (cls: string, tip: string, ...kids: (Node | null)[]) => h("span", { class: `lt-col col-${c} ${cls}`, title: tip }, ...kids);
     if (!cellUsed(l, c)) return h("span", { class: `lt-col col-${c}` });
     const tag = (cls: string[]) => layerTags(l, users).find(t => cls.includes(t.cls.split(" ")[0]));
-    const count = (n?: number) => n ? h("span", { class: "lt-count" }, String(n)) : null;
     switch (c) {
       case "content": { const t = tag(["edit", "content"])!; return box(t.cls + " " + t.icon, "智能对象内容 · " + t.text + "\n" + t.tip, ic(t.icon, 14)); }
-      case "filters": { const t = tag(["filters"])!; return box(t.cls, "智能滤镜（数字＝滤镜个数）\n" + t.tip, ic("filters", 14), count(t.count)); }
+      case "filters": {
+        // a click opens / closes the 智能滤镜 row, as the fx cell does the effects
+        const t = tag(["filters"])!, open = openSubs().has(-l.id);
+        const b = box(t.cls + " lt-subcell" + (open ? " open" : ""), `智能滤镜：单击${open ? "收起" : "展开"}\n` + t.tip, ic("filters", 14));
+        b.addEventListener("mousedown", e => e.stopPropagation());
+        b.addEventListener("click", e => { e.stopPropagation(); toggleSub(-l.id); });
+        return b;
+      }
       case "fx": return fxCell(l);
       case "chain": return box("lt-chain" + (peer ? " peer" : ""), peer ? "和选中的图层链接在一起" : `和 ${l.links.length} 个图层链接（一起移动、变换）`, ic("link", 13));
       case "lock": return box("lt-lock" + (l.lockAll ? "" : " part"), l.lockAll ? "锁定全部（上方的锁定按钮可以解开）" : "锁定透明像素（上方的锁定按钮可以解开）", ic("lock", 13));
@@ -1127,9 +1177,16 @@ export function createLayerTreeView(tree: LayerTree, status: Status, tools?: Lay
       .catch(e => { log("warn", "layer tree visible", e); status(`显示/隐藏失败：${(e as Error).message ?? e}`, "error"); void refresh(); });
   });
 
+  /** the 效果 row (a layer's id) or the 智能滤镜 row (minus its id) under a layer: shown / hidden */
+  function toggleSub(key: number) {
+    const c = openSubs();
+    if (c.has(key)) c.delete(key); else c.add(key);
+    render();
+  }
+
   function toggleGroup(id: number) {
     const l = layers.find(x => x.id === id);
-    if (l && (isVariantLayer(l) || l.kind !== "group" && (l.filters.length || l.effectList.length))) {
+    if (l && isVariantLayer(l)) {
       const c = openSubs();
       if (c.has(id)) c.delete(id); else c.add(id);
       render();
@@ -1164,11 +1221,21 @@ export function createLayerTreeView(tree: LayerTree, status: Status, tools?: Lay
   // movement since the grab gives `view`; while it is over the list, a transparent layer laid over
   // the rows reports the exact spot (offsetY), which corrects for where in the row it was grabbed.
   // Dropped on the toolbar's 新建组 / 新建图层 / 删除 buttons, the layers are grouped / copied / deleted.
+  /** what a press on a sub row grabbed: one filter / effect chip (`name`, the `chip` and its switch to
+   *  run if let go without dragging; a filter: `x`, the pointer from the row's left edge), or the
+   *  whole 智能滤镜 / 效果 row */
+  type SubDrag = { kind: "filter"; layerId: number; pos: number; name: string; chip: HTMLElement; x: number; toggleOnUp?: () => void; dragged?: boolean }
+    | { kind: "filters"; layerId: number } | { kind: "effects"; layerId: number }
+    | { kind: "effect"; layerId: number; key: string; multi: number; name: string; chip: HTMLElement; toggleOnUp?: () => void; dragged?: boolean };
   let drag: {
     ids: number[]; y0: number; view0: number; fix: number; view: number; active: boolean; probed: boolean;
     target: { id: number; where: Where; plan: MoveStep[] } | null;
-    /** dragging a smart filter: its layer and place, and where it would go */
-    filter: { layerId: number; pos: number } | null; ftarget: { layerId: number; toPos: number } | null;
+    /** dragging a smart filter / all of them / one effect / the whole style instead of layers; where a
+     *  filter would go (`toPos` as moved, `insertAt` as copied), the layer the rest would go onto, and
+     *  whether Alt is down (copy) */
+    sub: SubDrag | null; ftarget: { layerId: number; toPos: number; insertAt: number } | null; ltarget: number | null; alt: boolean;
+    /** the pointer across the list: where it was pressed (clientX) and now, from a row's left edge (filter chips) */
+    x0: number; px: number;
     hover: number | null; overTool: HTMLElement | null;
     hoverTimer: ReturnType<typeof setTimeout> | null; scroller: ReturnType<typeof setInterval> | null;
   } | null = null;
@@ -1177,7 +1244,10 @@ export function createLayerTreeView(tree: LayerTree, status: Status, tools?: Lay
   setShown(marker, false);
   const hit = h("div", { class: "lt-hit" });
   setShown(hit, false);
-  inner.append(marker, hit);
+  // a label beside the pointer while dragging: what is dragged and what letting go here would do
+  const ghost = h("div", { class: "lt-ghost" });
+  setShown(ghost, false);
+  inner.append(marker, hit, ghost);
   hit.addEventListener("mousemove", e => {
     const m = e as MouseEvent;
     if (!drag?.active || typeof m.offsetY !== "number") return;
@@ -1189,40 +1259,105 @@ export function createLayerTreeView(tree: LayerTree, status: Status, tools?: Lay
     }
   });
 
-  function startDrag(id: number, e: MouseEvent, filterAt?: { pos: number; row: number }) {
+  function startDrag(id: number, e: MouseEvent, sub?: { what: SubDrag; row: number }) {
     if (e.button !== 0 || docId === null) return;
     // the selection when the grabbed layer is part of it, in list order; else just that layer
-    const ids = filterAt ? [] : selected.has(id) ? layers.filter(l => selected.has(l.id)).map(l => l.id) : [id];
-    const idx = filterAt ? filterAt.row : Math.max(0, rows.findIndex(r => r.layer.id === id));
+    const ids = sub ? [] : selected.has(id) ? layers.filter(l => selected.has(l.id)).map(l => l.id) : [id];
+    const idx = sub ? sub.row : Math.max(0, rows.findIndex(r => r.layer.id === id));
     drag = { ids, y0: e.clientY, view0: yOf(idx) + heightOf(rows[idx]) / 2, fix: 0, view: 0, active: false, probed: false,
-      target: null, filter: filterAt ? { layerId: id, pos: filterAt.pos } : null, ftarget: null,
+      target: null, sub: sub?.what ?? null, ftarget: null, ltarget: null, alt: e.altKey,
+      x0: e.clientX, px: sub && "x" in sub.what ? sub.what.x : 0,
       hover: null, overTool: null, hoverTimer: null, scroller: null };
   }
 
-  /** Where a dragged smart filter would land at row `idx`: between the filters of a smart object
-   *  (its own or another), or on top of another smart object's filters when dropped on that layer. */
-  function trackFilter(idx: number, frac: number) {
-    const d = drag!, row = rows[idx], l = row.layer, f = row.filter;
-    let dest: TreeLayer | null = null, pos = 0, line = -1, box = false;
-    if (f?.kind === "filters" && f.index > 0) { dest = l; pos = f.index - 1 + (frac >= 0.5 ? 1 : 0); line = frac >= 0.5 ? idx + 1 : idx; }
-    else if (l.kind === "smartObject" && l.id !== d.filter!.layerId && (!f || f.kind === "filters")) { dest = l; pos = 0; box = !f; line = f ? idx + 1 : idx; }
+  /** Where all the filters / an effect / the whole style would go at row `idx`: onto that row's layer
+   *  (its sub rows count as the layer) — smart objects only for filters, never the background. */
+  function trackOnto(idx: number) {
+    const d = drag!, s = d.sub!, dest = rows[idx].layer;
+    const ok = dest.id !== s.layerId && dest.kind !== "background" && (s.kind !== "filters" || dest.kind === "smartObject");
+    d.ltarget = ok ? dest.id : null;
+    if (!ok) { setShown(marker, false); return; }
+    const at = rows.findIndex(r => r.layer.id === dest.id && !r.filter);
+    const row = at >= 0 ? at : idx;
+    setShown(marker, true);
+    marker.className = "lt-drop into" + (d.alt ? " copy" : "");
+    marker.style.left = LEAD + dest.depth * INDENT + "px";
+    marker.style.top = yOf(row) + "px";
+    marker.style.height = heightOf(rows[row]) + "px";
+  }
+
+  /** Where a dragged smart filter would land at row `idx`: between the chips of a 智能滤镜 row (its own
+   *  — reordering — or another smart object's), by the pointer's place along the row; or on top of
+   *  another smart object's filters when dropped on that layer's own row. */
+  function trackFilter(idx: number) {
+    const d = drag!, row = rows[idx], l = row.layer, f = row.filter, fs = d.sub as Extract<SubDrag, { kind: "filter" }>;
+    let dest: TreeLayer | null = null, pos = 0, bar: number | null = null;
+    if (f?.kind === "filters" && l.kind === "smartObject") {
+      dest = l;
+      const places = f.chips ?? l.filters.map((_, i) => i);
+      const el = pool.find(p => p.index === idx && isShown(p.el))?.el;
+      const chips = el ? Array.from(el.querySelectorAll(".lt-fchip")) as HTMLElement[] : [];
+      // the gap before the first chip whose middle is right of the pointer
+      let k = chips.findIndex(c => xInRow(c) + c.offsetWidth / 2 > d.px);
+      if (k < 0) k = chips.length;
+      pos = k < places.length ? places[k] : places.length ? places[places.length - 1] + 1 : 0;
+      const last = chips[chips.length - 1];
+      bar = (el?.offsetLeft ?? 0) + (k < chips.length ? xInRow(chips[k]) - 3 : last ? xInRow(last) + last.offsetWidth - 1 : LEAD);
+    } else if (!f && l.kind === "smartObject" && l.id !== fs.layerId) dest = l;
     let toPos = pos;
-    if (dest && dest.id === d.filter!.layerId) { if (pos > d.filter!.pos) toPos = pos - 1; if (toPos === d.filter!.pos) dest = null; }
-    d.ftarget = dest ? { layerId: dest.id, toPos } : null;
+    // moved in its own row: counted without itself; copied (Alt), it may land right beside itself
+    if (dest && dest.id === fs.layerId) { if (pos > fs.pos) toPos = pos - 1; if (toPos === fs.pos && !d.alt) dest = null; }
+    d.ftarget = dest ? { layerId: dest.id, toPos, insertAt: pos } : null;
     if (!dest) { setShown(marker, false); return; }
     setShown(marker, true);
-    marker.className = "lt-drop" + (box ? " into" : "");
-    marker.style.left = LEAD + (dest.depth + (box ? 0 : 2)) * INDENT + "px";
-    marker.style.top = (box ? yOf(idx) : yOf(line) - 1) + "px";
-    marker.style.height = box ? heightOf(rows[idx]) + "px" : "";
+    const h0 = heightOf(rows[idx]);
+    marker.className = "lt-drop" + (bar === null ? " into" : " vbar") + (d.alt ? " copy" : "");
+    marker.style.left = (bar ?? LEAD + dest.depth * INDENT) + "px";
+    marker.style.top = (bar === null ? yOf(idx) : yOf(idx) + 4) + "px";
+    marker.style.height = (bar === null ? h0 : h0 - 8) + "px";
   }
 
   function track() {
+    trackDrop();
+    drawGhost();
+  }
+  function drawGhost() {
+    const d = drag;
+    if (!d?.active) { setShown(ghost, false); return; }
+    const s = d.sub, tool = dropTools.find(b => b.el === d.overTool)?.action ?? null;
+    const nameOf = (id: number | null) => layers.find(x => x.id === id)?.name ?? "";
+    const what = !s ? (d.ids.length > 1 ? `${d.ids.length} 个图层` : nameOf(d.ids[0]))
+      : s.kind === "filter" || s.kind === "effect" ? s.name
+      : s.kind === "filters" ? `全部智能滤镜（${layers.find(x => x.id === s.layerId)?.filters.length ?? 0}）` : "整个图层样式";
+    let act = "", cls = "";
+    if (tool === "delete") { act = s && s.kind !== "filters" && s.kind !== "effects" ? "删除" : s ? "全部清除" : "删除"; cls = " del"; }
+    else if (tool && s) {
+      const ok = tool === "duplicate" && (s.kind === "filter" || s.kind === "effect" && MULTI_EFFECTS.has(s.key));
+      act = ok ? "在本图层复制一份" : s.kind === "effect" && tool === "duplicate" ? "这种效果一个图层只能有一个" : "不能放在这里";
+      cls = ok ? " copy" : " no";
+    } else if (tool) act = tool === "duplicate" ? "复制图层" : tool === "groupLayers" ? "编组" : "";
+    else if (s?.kind === "filter") {
+      const t = d.ftarget;
+      act = !t ? "不能放在这里" : t.layerId === s.layerId ? (d.alt ? "在这里复制一份" : "调整顺序") : `${d.alt ? "复制" : "移"}到「${nameOf(t.layerId)}」`;
+      cls = !t ? " no" : d.alt ? " copy" : "";
+    } else if (s) {
+      act = d.ltarget === null ? (s.kind === "filters" ? "只能放到智能对象上" : "不能放在这里") : `${d.alt ? "复制" : "移"}到「${nameOf(d.ltarget)}」`;
+      cls = d.ltarget === null ? " no" : d.alt ? " copy" : "";
+    } else { act = d.target ? "移动" : "不能放在这里"; cls = d.target ? "" : " no"; }
+    replace(ghost, h("span", { class: "lt-ghost-what" }, what), act ? h("span", { class: "lt-ghost-act" }, act) : null);
+    ghost.className = "lt-ghost" + cls;
+    setShown(ghost, true);
+    // below and right of the pointer (a filter chip: where it is along the row), kept inside the list
+    const x = s?.kind === "filter" ? d.px + 14 : LEAD + 24;
+    ghost.style.left = Math.max(4, Math.min(x, (list.clientWidth || 300) - 160)) + "px";
+    ghost.style.top = Math.max(2, Math.min(d.view + 14, (list.clientHeight || 300) - 26)) + "px";
+  }
+  function trackDrop() {
     if (!drag || !rows.length) return;
-    if (drag.overTool) { setShown(marker, false); drag.target = null; drag.ftarget = null; return; }
+    if (drag.overTool) { setShown(marker, false); drag.target = null; drag.ftarget = null; drag.ltarget = null; return; }
     const { idx, top } = rowAt(drag.view);
     const frac = Math.max(0, Math.min(1, (drag.view - top) / heightOf(rows[idx])));
-    if (drag.filter) { trackFilter(idx, frac); return; }
+    if (drag.sub) { if (drag.sub.kind === "filter") trackFilter(idx); else trackOnto(idx); return; }
     const l = rows[idx].layer, open = filter !== "all" || !collapsed.has(l.id);
     // a smart filter row stands for "below its smart object"
     const where = rows[idx].filter ? "below" : dropZone(l, frac, open);
@@ -1258,6 +1393,8 @@ export function createLayerTreeView(tree: LayerTree, status: Status, tools?: Lay
       draw();
     }
     drag.view = drag.view0 + m.clientY - drag.y0 + drag.fix;
+    drag.alt = m.altKey;
+    if (drag.sub?.kind === "filter") drag.px = drag.sub.x + m.clientX - drag.x0;
     track();
     // near the top / bottom edge the list scrolls by itself
     if (edgeDir() && !drag.scroller) drag.scroller = setInterval(() => {
@@ -1274,20 +1411,50 @@ export function createLayerTreeView(tree: LayerTree, status: Status, tools?: Lay
     if (d?.scroller) clearInterval(d.scroller);
     setShown(marker, false);
     setShown(hit, false);
+    setShown(ghost, false);
     list.classList.remove("dragging");
     for (const b of dropTools) b.el.classList.remove("drop-on");
     if (d?.active) { suppressClick = true; setTimeout(() => { suppressClick = false; }, 0); draw(); }
     return d;
   }
-  document.addEventListener("mouseup", () => {
+  document.addEventListener("mouseup", e => {
     const d = endDrag();
-    if (!d?.active) return;
+    // an effect chip pressed and let go without dragging: its switch
+    if (!d?.active) { if (d?.sub && "chip" in d.sub) d.sub.toggleOnUp?.(); return; }
+    // a chip that was dragged isn't also switched when its press's moment is up
+    if (d.sub && "chip" in d.sub) d.sub.dragged = true;
     const tool = dropTools.find(b => b.el === d.overTool);
-    // the toolbar takes layers, not a dragged smart filter
-    if (tool && !d.filter) void run(tool.action, d.ids);
-    else if (d.filter && d.ftarget) void run("moveFilter", [d.filter.layerId], JSON.stringify({ from: d.filter.pos, toLayer: d.ftarget.layerId, toPos: d.ftarget.toPos }));
+    if (d.sub) { dropSub(d.sub, d, tool?.action ?? null, (e as MouseEvent).altKey || d.alt); return; }
+    if (tool) void run(tool.action, d.ids);
     else if (d.target) void drop(d.target.id, d.target.where, d.target.plan, d.ids.length);
   });
+  /** a dragged filter / effect let go: moved or copied (Alt) where it was over, or deleted on the trash */
+  function dropSub(s: SubDrag, d: NonNullable<typeof drag>, tool: LayerAction | null, copy: boolean) {
+    // onto 新建图层: one more of this filter / effect on its own layer, as a layer dropped there is copied
+    if (tool === "duplicate") {
+      if (s.kind === "filter") void run("moveFilter", [s.layerId], JSON.stringify({ from: s.pos, toLayer: s.layerId, toPos: s.pos, copy: true }));
+      else if (s.kind === "effect" && MULTI_EFFECTS.has(s.key)) void run("moveEffect", [s.layerId], JSON.stringify({ key: s.key, multi: s.multi, toLayer: s.layerId, copy: true }));
+      return;
+    }
+    if (tool && tool !== "delete") return;
+    if (tool) {
+      if (s.kind === "filter") void run("deleteFilter", [s.layerId], JSON.stringify({ pos: s.pos }));
+      else if (s.kind === "filters") void run("deleteFilters", [s.layerId]);
+      else if (s.kind === "effect") void run("deleteEffect", [s.layerId], JSON.stringify({ key: s.key, multi: s.multi }));
+      else void run("clearStyle", [s.layerId]);
+      return;
+    }
+    if (s.kind === "filter") {
+      const t = d.ftarget;
+      if (t) void run("moveFilter", [s.layerId], JSON.stringify({ from: s.pos, toLayer: t.layerId, toPos: copy && t.layerId === s.layerId ? t.insertAt : t.toPos, copy }));
+      return;
+    }
+    if (d.ltarget === null) return;
+    const arg = { toLayer: d.ltarget, copy };
+    if (s.kind === "filters") void run("moveFilters", [s.layerId], JSON.stringify(arg));
+    else if (s.kind === "effect") void run("moveEffect", [s.layerId], JSON.stringify({ ...arg, key: s.key, multi: s.multi }));
+    else void run("moveEffects", [s.layerId], JSON.stringify(arg));
+  }
   document.addEventListener("keydown", e => { if ((e as KeyboardEvent).key === "Escape" && drag?.active) endDrag(); });
 
   async function drop(targetId: number, where: Where, plan: MoveStep[], count: number) {
@@ -1428,7 +1595,7 @@ export function createLayerTreeView(tree: LayerTree, status: Status, tools?: Lay
   ];
   for (const b of dropTools) {
     b.el.addEventListener("mouseenter", () => { if (drag?.active) { drag.overTool = b.el; b.el.classList.add("drop-on"); track(); } });
-    b.el.addEventListener("mouseleave", () => { if (drag?.overTool === b.el) { drag.overTool = null; b.el.classList.remove("drop-on"); } });
+    b.el.addEventListener("mouseleave", () => { if (drag?.overTool === b.el) { drag.overTool = null; b.el.classList.remove("drop-on"); drawGhost(); } });
   }
   const bar = h("div", { class: "lt-bar" }, linkBtn, fxBtn, maskBtn, adjBtn, groupBtn, newBtn, trashBtn);
 

@@ -198,6 +198,80 @@
 
 ---
 
+## 6.5 未解决（用户要求先搁置）
+
+### 矢量蒙版添加不了（11-03 搁置）
+
+- 现象：在 WavePlug 图层面板里添加矢量蒙版，用户反馈「依旧无法正常添加」。PS 原版图层面板里可以添加。Ctrl+单击形状图层载入形状已正常。
+- 证据：
+  - batchPlay `make path at vectorMask using revealAll` 的 3 种引用写法都失败（「无法执行 make」）；测试的是普通像素图层，无锁定、无矢量蒙版（日志 `vector mask make failed`）。
+  - 菜单查找（日志 `vector mask menu ids`）：标题「显示全部」的有 1081、1157、1954、6386，「当前路径」只有 1955，所以选了 1954。执行结果 `{"available":true,"userCancelled":false}`，之后**没有**失败日志，说明读回的 `hasVectorMask` 为真。
+- 推测，都没验证：
+  1. 用户测的可能是形状图层：形状图层的 `hasVectorMask` 本来就为真，所以代码判定「成功」；而形状图层的矢量蒙版现在不显示（第 3.6 节）。
+  2. 1954 可能不是「矢量蒙版 › 显示全部」。PS 子菜单的顺序是 显示全部 / 隐藏全部 / 当前路径，紧挨「当前路径」的那一项更可能是「隐藏全部」。
+- 恢复时先做：请用户在**普通像素图层**上点一次，看日志里 `vector mask menu` 之后有没有失败；同时把 1950–1960 号菜单的标题全部记进日志，核对哪个才是「显示全部」。
+
+## 6.6 调研：图层样式 / 智能滤镜的拖动排序与复制（11-03，只调研没实现）
+
+### PS 原版行为（Adobe 帮助，现行页面已简化，以下来自 2023–2024 年存档版）
+
+**图层样式**（[Layer effects and styles 存档](https://web.archive.org/web/20240214083332/https://helpx.adobe.com/photoshop/using/layer-effects-styles.html)）
+- 直接拖一个效果（或「效果」那一行）到另一个图层 = **移动**。
+- Alt+拖动单个效果 = **复制这一个效果**；Alt+拖动「效果」那一行 = **复制整个样式**。
+- 拖到画布上：应用到落点处最上面一个有像素的图层。
+- 拖到垃圾桶：删除这个效果；拖「效果」那一行：删除整个样式。
+- 菜单「拷贝图层样式 / 粘贴图层样式」：粘贴会**替换**目标图层原有的样式（[Copy and paste layer styles](https://helpx.adobe.com/photoshop/desktop/create-manage-layers/apply-layer-effects/copy-and-paste-layer-styles.html)）。
+- 效果在图层里**不能调顺序**：顺序由 PS 固定（帮助里没有排序的说法；同一种效果的多个实例，如多层描边，只能在图层样式对话框里调）。这一条是经验，没查到原文。
+
+**智能滤镜**（[Apply Smart Filters 存档](https://web.archive.org/web/20231231085331/https://helpx.adobe.com/photoshop/using/applying-smart-filters.html)；现行页面 [Apply and manage Smart Filters](https://helpx.adobe.com/photoshop/desktop/effects-filters/smart-filters/apply-and-manage-smart-filters.html)）
+- 排序：在列表里上下拖动。PS **从下往上**应用智能滤镜。滤镜库里的多个滤镜要双击「滤镜库」在对话框里排。
+- 拖到另一个智能对象 = 移动；Alt+拖动 = 复制。Alt+拖到同一列表的新位置 = 在本图层复制一份。
+- 复制全部：Alt+拖动智能对象图层旁的「智能滤镜」图标。
+- 只能拖到**智能对象**上，拖不到普通图层。
+- 删除：拖到垃圾桶；全部删除用菜单 图层 › 智能滤镜 › 清除智能滤镜。
+- 现行页面另外提到：滤镜蒙版拖到别处是移动，Alt+拖动是复制。只看到搜索摘要，没打开原文核对。
+
+### 可用的 batchPlay / ActionManager 写法（社区资料，**都没在本机验证**）
+
+- **复制全部智能滤镜**（[Adobe 社区，r-bin](https://community.adobe.com/t5/photoshop/photoshop-scripting-update-layers/m-p/9728360)）：`duplicate`，`target` = `filterFX` 类（`putClass`）+ 源图层 id，`to` = 目标图层 id。batchPlay 写法应为 `{ _obj: "duplicate", _target: [{ _ref: "filterFX" }, { _ref: "layer", _id: src }], to: { _ref: "layer", _id: dst } }`（没验证）。
+- **删除全部智能滤镜**（同一帖）：`delete`，`target` = `filterFX` 类 + 图层 id。
+- **单个滤镜**：推测把 `putClass` 换成 `_index`。现有的 `moveFilter`（`move`，`_target: [{_ref:"filterFX",_index}, target]`，逐个试编号并读回 `filterID` 核对）就是按这个思路写的，**日志里还没有过一次 `smart filter move`，等于没测过**。复制单个滤镜可以用同样的方法试 `duplicate`。
+- **图层样式整体复制**：`copyEffects` / `pasteEffects`（已用在右键菜单「拷贝 / 粘贴图层样式」）。粘贴是替换。
+- **单个效果的复制或移动**：没有找到专门的命令。可行做法是读源图层的 `layerEffects`，取出这一项，合并进目标图层的 `layerEffects` 后 `set layerEffects`；移动 = 复制后再从源图层的描述符里去掉这一项再 `set`。注意多实例效果（`dropShadowMulti`、`frameFXMulti` 等）和 `scale`；先用 Alchemist 或 ScriptListener 录一次 PS 原版的拖动，核对 PS 自己发出的是什么事件。
+- 调研结论：PS 原版拖动产生的事件没有公开文档。**实现前最好先在 PS 里用 Alchemist / ScriptListener 录下原版拖动和 Alt+拖动**，照着录到的描述符写，不靠猜编号。
+
+### 第 6.6 节的实现（11-03，已打包，**没在 PS 里试过**，等用户一起测）
+
+按 PS 原版规则做了一套：
+
+| 拖动什么 | 拖到哪里 | 结果 | 命令（`uxpLayers.ts`） |
+|---|---|---|---|
+| 一个效果（「效果」行里的标签） | 别的图层（组可以，背景不行） | 移动；按住 Alt 复制 | `moveEffect`：读两边的 `layerEffects`，用 `core/layers/effects.ts` 取出、加上、去掉后各自 `set`（先选中那个图层）；没剩效果就 `disableLayerStyle` |
+| 「效果」那一行（标签以外的地方） | 别的图层 | 移动整个样式（替换对方原有样式）；Alt 复制 | `moveEffects` |
+| 效果 / 「效果」行 | 垃圾桶 | 删除这个效果 / 清除样式 | `deleteEffect` / `clearStyle` |
+| 一个智能滤镜 | 本列表其他位置 / 别的智能对象 | 移动；Alt 复制（本列表里也可以复制到旁边） | `moveFilter` 加了 `copy`：`duplicate` 代替 `move`，同样逐个试编号并读回核对 |
+| 「智能滤镜」那一行 | 别的智能对象（普通图层不接受） | 移动全部；Alt 复制全部 | `moveFilters`：`duplicate` filterFX 类 → 目标图层（r-bin 的写法），移动再 `delete` 源图层的 filterFX 类 |
+| 智能滤镜 / 「智能滤镜」行 | 垃圾桶 | 删除这个 / 全部清除 | `deleteFilter`（两种编号都试，按 `filterID` 核对）/ `deleteFilters` |
+
+- 界面：按住 Alt 时落点标记变成琥珀色（`.lt-drop.copy`）。效果标签单击仍然是显示 / 隐藏：按下不动、松开才切换；拖动了就不切换。
+- 日志：`effect drag`、`effect move`（加效果失败）、`smart filters copied`（前后数量）、`smart filter move`（含 copy 和用上的编号）、`smart filter delete`。
+- 预览里点过：效果标签 Alt+拖到别的图层 → `moveEffect copy`；单击标签 → `toggleEffect`；「效果」行拖到垃圾桶 → `clearStyle`；滤镜 Alt+拖到本列表 → `moveFilter copy`；滤镜拖到垃圾桶 → `deleteFilter`。预览里的 MockLayerTree 不真正执行这些命令。
+- 最没把握的：`moveFilters` 的 `duplicate` 是放在目标原有滤镜的上面还是替换它们（代码两种都接受，并记日志）；单个滤镜复制用 `duplicate` 是否可行；`set layerEffects` 加多实例效果（`dropShadowMulti` 等）PS 是否接受。
+
+### 第 6.6 节第二轮（11-03，已打包，没在 PS 里试过）
+
+用户测第一版「没什么问题」，要求：拖动时要有视觉反馈；能单独拖某一个效果 / 滤镜来删除或复制；智能滤镜改成和效果一样的排列方式；图层样式、智能滤镜不再用缩略图左边的箭头展开，改为单击后面的图标；智能滤镜图标不再显示数字。
+
+- **智能滤镜改为一行标签**：`visibleRows` 只出一行「智能滤镜」（不再每个滤镜一行），`layoutEffects` 像效果那样把标签排成多行。标签的左右顺序 = PS 里从上到下，所以 PS 从右往左应用。标签单击显示 / 隐藏（`toggleFilter`），双击重新打开设置（`editFilter`）。第一行左边是滤镜蒙版的白块，眼睛管全部。
+- **展开方式**：只有图层组还有左边的箭头。图层样式由状态列的 fx 单击展开 / 收起，智能滤镜由状态列的智能滤镜图标单击展开 / 收起，展开时图标变亮（`.open`）。`openSubs` 里：图层 id = 效果行展开（变体图层也用它），负的图层 id = 智能滤镜行展开。原来 fx 单击是打开图层样式对话框，现在要双击缩略图。
+- **拖动单个标签**（效果、滤镜共用 `chipPress`）：拖到别的图层 / 智能对象上移动，按住 Alt 复制；拖到垃圾桶删除；拖到「新建图层」按钮上在本图层复制一份（效果只限可以有多个的那几种，`MULTI_EFFECTS`）。滤镜标签在本行左右拖动调整顺序：按鼠标在行内的横向位置（按下时标签的 `offsetLeft` + `offsetX`，再加 `clientX` 的位移）算出插到哪两个标签之间，用竖条（`.lt-drop.vbar`）标出来。
+- **视觉反馈**：
+  - 指针旁边的标签（`.lt-ghost`）显示拖的是什么、松开会怎样：调整顺序 / 移到「某某」/ 复制到「某某」/ 在本图层复制一份 / 删除 / 全部清除 / 不能放在这里。颜色：绿 = 移动，琥珀 = 复制，红 = 删除，灰 = 不行。
+  - 被拖的那个标签在原处变淡、虚线框（`.lt-chip.held`）。
+  - 落点用框或竖条标出，复制时变成琥珀色。
+- 修了一个问题：快速拖动（不到 450 ms）后松开，标签还会被切换一次（`dragged` 标记）。
+- 预览里点过：fx / 滤镜图标展开；滤镜标签拖到另一个标签后面 → `moveFilter`（调整顺序，竖条和标签位置正确）；拖到「新建图层」→ 复制一份；效果「描边」拖到「新建图层」→ `moveEffect` 复制到本图层，且没有误切换。
+
 ## 7. 尚未在 PS 里确认的旧功能
 
 - 智能滤镜拖动：PS 没有公开写法，代码会逐个尝试编号，每次尝试是一步可回滚的历史记录，用 `filterID` 核对结果。日志 `smart filter move`。
