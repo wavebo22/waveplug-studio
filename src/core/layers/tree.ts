@@ -104,22 +104,86 @@ export interface DeleteSkip { id: number; name: string; reason: string }
 /** Preflight for deleting layers (not masks/effects). Parent groups subsume their children.
  *  Never unlock Background or locked layers as an accidental side effect of pressing Delete. */
 export function planLayerDeletion(
-  layers: readonly { id: number; parentId: number | null; name?: string; locked?: boolean; background?: boolean }[],
+  layers: readonly { id: number; parentId: number | null; name?: string; locked?: boolean; background?: boolean; artboard?: boolean }[],
   ids: readonly number[],
 ): { targets: number[]; skipped: DeleteSkip[] } {
   const byId = new Map(layers.map(l => [l.id, l]));
   const targets: number[] = [], skipped: DeleteSkip[] = [];
   const unique = [...new Set(ids.filter(Number.isInteger))];
+  // Photoshop may refuse deleting a complete artboard if one of its nested groups/layers is
+  // fully locked. Detect that before the expensive host delete; don't unlock user's content.
+  const lockedUnder = (rootId: number) => {
+    for (const child of layers) {
+      if (!child.locked || child.id === rootId) continue;
+      let parent = child.parentId;
+      const seen = new Set<number>();
+      while (parent !== null && !seen.has(parent)) {
+        if (parent === rootId) return child;
+        seen.add(parent);
+        parent = byId.get(parent)?.parentId ?? null;
+      }
+    }
+    return null;
+  };
   for (const id of unique) {
     if (!byId.has(id)) skipped.push({ id, name: `#${id}`, reason: "图层已不存在" });
   }
   for (const id of deleteTargets(layers, unique)) {
     const l = byId.get(id)!;
+    const child = l.artboard && !l.locked ? lockedUnder(id) : null;
     if (l.background) skipped.push({ id, name: l.name ?? `#${id}`, reason: "背景图层需先解锁" });
     else if (l.locked) skipped.push({ id, name: l.name ?? `#${id}`, reason: "图层已锁定" });
+    else if (child) {
+      skipped.push({ id, name: l.name ?? `#${id}`, reason: `画板内「${child.name ?? `#${child.id}`}」已锁定，请先解锁` });
+    }
     else targets.push(id);
   }
   return { targets, skipped };
+}
+
+/** Whether dragging this layer-panel item can offer a delete drop target.
+ *  This is a UI preflight only: Photoshop still validates a drop when it executes. */
+export type DeleteDragPart = "mask" | "vmask" | "filterMask" | "filter" | "filters" | "effect" | "effects" | "variant";
+export function canDropToDelete(
+  layers: readonly TreeLayer[], ids: readonly number[], sub?: { kind: DeleteDragPart; layerId: number; variantId?: number },
+): boolean {
+  const groupLocked = lockedByGroup([...layers]);
+  if (!sub) {
+    const info = layers.map(l => ({
+      id: l.id, parentId: l.parentId, name: l.name,
+      background: l.kind === "background", locked: l.lockAll, artboard: l.artboard,
+    }));
+    return planLayerDeletion(info, ids).targets.some(id => !groupLocked.has(id));
+  }
+  const l = layers.find(x => x.id === sub.layerId);
+  if (!l || l.kind === "background" || l.lockAll || groupLocked.has(l.id)) return false;
+  switch (sub.kind) {
+    case "mask": return l.mask;
+    case "vmask": return l.vmask;
+    case "filterMask": return l.filterMask;
+    case "filter": case "filters": return l.filters.length > 0;
+    case "effect": case "effects": return l.effectList.length > 0;
+    case "variant": return l.ai?.ids.includes(sub.variantId ?? -1) ?? false;
+  }
+}
+
+/** A mask thumbnail can be moved/copied to a different layer, not an effect-row insert.
+ *  Do not replace an existing mask silently: Photoshop normally asks before replacing one.
+ *  The UXP command re-checks the live document before writing. */
+export type TransferMaskKind = "mask" | "vmask" | "filterMask";
+export function canDropMaskOnto(
+  layers: readonly TreeLayer[], srcId: number, dstId: number, kind: TransferMaskKind,
+  inherited: ReadonlySet<number> = lockedByGroup([...layers]),
+): boolean {
+  if (srcId === dstId) return false;
+  const src = layers.find(l => l.id === srcId), dst = layers.find(l => l.id === dstId);
+  if (!src || !dst || src.kind === "background" || dst.kind === "background") return false;
+  if (src.lockAll || dst.lockAll || inherited.has(srcId) || inherited.has(dstId)) return false;
+  if (kind === "mask") return src.mask && !dst.mask;
+  if (kind === "vmask") return src.vmask && !dst.vmask && dst.kind !== "shape";
+  // Filter masks are part of the smart filter stack, not regular layer masks.
+  return src.kind === "smartObject" && src.filterMask && dst.kind === "smartObject"
+    && dst.filters.length > 0 && !dst.filterMask;
 }
 
 /** After deleting layers, select the first surviving row below the deleted block; if there is
@@ -456,7 +520,8 @@ export type LayerAction =
   | "clip" | "unclip" | "copyStyle" | "pasteStyle" | "clearStyle" | "toggleEffects" | "link" | "unlink" | "lock" | "unlock" | "setLock" | "solo" | "adjustment" | "editContents" | "toggleFilter" | "setProps" | "toggleEffect" | "moveFilter" | "effectStyle" | "showVariant" | "deleteVariant" | "setColor" | "loadSelection"
   | "addVectorMask" | "deleteVectorMask" | "toggleVectorMask" | "targetVectorMask" | "toggleMaskLink" | "viewMask" | "editFilter"
   | "targetLayer" | "targetFilterMask" | "deleteFilterMask"
-  | "moveEffect" | "moveEffects" | "deleteEffect" | "moveFilters" | "deleteFilter" | "deleteFilters";
+  | "moveEffect" | "moveEffects" | "deleteEffect" | "moveFilters" | "deleteFilter" | "deleteFilters"
+  | "moveMask" | "moveVectorMask" | "moveFilterMask";
 
 /** 智能对象 tools offered in the menu (they act on the selection, like on the 工具 page) */
 export type SmartAction = "makeUnique" | "selectSameSource" | "makeEditable" | "unpack";

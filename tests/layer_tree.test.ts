@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { type MenuItem, type RawLayer, ancestors, effectsOf, isVariantLayer, packChips, rawProblem, buildTree, clickSelect, contentUsers, deleteTargets, nextLayerAfterDelete, planLayerDeletion, dropPlan, dropZone, filterCounts, layerMenu, layerTags, linkPeers, lockPlan, lockedByGroup, sharedColors, selectionAfterLocalClear, visibleRows } from "../src/core/layers/tree.ts";
+import { type MenuItem, type RawLayer, ancestors, effectsOf, isVariantLayer, packChips, rawProblem, buildTree, clickSelect, contentUsers, deleteTargets, nextLayerAfterDelete, planLayerDeletion, canDropToDelete, canDropMaskOnto, dropPlan, dropZone, filterCounts, layerMenu, layerTags, linkPeers, lockPlan, lockedByGroup, sharedColors, selectionAfterLocalClear, visibleRows } from "../src/core/layers/tree.ts";
 import { ThumbCache, frameThumb, thumbArea } from "../src/core/layers/thumbs.ts";
 
 const raw = (id: number, name: string, kind: number, extra: Partial<RawLayer> = {}): RawLayer =>
@@ -101,6 +101,83 @@ test("删除预检: 多选只跳过背景、锁定、过期图层及重复父子
   assert.deepEqual(empty.targets, []);
   assert.equal(empty.skipped.length, 1);
   assert.deepEqual(planLayerDeletion(layers, [21, 23]).targets, [21, 23]);
+});
+
+test("删除画板：嵌套锁定组提前跳过，其他图层仍可删除，解锁后画板可删", () => {
+  const board = buildTree([
+    raw(50, "画板 1 拷贝", 7, { artboard: true }),
+    raw(51, "普通图层", 1),
+    raw(52, "组 2", 7, { locked: true, lockAll: true }),
+    raw(53, "子图层", 1), end(), end(),
+    raw(60, "另一图层", 1),
+  ]);
+  const info = board.map(l => ({
+    id: l.id, parentId: l.parentId, name: l.name, artboard: l.artboard,
+    locked: l.lockAll, background: l.kind === "background",
+  }));
+  const blocked = planLayerDeletion(info, [50, 60, 53]);
+  assert.deepEqual(blocked.targets, [60]);
+  assert.deepEqual(blocked.skipped, [{
+    id: 50, name: "画板 1 拷贝", reason: "画板内「组 2」已锁定，请先解锁",
+  }]);
+  assert.equal(canDropToDelete(board, [50]), false);
+  assert.equal(canDropToDelete(board, [50, 60]), true);
+  const unlocked = info.map(l => l.id === 52 ? { ...l, locked: false } : l);
+  assert.deepEqual(planLayerDeletion(unlocked, [50, 60]).targets, [50, 60]);
+  // Ordinary groups retain the established behavior when a child is locked.
+  assert.deepEqual(planLayerDeletion(info.map(l => l.id === 50 ? { ...l, artboard: false } : l), [50]).targets, [50]);
+});
+
+test("左侧删除区仅对当前可删的拖拽内容显示", () => {
+  const layers = buildTree(doc());
+  assert.equal(canDropToDelete(layers, [1]), true);
+  assert.equal(canDropToDelete(layers, [30]), false); // locked Background
+  assert.equal(canDropToDelete(layers, [30, 1]), true); // partial deletability
+  assert.equal(canDropToDelete(layers, [999]), false);
+  assert.equal(canDropToDelete(layers, [12], { kind: "mask", layerId: 12 }), true);
+  assert.equal(canDropToDelete(layers, [], { kind: "vmask", layerId: 12 }), false);
+  assert.equal(canDropToDelete(layers, [], { kind: "filter", layerId: 12 }), false);
+  assert.equal(canDropToDelete(layers, [], { kind: "mask", layerId: 999 }), false);
+  assert.equal(canDropToDelete(layers, [], { kind: "variant", layerId: 10, variantId: 12 }), true);
+  assert.equal(canDropToDelete(layers, [], { kind: "variant", layerId: 10, variantId: 999 }), false);
+
+  const locked = layers.map(l => l.id === 1 ? { ...l, lockAll: true } : l);
+  assert.equal(canDropToDelete(locked, [1]), false);
+  const groupLocked = layers.map(l => l.id === 20 ? { ...l, lockAll: true } : l);
+  assert.equal(canDropToDelete(groupLocked, [21]), false);
+  assert.equal(canDropToDelete(groupLocked, [20]), false);
+
+  const extras = buildTree([
+    raw(50, "智能滤镜", 5, { mask: true, vmask: true, filterMask: true,
+      filters: [{ name: "反相", enabled: true }],
+      effects: true, effectList: [{ key: "dropShadow", multi: -1, name: "投影", enabled: true }] }),
+  ]);
+  for (const kind of ["mask", "vmask", "filterMask", "filter", "filters", "effect", "effects"] as const)
+    assert.equal(canDropToDelete(extras, [], { kind, layerId: 50 }), true, kind);
+});
+
+test("蒙版拖拽：允许跨图层/图层组移动与 Alt 复制，拒绝覆盖已有蒙版和锁定目标", () => {
+  const layers = buildTree(doc());
+  assert.equal(canDropMaskOnto(layers, 12, 1, "mask"), true);
+  assert.equal(canDropMaskOnto(layers, 12, 20, "mask"), true); // group may accept a mask
+  assert.equal(canDropMaskOnto(layers, 12, 12, "mask"), false);
+  assert.equal(canDropMaskOnto(layers, 12, 999, "mask"), false);
+  assert.equal(canDropMaskOnto(layers, 12, 30, "mask"), false); // locked background
+  assert.equal(canDropMaskOnto(layers, 1, 21, "mask"), false); // source has no mask
+  assert.equal(canDropMaskOnto(layers.map(l => l.id === 1 ? { ...l, mask: true } : l), 12, 1, "mask"), false);
+  assert.equal(canDropMaskOnto(layers.map(l => l.id === 1 ? { ...l, lockAll: true } : l), 12, 1, "mask"), false);
+  assert.equal(canDropMaskOnto(layers.map(l => l.id === 20 ? { ...l, lockAll: true } : l), 12, 21, "mask"), false);
+  assert.equal(canDropMaskOnto(layers.map(l => l.id === 10 ? { ...l, lockAll: true } : l), 12, 1, "mask"), false);
+  const extra = buildTree([
+    raw(60, "source", 5, { vmask: true, filterMask: true, filters: [{ name: "锐化", enabled: true }] }),
+    raw(61, "smart", 5, { filters: [{ name: "模糊", enabled: true }] }),
+    raw(62, "pixel", 1), raw(63, "shape", 4),
+  ]);
+  assert.equal(canDropMaskOnto(extra, 60, 62, "vmask"), true);
+  assert.equal(canDropMaskOnto(extra, 60, 63, "vmask"), false);
+  assert.equal(canDropMaskOnto(extra, 60, 61, "filterMask"), true);
+  assert.equal(canDropMaskOnto(extra, 60, 62, "filterMask"), false);
+  assert.equal(canDropMaskOnto(extra.map(l => l.id === 61 ? { ...l, filterMask: true } : l), 60, 61, "filterMask"), false);
 });
 
 test("删除后自动选中下一存活图层；没有下一层时选上一层", () => {

@@ -9,13 +9,13 @@ import { log } from "../app/log.ts";
 import { resultText } from "../core/layers/smart.ts";
 import { ThumbCache, thumbRetryDelay } from "../core/layers/thumbs.ts";
 import { MULTI_EFFECTS } from "../core/layers/effects.ts";
-import { type Filter, type LayerAction, type LayerKind, type LockKey, type MoveStep, type Row, type SmartAction, type TreeLayer, type Where, BLEND_MODES, ancestors, queryActive, clickSelect, contentUsers, dropPlan, dropZone, filterCounts, isVariantLayer, layerMenu, nextLayerAfterDelete, layerTags, linkPeers, lockPlan, packChips, lockedByGroup, sharedColors, selectionAfterLocalClear, visibleRows } from "../core/layers/tree.ts";
+import { type Filter, type LayerAction, type LayerKind, type LockKey, type MoveStep, type Row, type SmartAction, type TreeLayer, type Where, BLEND_MODES, ancestors, queryActive, clickSelect, contentUsers, canDropToDelete, canDropMaskOnto, dropPlan, dropZone, filterCounts, isVariantLayer, layerMenu, nextLayerAfterDelete, layerTags, linkPeers, lockPlan, packChips, lockedByGroup, sharedColors, selectionAfterLocalClear, visibleRows } from "../core/layers/tree.ts";
 import { type LayerTools, type LayerTree, type RunOptions, type TargetPart, ADJUSTMENTS } from "../ps/host.ts";
 import { every, h, icon, isShown, listen, replace, setShown } from "./dom.ts";
 import { type PopItem, createPopup } from "./popupMenu.ts";
 import { createSlider } from "./slider.ts";
 
-type Status = (text: string, kind?: "info" | "ok" | "error") => void;
+type Status = (text: string, kind?: "info" | "ok" | "error" | "busy") => void;
 
 /** 缩略图大小, like Photoshop's 面板选项: the thumbnail box, and the row height it needs (无: icons only).
  *  Nothing else changes with it: icons, groups and sub rows keep the small size. */
@@ -161,24 +161,16 @@ export function createLayerTreeView(tree: LayerTree, status: Status, tools?: Lay
     if (same && part !== "layer") return;
     void run(part === "layer" ? "targetLayer" : part === "mask" ? "targetMask" : part === "vmask" ? "targetVectorMask" : "targetFilterMask", [id]);
   }
-  /** 删除 (toolbar, menu, Delete key): the targeted mask when one is, else the selected layers */
-  let deleting = false, deletingAction: LayerAction | null = null, pendingKeyboardDelete = false;
-  function deleteSelected(source: "keyboard" | "toolbar" = "toolbar", repeat = false) {
-    // A keyboard repeat can arrive before the previous modal finishes. Record it explicitly
-    // rather than silently treating it as a Photoshop delete failure.
-    if (deleting) {
-      if (source === "keyboard" && !repeat && deletingAction === "delete") {
-        pendingKeyboardDelete = true; // coalesce one deliberate second press; ignore key auto-repeat
-        log("info", "layer keyboard delete queued", JSON.stringify({ doc: docId, selected: [...selected] }));
-      } else log("info", "layer delete request busy", source, JSON.stringify({ doc: docId, selected: [...selected], deletingAction, repeat }));
-      return;
-    }
+  /** Bottom trash click. Keyboard deletion is intentionally disabled in WaveLayer. */
+  let deleting = false;
+  function deleteSelected() {
+    if (deleting) return;
     // only layers still in the last read: a quick second Delete must not ask for the one just deleted
     const ids = [...selected].filter(id => byId.has(id)), l = ids.length === 1 ? layers.find(x => x.id === ids[0]) : undefined;
     const part = l ? framed(l) : null;
     if (!ids.length) {
       if (selected.size) {
-        log("info", "layer delete stale selection", source, JSON.stringify([...selected]));
+        log("info", "layer delete stale selection", JSON.stringify([...selected]));
         status("所选图层已发生变化，正在同步列表", "info");
         void refresh();
       }
@@ -189,15 +181,13 @@ export function createLayerTreeView(tree: LayerTree, status: Status, tools?: Lay
       void run(part === "mask" ? "deleteMask" : part === "vmask" ? "deleteVectorMask" : "deleteFilterMask", ids);
     } else void run("delete", ids);
   }
-  // Delete / Backspace: like the trash button, while the panel was the last thing clicked (the main
-  // panel shares this document) and no text field has the keys. UXP sends keys to a panel only
-  // while something in it has the focus, and the rows are plain divs: a press in the list focuses
-  // the panel's section (tabindex) so the keys come here instead of going to Photoshop.
+  // WaveLayer deliberately does NOT intercept Delete / Backspace. The native Photoshop shortcuts
+  // remain Photoshop's responsibility; WaveLayer deletes via drag targets and the bottom trash.
   // A Photoshop command (selecting the clicked rows, deleting …) can take the focus back to
   // Photoshop: the panel takes it again afterwards, and whenever the pointer is over the list.
   // pointerIn: the pointer is over this panel (a click on the canvas never reaches this document,
   // so only this tells the panel is still the one being used)
-  let panelActive = false, pointerIn = false, keysLogged = 0, refocusLogged = 0;
+  let panelActive = false, pointerIn = false;
   const typing = (t: Element | null) => !!t && (t.tagName === "INPUT" || t.tagName === "TEXTAREA" || (t as HTMLElement).isContentEditable);
   // After a Photoshop command UXP still reports the section as focused while Photoshop has the
   // keys (only the first Delete arrived): blur first, so focus() really asks for the keyboard again.
@@ -229,28 +219,6 @@ export function createLayerTreeView(tree: LayerTree, status: Status, tools?: Lay
     const t = e.target as HTMLElement | null;
     panelActive = el.contains(t);
     if (panelActive && !typing(t)) { try { el.focus(); } catch { /* host without focus on sections */ } }
-  }, true);
-  // Capture on Window rather than bubbling on Document: focused UXP child controls or host
-  // handlers must not swallow Delete before WaveLayer sees it. Keep this log uncapped so the
-  // failure after many successful shortcuts remains diagnosable.
-  listen(window, "keydown", e => {
-    const k = (e as KeyboardEvent).key, t = e.target as HTMLElement | null;
-    if (k !== "Delete" && k !== "Backspace") return;
-    const state = { panelActive, pointerIn, focused: document.activeElement === el,
-      activeElement: document.activeElement?.tagName ?? "none", target: t?.tagName ?? "none",
-      doc: docId, renaming, selected: [...selected], peek: peekHold, selecting, deleting,
-      repeat: (e as KeyboardEvent).repeat, phase: e.eventPhase };
-    log("info", "layer panel shortcut keydown", k, JSON.stringify(state));
-    if (!panelActive || docId === null || renaming !== null) return;
-    if (t && (t.tagName === "INPUT" || t.tagName === "TEXTAREA" || t.isContentEditable)) return;
-    e.preventDefault();
-    e.stopPropagation();
-    deleteSelected("keyboard", (e as KeyboardEvent).repeat);
-  }, true);
-  listen(window, "keyup", e => {
-    const k = (e as KeyboardEvent).key;
-    if (k === "Delete" || k === "Backspace")
-      log("info", "layer panel shortcut keyup", k, JSON.stringify({ panelActive, pointerIn, focused: document.activeElement === el, activeElement: document.activeElement?.tagName ?? "none", deleting }));
   }, true);
   /** the open document across sessions (custom colours are kept by it) */
   let docKey = "";
@@ -676,11 +644,17 @@ export function createLayerTreeView(tree: LayerTree, status: Status, tools?: Lay
     const num = /^v(\d+)/.exec(name)?.[1] ?? String(i + 1);
     // × shows on the chip under the mouse (its room is always kept, so nothing moves)
     const del = h("span", { class: "lt-vdel", title: `删除 v${num}（可撤销）` }, ic("close", 9));
+    del.addEventListener("mousedown", e => e.stopPropagation());
     del.addEventListener("click", e => { e.stopPropagation(); void run("deleteVariant", [l.id], String(id)); });
     const chip = h("span", { class: "lt-vchip" + (on ? " on" : ""), title: name + (on ? "（当前显示）" : "\n单击：换成这个变体") },
       thumbsOn ? h("span", { class: "lt-vpic" }, url ? thumbImg(url) : null) : null, "v" + num, del);
-    chip.addEventListener("mousedown", e => e.stopPropagation());
-    chip.addEventListener("click", e => { e.stopPropagation(); if (!on) void run("showVariant", [l.id], String(id)); });
+    chip.addEventListener("mousedown", e => {
+      e.stopPropagation();
+      const m = e as MouseEvent;
+      const at = rows.findIndex(r => r.layer.id === l.id && r.filter?.kind === "variants");
+      if (m.button === 0 && at >= 0) startDrag(l.id, m, { what: { kind: "variant", layerId: l.id, variantId: id }, row: at });
+    });
+    chip.addEventListener("click", e => { e.stopPropagation(); if (suppressClick) return; if (!on) void run("showVariant", [l.id], String(id)); });
     return chip;
   }
 
@@ -771,11 +745,16 @@ export function createLayerTreeView(tree: LayerTree, status: Status, tools?: Lay
 
   /** The layer mask's thumbnail: click selects the mask for painting, Shift+click turns it off / on. */
   function maskCell(l: TreeLayer, url: string | null | undefined): HTMLElement {
-    const cell = h("div", { class: "lt-thumb lt-mask" + (l.maskOn ? "" : " off") + (maskView?.id === l.id && !maskView.filter ? " viewing" : "") + (framed(l) === "mask" ? " lt-target" : ""), style: `width: ${thumbW(l)}px`, title: l.maskOn ? "图层蒙版：单击选中蒙版来编辑，Shift+单击停用，Ctrl+单击载入选区，Alt+单击只看蒙版（Alt+Shift：红色叠加），再按一次恢复" : "图层蒙版已停用：Shift+单击启用，Ctrl+单击载入选区" },
+    const cell = h("div", { class: "lt-thumb lt-mask" + (l.maskOn ? "" : " off") + (maskView?.id === l.id && !maskView.filter ? " viewing" : "") + (framed(l) === "mask" ? " lt-target" : ""), style: `width: ${thumbW(l)}px`, title: (l.maskOn ? "图层蒙版：单击选中蒙版来编辑，Shift+单击停用，Ctrl+单击载入选区，Alt+单击只看蒙版（Alt+Shift：红色叠加），再按一次恢复" : "图层蒙版已停用：Shift+单击启用，Ctrl+单击载入选区") + "\n拖到其他图层：移动蒙版；Alt+拖动：复制；拖到左侧红区或垃圾桶：删除" },
       url ? thumbImg(url) : null);
-    cell.addEventListener("mousedown", e => e.stopPropagation());
+    cell.addEventListener("mousedown", e => {
+      e.stopPropagation();
+      const m = e as MouseEvent;
+      if (m.button === 0) startDrag(l.id, m, { what: { kind: "mask", layerId: l.id }, row: rowOf(l.id) });
+    });
     cell.addEventListener("click", e => {
       e.stopPropagation();
+      if (suppressClick) return;
       const m = e as MouseEvent;
       if (m.ctrlKey || m.metaKey) loadSelection(l.id, true, m);
       else if (m.altKey) viewMask(l.id, m.shiftKey);
@@ -788,12 +767,18 @@ export function createLayerTreeView(tree: LayerTree, status: Status, tools?: Lay
   /** The 智能滤镜 mask (white: Photoshop's default shows all): click to paint on it, like Photoshop */
   function filterMaskCell(l: TreeLayer): HTMLElement {
     const cell = h("div", { class: "lt-thumb lt-filter-mask" + (l.filterMask ? "" : " none") + (framed(l) === "filterMask" ? " lt-target" : "") + (maskView?.id === l.id && maskView.filter ? " viewing" : ""),
-      title: l.filterMask ? "智能滤镜蒙版：单击选中来编辑（单击图层缩略图回到图层），Ctrl+单击载入选区（+Shift 添加，+Alt 减去），Alt+单击只看蒙版（Alt+Shift：红色叠加），再按一次恢复" : "没有智能滤镜蒙版" });
+      title: l.filterMask ? "智能滤镜蒙版：单击选中来编辑（单击图层缩略图回到图层），Ctrl+单击载入选区（+Shift 添加，+Alt 减去），Alt+单击只看蒙版（Alt+Shift：红色叠加），再按一次恢复\n拖到其他含智能滤镜且无滤镜蒙版的智能对象：移动；Alt+拖动：复制；拖到红区或垃圾桶：删除" : "没有智能滤镜蒙版" });
     if (!l.filterMask) return cell;
     // the same clicks as the layer mask's
-    cell.addEventListener("mousedown", e => e.stopPropagation());
+    cell.addEventListener("mousedown", e => {
+      e.stopPropagation();
+      const m = e as MouseEvent;
+      const at = rows.findIndex(r => r.layer.id === l.id && r.filter?.kind === "filters");
+      if (m.button === 0 && at >= 0) startDrag(l.id, m, { what: { kind: "filterMask", layerId: l.id }, row: at });
+    });
     cell.addEventListener("click", e => {
       e.stopPropagation();
+      if (suppressClick) return;
       const m = e as MouseEvent;
       if (m.ctrlKey || m.metaKey) loadSelection(l.id, "filter", m);
       else if (m.altKey) viewMask(l.id, m.shiftKey, true);
@@ -813,11 +798,16 @@ export function createLayerTreeView(tree: LayerTree, status: Status, tools?: Lay
 
   /** The vector mask's thumbnail: click selects it, Shift+click turns it off / on, Ctrl+click loads its path as the selection. */
   function vmaskCell(l: TreeLayer, url: string | null | undefined): HTMLElement {
-    const cell = h("div", { class: "lt-thumb lt-mask lt-vmask" + (l.vmaskOn ? "" : " off") + (framed(l) === "vmask" ? " lt-target" : ""), style: `width: ${thumbW(l)}px`, title: l.vmaskOn ? "矢量蒙版：单击选中，Shift+单击停用，Ctrl+单击载入选区" : "矢量蒙版已停用：Shift+单击启用，Ctrl+单击载入选区" },
+    const cell = h("div", { class: "lt-thumb lt-mask lt-vmask" + (l.vmaskOn ? "" : " off") + (framed(l) === "vmask" ? " lt-target" : ""), style: `width: ${thumbW(l)}px`, title: (l.vmaskOn ? "矢量蒙版：单击选中，Shift+单击停用，Ctrl+单击载入选区" : "矢量蒙版已停用：Shift+单击启用，Ctrl+单击载入选区") + "\n拖到其他图层：移动蒙版；Alt+拖动：复制；拖到红区或垃圾桶：删除" },
       url ? thumbImg(url) : null);
-    cell.addEventListener("mousedown", e => e.stopPropagation());
+    cell.addEventListener("mousedown", e => {
+      e.stopPropagation();
+      const m = e as MouseEvent;
+      if (m.button === 0) startDrag(l.id, m, { what: { kind: "vmask", layerId: l.id }, row: rowOf(l.id) });
+    });
     cell.addEventListener("click", e => {
       e.stopPropagation();
+      if (suppressClick) return;
       const m = e as MouseEvent;
       if (m.ctrlKey || m.metaKey) loadSelection(l.id, "vector", m);
       else if (m.shiftKey) void run("toggleVectorMask", [l.id], l.vmaskOn ? "off" : "on");
@@ -1363,9 +1353,12 @@ export function createLayerTreeView(tree: LayerTree, status: Status, tools?: Lay
       log("info", "layer delete busy", action, JSON.stringify(ids));
       return;
     }
-    if (destructive) { deleting = true; deletingAction = action as LayerAction; }
+    if (destructive) deleting = true;
     const doc = docId, generation = selectGen;
-    let deleteCompleted = false;
+    const artboardIds = action === "delete" ? ids.filter(id => byId.get(id)?.artboard) : [];
+    const startedAt = Date.now();
+    let deleteReported = false;
+    let deleteHadError = false;
     const afterDeleteSelect = action === "delete"
       ? nextLayerAfterDelete(layers, ids, [...new Set(rows.filter(r => !r.filter).map(r => r.layer.id))]) : null;
     try {
@@ -1374,20 +1367,30 @@ export function createLayerTreeView(tree: LayerTree, status: Status, tools?: Lay
       // Delete targets explicit layer IDs, so a hover-preview restoration is unnecessary and
       // may fail if the old previewed layer has already disappeared.
       await endPeek(action !== "delete");
+      if (artboardIds.length) {
+        const boardName = byId.get(artboardIds[0])?.name ?? "画板";
+        status(`正在删除画板「${boardName}」… Photoshop 可能需要较长时间处理其内容`, "busy");
+        // Allow UXP to paint the busy state before Photoshop enters a potentially long modal.
+        await new Promise<void>(resolve => setTimeout(resolve, 30));
+      }
       if (isSmartAction(action)) {
         if (!tools) return;
         const r = await tools[action]();
         status(resultText(SMART_VERB[action], r), r.done ? "ok" : "error");
       } else {
         const result = await tree.run(doc, action, ids, arg,
-          action === "delete" ? { ...opts, afterDeleteSelect } : opts);
+          action === "delete" ? { ...opts, afterDeleteSelect, artboardIds } : opts);
         if (action === "delete" && result && result.kind === "delete") {
-          deleteCompleted = result.deleted.length > 0 && result.selected !== null;
+          deleteReported = true;
           if (result.skipped.length) {
             const reasons = result.skipped.slice(0, 3).map(s => s.name + "：" + s.reason).join("；");
             status("已删除 " + result.deleted.length + " 个图层，跳过 " + result.skipped.length + " 个。" + reasons
               + (result.skipped.length > 3 ? "…" : ""), result.deleted.length ? "info" : "error");
           } else if (!result.deleted.length) status("没有可删除的图层", "error");
+          else if (artboardIds.length) {
+            const seconds = Math.max(1, Math.round((Date.now() - startedAt) / 1000));
+            status(`画板已删除（用时约 ${seconds} 秒）`, "ok");
+          }
           if (docId === doc && selectGen === generation) {
             // Use Photoshop's confirmed post-delete selection, not the predicted next row.
             selected = result.selected === null ? new Set() : new Set([result.selected]);
@@ -1402,27 +1405,17 @@ export function createLayerTreeView(tree: LayerTree, status: Status, tools?: Lay
         }
       }
     } catch (e) {
+      deleteHadError = true;
       log("warn", "layer command", action, e);
       status("操作失败：" + ((e as Error).message ?? e), "error");
     } finally {
-      if (destructive) { deleting = false; deletingAction = null; }
+      if (destructive) deleting = false;
+      if (artboardIds.length && !deleteReported && !deleteHadError && docId === doc) {
+        // An unexpected void result must not leave a permanent "deleting" message behind.
+        status("画板删除操作已结束，请检查图层列表", "info");
+      }
       refocus(action);
       void refresh();
-      if (action === "delete" && pendingKeyboardDelete) {
-        pendingKeyboardDelete = false;
-        if (deleteCompleted) {
-          // Wait for any in-flight tree read, then refresh from Photoshop before consuming the
-          // queued deliberate key press. Never reuse the IDs from the first delete.
-          const drain = async () => {
-            if (docId !== doc) return;
-            if (deleting || reading) { setTimeout(() => { void drain(); }, 35); return; }
-            await refresh();
-            if (docId === doc && !deleting && selected.size) deleteSelected("keyboard");
-            else log("info", "layer keyboard delete queue cancelled", JSON.stringify({ doc, currentDoc: docId, selected: [...selected] }));
-          };
-          setTimeout(() => { void drain(); }, 0);
-        } else log("info", "layer keyboard delete queue dropped", "previous delete did not remove a layer");
-      }
     }
   }
 
@@ -1437,7 +1430,9 @@ export function createLayerTreeView(tree: LayerTree, status: Status, tools?: Lay
    *  whole 智能滤镜 / 效果 row */
   type SubDrag = { kind: "filter"; layerId: number; pos: number; name: string; chip: HTMLElement; x: number; toggleOnUp?: () => void; dragged?: boolean }
     | { kind: "filters"; layerId: number } | { kind: "effects"; layerId: number }
-    | { kind: "effect"; layerId: number; key: string; multi: number; name: string; chip: HTMLElement; toggleOnUp?: () => void; dragged?: boolean };
+    | { kind: "effect"; layerId: number; key: string; multi: number; name: string; chip: HTMLElement; toggleOnUp?: () => void; dragged?: boolean }
+    | { kind: "mask" | "vmask" | "filterMask"; layerId: number }
+    | { kind: "variant"; layerId: number; variantId: number };
   let drag: {
     ids: number[]; y0: number; view0: number; fix: number; view: number; active: boolean; probed: boolean;
     target: { id: number; where: Where; plan: MoveStep[] } | null;
@@ -1448,6 +1443,7 @@ export function createLayerTreeView(tree: LayerTree, status: Status, tools?: Lay
     /** the pointer across the list: where it was pressed (clientX) and now, from a row's left edge (filter chips) */
     x0: number; px: number;
     hover: number | null; overTool: HTMLElement | null;
+    canDelete: boolean; overLeftDelete: boolean;
     hoverTimer: ReturnType<typeof setTimeout> | null; scroller: ReturnType<typeof setInterval> | null;
   } | null = null;
   let suppressClick = false;
@@ -1459,6 +1455,28 @@ export function createLayerTreeView(tree: LayerTree, status: Status, tools?: Lay
   const ghost = h("div", { class: "lt-ghost" });
   setShown(ghost, false);
   inner.append(marker, hit, ghost);
+  // A fixed overlay on the left edge of the visible list: no new column and no layout shift.
+  // It receives mouse enter/leave only *during* a draggable, deletable item. Never takes a click
+  // from the left-hand eye / movement / editing controls in the resting panel.
+  const leftDelete = h("div", { class: "lt-left-delete", title: "松开鼠标删除（Ctrl+Z 可撤销）" }, ic("trash", 15));
+  setShown(leftDelete, false);
+  list.append(leftDelete);
+  leftDelete.addEventListener("mouseenter", () => {
+    if (!drag?.active || !drag.canDelete) return;
+    drag.overLeftDelete = true;
+    leftDelete.classList.add("hot");
+    track();
+  });
+  leftDelete.addEventListener("mouseleave", () => {
+    if (drag) {
+      drag.overLeftDelete = false;
+      // Until the pointer moves over another row again, treat leaving the rail as cancel.
+      // In particular, moving completely outside the panel must NOT turn into a stale reorder.
+      drag.target = null; drag.ftarget = null; drag.ltarget = null;
+      setShown(marker, false);
+    }
+    leftDelete.classList.remove("hot");
+  });
   hit.addEventListener("mousemove", e => {
     const m = e as MouseEvent;
     if (!drag?.active || typeof m.offsetY !== "number") return;
@@ -1478,14 +1496,17 @@ export function createLayerTreeView(tree: LayerTree, status: Status, tools?: Lay
     drag = { ids, y0: e.clientY, view0: yOf(idx) + heightOf(rows[idx]) / 2, fix: 0, view: 0, active: false, probed: false,
       target: null, sub: sub?.what ?? null, ftarget: null, ltarget: null, alt: e.altKey,
       x0: e.clientX, px: sub && "x" in sub.what ? sub.what.x : 0,
-      hover: null, overTool: null, hoverTimer: null, scroller: null };
+      hover: null, overTool: null, hoverTimer: null, scroller: null,
+      canDelete: canDropToDelete(layers, ids, sub?.what), overLeftDelete: false };
   }
 
   /** Where all the filters / an effect / the whole style would go at row `idx`: onto that row's layer
    *  (its sub rows count as the layer) — smart objects only for filters, never the background. */
   function trackOnto(idx: number) {
     const d = drag!, s = d.sub!, dest = rows[idx].layer;
-    const ok = dest.id !== s.layerId && dest.kind !== "background" && (s.kind !== "filters" || dest.kind === "smartObject");
+    const isMask = s.kind === "mask" || s.kind === "vmask" || s.kind === "filterMask";
+    const ok = isMask ? canDropMaskOnto(layers, s.layerId, dest.id, s.kind as "mask" | "vmask" | "filterMask", groupLocked)
+      : dest.id !== s.layerId && dest.kind !== "background" && (s.kind !== "filters" || dest.kind === "smartObject");
     d.ltarget = ok ? dest.id : null;
     if (!ok) { setShown(marker, false); return; }
     const at = rows.findIndex(r => r.layer.id === dest.id && !r.filter);
@@ -1535,11 +1556,14 @@ export function createLayerTreeView(tree: LayerTree, status: Status, tools?: Lay
   function drawGhost() {
     const d = drag;
     if (!d?.active) { setShown(ghost, false); return; }
-    const s = d.sub, tool = dropTools.find(b => b.el === d.overTool)?.action ?? null;
+    const s = d.sub, tool = d.overLeftDelete ? "delete" : dropTools.find(b => b.el === d.overTool)?.action ?? null;
     const nameOf = (id: number | null) => layers.find(x => x.id === id)?.name ?? "";
     const what = !s ? (d.ids.length > 1 ? `${d.ids.length} 个图层` : nameOf(d.ids[0]))
       : s.kind === "filter" || s.kind === "effect" ? s.name
-      : s.kind === "filters" ? `全部智能滤镜（${layers.find(x => x.id === s.layerId)?.filters.length ?? 0}）` : "整个图层样式";
+      : s.kind === "filters" ? `全部智能滤镜（${layers.find(x => x.id === s.layerId)?.filters.length ?? 0}）`
+      : s.kind === "effects" ? "整个图层样式"
+      : s.kind === "mask" ? "图层蒙版" : s.kind === "vmask" ? "矢量蒙版"
+      : s.kind === "variant" ? nameOf(s.variantId) : "智能滤镜蒙版";
     let act = "", cls = "";
     if (tool === "delete") { act = s && s.kind !== "filters" && s.kind !== "effects" ? "删除" : s ? "全部清除" : "删除"; cls = " del"; }
     else if (tool && s) {
@@ -1547,7 +1571,13 @@ export function createLayerTreeView(tree: LayerTree, status: Status, tools?: Lay
       act = ok ? "在本图层复制一份" : s.kind === "effect" && tool === "duplicate" ? "这种效果一个图层只能有一个" : "不能放在这里";
       cls = ok ? " copy" : " no";
     } else if (tool) act = tool === "duplicate" ? "复制图层" : tool === "groupLayers" ? "编组" : "";
-    else if (s?.kind === "filter") {
+    else if (s?.kind === "mask" || s?.kind === "vmask" || s?.kind === "filterMask") {
+      const dest = layers.find(l => l.id === d.ltarget);
+      act = dest ? `${d.alt ? "复制" : "移"}到「${dest.name}」` : "不能放在这里（目标已带蒙版、被锁定或不支持）";
+      cls = !dest ? " no" : d.alt ? " copy" : "";
+    } else if (s?.kind === "variant") {
+      act = "拖到左侧红色区域或垃圾桶删除";
+    } else if (s?.kind === "filter") {
       const t = d.ftarget;
       act = !t ? "不能放在这里" : t.layerId === s.layerId ? (d.alt ? "在这里复制一份" : "调整顺序") : `${d.alt ? "复制" : "移"}到「${nameOf(t.layerId)}」`;
       cls = !t ? " no" : d.alt ? " copy" : "";
@@ -1565,10 +1595,21 @@ export function createLayerTreeView(tree: LayerTree, status: Status, tools?: Lay
   }
   function trackDrop() {
     if (!drag || !rows.length) return;
-    if (drag.overTool) { setShown(marker, false); drag.target = null; drag.ftarget = null; drag.ltarget = null; return; }
+    if (drag.overTool || drag.overLeftDelete) {
+      setShown(marker, false); drag.target = null; drag.ftarget = null; drag.ltarget = null;
+      if (drag.hoverTimer) clearTimeout(drag.hoverTimer);
+      drag.hoverTimer = null; drag.hover = null;
+      return;
+    }
     const { idx, top } = rowAt(drag.view);
     const frac = Math.max(0, Math.min(1, (drag.view - top) / heightOf(rows[idx])));
-    if (drag.sub) { if (drag.sub.kind === "filter") trackFilter(idx); else trackOnto(idx); return; }
+    if (drag.sub) {
+      if (drag.sub.kind === "filter") trackFilter(idx);
+      else if (drag.sub.kind === "variant") {
+        setShown(marker, false); drag.ltarget = null;
+      } else trackOnto(idx);
+      return;
+    }
     const l = rows[idx].layer, open = filter !== "all" || !collapsed.has(l.id);
     // a smart filter row stands for "below its smart object"
     const where = rows[idx].filter ? "below" : dropZone(l, frac, open);
@@ -1591,16 +1632,18 @@ export function createLayerTreeView(tree: LayerTree, status: Status, tools?: Lay
   }
 
   /** -1 / 1 while the pointer is near (or past) the list's top / bottom edge */
-  const edgeDir = () => !drag || drag.overTool ? 0 : drag.view < 22 ? -1 : drag.view > list.clientHeight - 22 ? 1 : 0;
+  const edgeDir = () => !drag || drag.overTool || drag.overLeftDelete ? 0 : drag.view < 22 ? -1 : drag.view > list.clientHeight - 22 ? 1 : 0;
 
   listen(document, "mousemove", e => {
     if (!drag) return;
     const m = e as MouseEvent;
     if (!drag.active) {
-      if (Math.abs(m.clientY - drag.y0) < 5) return;
+      // Horizontal movement must also start a drag: the delete rail is on the left edge.
+      if (Math.abs(m.clientY - drag.y0) < 5 && Math.abs(m.clientX - drag.x0) < 5) return;
       drag.active = true;
       list.classList.add("dragging");
       setShown(hit, true);
+      setShown(leftDelete, drag.canDelete);
       draw();
     }
     drag.view = drag.view0 + m.clientY - drag.y0 + drag.fix;
@@ -1623,6 +1666,8 @@ export function createLayerTreeView(tree: LayerTree, status: Status, tools?: Lay
     setShown(marker, false);
     setShown(hit, false);
     setShown(ghost, false);
+    setShown(leftDelete, false);
+    leftDelete.classList.remove("hot");
     list.classList.remove("dragging");
     for (const b of dropTools) b.el.classList.remove("drop-on");
     if (d?.active) { suppressClick = true; setTimeout(() => { suppressClick = false; }, 0); draw(); }
@@ -1635,7 +1680,9 @@ export function createLayerTreeView(tree: LayerTree, status: Status, tools?: Lay
     // a chip that was dragged isn't also switched when its press's moment is up
     if (d.sub && "chip" in d.sub) d.sub.dragged = true;
     const tool = dropTools.find(b => b.el === d.overTool);
-    if (d.sub) { dropSub(d.sub, d, tool?.action ?? null, (e as MouseEvent).altKey || d.alt); return; }
+    const action = d.overLeftDelete && d.canDelete ? "delete" : tool?.action ?? null;
+    if (d.sub) { dropSub(d.sub, d, action, (e as MouseEvent).altKey || d.alt); return; }
+    if (action === "delete") { if (d.canDelete) void run("delete", d.ids); return; }
     if (tool) void run(tool.action, d.ids);
     else if (d.target) void drop(d.target.id, d.target.where, d.target.plan, d.ids.length);
   });
@@ -1652,9 +1699,21 @@ export function createLayerTreeView(tree: LayerTree, status: Status, tools?: Lay
       if (s.kind === "filter") void run("deleteFilter", [s.layerId], JSON.stringify({ pos: s.pos }));
       else if (s.kind === "filters") void run("deleteFilters", [s.layerId]);
       else if (s.kind === "effect") void run("deleteEffect", [s.layerId], JSON.stringify({ key: s.key, multi: s.multi }));
-      else void run("clearStyle", [s.layerId]);
+      else if (s.kind === "effects") void run("clearStyle", [s.layerId]);
+      else if (s.kind === "mask") void run("deleteMask", [s.layerId]);
+      else if (s.kind === "vmask") void run("deleteVectorMask", [s.layerId]);
+      else if (s.kind === "filterMask") void run("deleteFilterMask", [s.layerId]);
+      else if (s.kind === "variant") void run("deleteVariant", [s.layerId], String(s.variantId));
       return;
     }
+    if (s.kind === "mask" || s.kind === "vmask" || s.kind === "filterMask") {
+      if (d.ltarget !== null) {
+        const action = s.kind === "mask" ? "moveMask" : s.kind === "vmask" ? "moveVectorMask" : "moveFilterMask";
+        void run(action, [s.layerId], JSON.stringify({ toLayer: d.ltarget, copy }));
+      }
+      return;
+    }
+    if (s.kind === "variant") return;
     if (s.kind === "filter") {
       const t = d.ftarget;
       if (t) void run("moveFilter", [s.layerId], JSON.stringify({ from: s.pos, toLayer: t.layerId, toPos: copy && t.layerId === s.layerId ? t.insertAt : t.toPos, copy }));
@@ -1802,7 +1861,7 @@ export function createLayerTreeView(tree: LayerTree, status: Status, tools?: Lay
   const newBtn = tool("newLayer", "新建图层（把图层拖到这里：复制图层）", () => void run("newLayer", ids(), undefined, outsideAi()));
   /** new layers next to a selected AI result (a group in Photoshop) go above it, not into it */
   const outsideAi = (): RunOptions => { const top = selectedLayers()[0]; return top && isVariantLayer(top) ? { above: top.id } : {}; };
-  const trashBtn = tool("trash", "删除图层；选中的是蒙版时（缩略图带绿框）删除蒙版。也可以把图层拖到这里；Delete 键同样", () => deleteSelected("toolbar"));
+  const trashBtn = tool("trash", "单击删除所选图层或蒙版；也可以将图层、蒙版、效果拖到这里，或拖到列表左侧红色区域删除", () => deleteSelected());
   const dropTools: { el: HTMLElement; action: LayerAction }[] = [
     { el: groupBtn, action: "groupLayers" }, { el: newBtn, action: "duplicate" }, { el: trashBtn, action: "delete" },
   ];

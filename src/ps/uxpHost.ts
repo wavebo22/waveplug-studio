@@ -31,11 +31,11 @@ export async function modal<T>(name: string, fn: (ctx: any) => Promise<T>, opts:
 }
 
 /** Runs `fn` as one undo step named `name` in document `docId`. */
-export async function step<T>(name: string, docId: number, fn: () => Promise<T>): Promise<T> {
+export async function step<T>(name: string, docId: number, fn: (ctx: any) => Promise<T>): Promise<T> {
   return modal(name, async ctx => {
     const hc = ctx.hostControl;
     const s = await hc.suspendHistory({ documentID: docId, name });
-    try { const r = await fn(); await hc.resumeHistory(s, true); return r; }
+    try { const r = await fn(ctx); await hc.resumeHistory(s, true); return r; }
     catch (e) { await hc.resumeHistory(s, false).catch(() => undefined); throw e; }
   });
 }

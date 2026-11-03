@@ -386,6 +386,7 @@ button, .ub { font: inherit; color: inherit; background: none; border: 0; paddin
 .lp-status { flex: none; min-height: 18px; margin-top: 4px; color: var(--muted); }
 .lp-status.error { color: var(--err); }
 .lp-status.ok { color: var(--ok); }
+.lp-status.busy { color: var(--text); opacity: .9; }
 
 /* 图层列表: thumbnails and drag to reorder */
 .lt-row { user-select: none; }
@@ -424,6 +425,18 @@ button, .ub { font: inherit; color: inherit; background: none; border: 0; paddin
 .lt-tags { flex: 0 1 auto; min-width: 0; overflow: hidden; }
 .lt-filter { flex: 1 1 auto; padding: 0 6px; white-space: nowrap; }
 .lt-hit { position: absolute; left: 0; right: 0; top: 0; z-index: 3; cursor: move; }
+/* Drag-to-delete: hidden at rest, a 32px overlay on the LEFT of the visible list.
+   Only shown while a deletable layer/mask/effect/filter is being dragged. */
+.lt-left-delete {
+  position: absolute; z-index: 7; top: 0; bottom: 0; left: 0;
+  width: 32px; box-sizing: border-box; display: flex; align-items: center; justify-content: center;
+  border-left: 3px solid #e55757; border-right: 1px solid rgba(229, 87, 87, .40);
+  background: rgba(186, 46, 46, .20); color: #f18a8a; cursor: move;
+}
+.lt-left-delete.hot {
+  background: rgba(196, 46, 46, .82); color: #fff;
+  border-left-color: #ff8080; border-right-color: #ff8080;
+}
 
 /* 图层 panel: masks, clipping, fx, menus, toolbar */
 .lt.fill { position: relative; }

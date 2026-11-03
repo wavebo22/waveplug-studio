@@ -9,6 +9,7 @@ import { addEffect, effectItem, hasEffects, removeEffect } from "../core/layers/
 import { type LayerDeleteResult, type LayerTree, type RunOptions, type TargetPart, ADJUSTMENTS } from "./host.ts";
 import { docById, findLayer, modal, onModalDone, play, step } from "./uxpHost.ts";
 import { act, selectLayers } from "./uxpTools.ts";
+import { type MaskKind, maskTransferDescriptors } from "./maskTransfer.ts";
 
 declare const require: (m: string) => any;
 
@@ -298,14 +299,15 @@ export class UxpLayerTree implements LayerTree {
     const label = ACTION_NAMES[action] ?? action;
     if (action === "delete") {
       // Explicit layer IDs (never active pixels/masks). All successful deletions form one undo step.
-      return whenFree(() => step("WavePlug " + label, docId, async (): Promise<LayerDeleteResult> => {
+      const artboardIds = new Set(opts.artboardIds ?? []);
+      return whenFree(() => step(artboardIds.size ? "WavePlug 删除画板" : "WavePlug " + label, docId, async (ctx): Promise<LayerDeleteResult> => {
         requireActiveDoc(docId);
         const doc = docById(docId);
-        const live: { id: number; parentId: number | null; name: string; locked: boolean; background: boolean }[] = [];
+        const live: { id: number; parentId: number | null; name: string; locked: boolean; background: boolean; artboard: boolean }[] = [];
         const collect = (ls: any[], parentId: number | null, dest: typeof live) => {
           for (const l of ls) {
             dest.push({ id: l.id, parentId, name: String(l.name ?? ("#" + l.id)),
-              locked: !!l.allLocked, background: !!l.isBackgroundLayer });
+              locked: !!l.allLocked, background: !!l.isBackgroundLayer, artboard: artboardIds.has(l.id) });
             if (l.layers?.length) collect(l.layers, l.id, dest);
           }
         };
@@ -313,21 +315,33 @@ export class UxpLayerTree implements LayerTree {
         const { targets, skipped } = planLayerDeletion(live, ids);
         const names = new Map(live.map(l => [l.id, l.name]));
         const attempted: number[] = [];
-        log("info", "layer delete targets", JSON.stringify({ docId, requested: ids, targets, skipped }));
+        log("info", "layer delete targets", JSON.stringify({ docId, requested: ids, targets, skipped, artboardIds: [...artboardIds] }));
         for (const id of targets) {
           if (!findLayer(doc.layers, id)) {
             skipped.push({ id, name: names.get(id) ?? ("#" + id), reason: "删除前图层已不存在" });
             continue;
           }
+          const started = Date.now();
           try {
+            if (artboardIds.has(id)) {
+              // Photoshop may spend tens of seconds recalculating a large artboard. Show its native
+              // cancellable progress UI rather than letting the operation look like a frozen panel.
+              ctx.reportProgress?.({ commandName: `正在删除画板「${names.get(id) ?? id}」…` });
+              log("info", "layer artboard delete begin", JSON.stringify({ docId, id, name: names.get(id) }));
+            }
             const [response] = await play([{
               _obj: "delete", _target: [{ _ref: "layer", _id: id }, docRef(docId)],
               _options: { dialogOptions: "silent" },
             }]);
+            if (ctx.isCancelled) throw new Error("用户已取消删除操作");
             if (response?._obj === "error") throw new Error(response.message || "Photoshop 拒绝删除此图层");
             attempted.push(id);
+            if (artboardIds.has(id))
+              log("info", "layer artboard delete completed", JSON.stringify({ docId, id, elapsedMs: Date.now() - started }));
           } catch (e) {
             const reason = String((e as Error)?.message ?? e);
+            if (artboardIds.has(id))
+              log("warn", "layer artboard delete failed", JSON.stringify({ docId, id, elapsedMs: Date.now() - started }), e);
             // User cancellation and modal/history interruption must roll back the transaction.
             if (/cancel|取消|modal|already suspended/i.test(reason)) throw e;
             skipped.push({ id, name: names.get(id) ?? ("#" + id), reason });
@@ -362,6 +376,52 @@ export class UxpLayerTree implements LayerTree {
         const outcome: LayerDeleteResult = { kind: "delete", deleted, skipped, selected };
         log("info", "layer delete result", JSON.stringify({ docId, ...outcome, attempted, proposed: opts.afterDeleteSelect }));
         return outcome;
+      }), 40);
+    }
+    if (action === "moveMask" || action === "moveVectorMask" || action === "moveFilterMask") {
+      const kind: MaskKind = action === "moveMask" ? "mask" : action === "moveVectorMask" ? "vmask" : "filterMask";
+      const { toLayer, copy } = JSON.parse(arg ?? "{}");
+      const srcId = ids[0], dstId = Number(toLayer);
+      if (!Number.isInteger(srcId) || !Number.isInteger(dstId) || srcId === dstId)
+        throw new Error("请选择另一个有效图层作为蒙版目标");
+      const property = kind === "mask" ? "hasUserMask" : kind === "vmask" ? "hasVectorMask" : "hasFilterMask";
+      const exists = async (id: number): Promise<boolean> => {
+        const [r] = await play([{ _obj: "get",
+          _target: [{ _property: property }, { _ref: "layer", _id: id }, docRef(docId)] }]);
+        if (r?._obj === "error") throw new Error(r.message || "无法读取蒙版状态");
+        return r?.[property] === true;
+      };
+      return whenFree(() => step("WavePlug " + (copy ? "复制" : "移动") + (kind === "mask" ? "图层蒙版" : kind === "vmask" ? "矢量蒙版" : "智能滤镜蒙版"), docId, async () => {
+        requireActiveDoc(docId);
+        const doc = docById(docId);
+        const src = findLayer(doc.layers, srcId), dst = findLayer(doc.layers, dstId);
+        if (!src || !dst) throw new Error("源图层或目标图层已不存在");
+        const locked = (l: any) => {
+          for (let node = l; node; node = node.parent) if (node.allLocked) return true;
+          return false;
+        };
+        if (src.isBackgroundLayer || dst.isBackgroundLayer || locked(src) || locked(dst))
+          throw new Error("背景图层或锁定图层不能转移蒙版");
+        if (kind === "vmask" && /shape/i.test(String(dst.kind)))
+          throw new Error("目标形状图层已有自己的矢量形状，不能替换");
+        if (kind === "filterMask") {
+          const [info] = await play([{ _obj: "get",
+            _target: [{ _property: "smartObject" }, { _ref: "layer", _id: dstId }, docRef(docId)] }]);
+          if (!Array.isArray(info?.smartObject?.filterFX) || !info.smartObject.filterFX.length)
+            throw new Error("智能滤镜蒙版只能放到有智能滤镜的智能对象上");
+        }
+        if (!await exists(srcId)) throw new Error("源蒙版已经不存在");
+        if (await exists(dstId)) throw new Error("目标已有同类蒙版，请先移除目标蒙版");
+        // Duplicate first; remove the source only after Photoshop confirms the destination.
+        // Both commands share a history state, so a failed move rolls back instead of losing a mask.
+        const commands = maskTransferDescriptors(kind, docId, srcId, dstId);
+        await act(commands.copy);
+        if (!await exists(dstId)) throw new Error("Photoshop 未在目标图层建立蒙版");
+        if (!copy) {
+          await act(commands.removeSource);
+          if (await exists(srcId)) throw new Error("目标已收到蒙版，但源蒙版未删除；操作已撤销");
+        } else if (!await exists(srcId)) throw new Error("复制后源蒙版意外丢失；操作已撤销");
+        log("info", "layer mask transferred", JSON.stringify({ docId, kind, srcId, dstId, copy: !!copy }));
       }), 40);
     }
     // these act on the layer by id, leaving the selection alone
@@ -878,6 +938,7 @@ const ACTION_NAMES: Partial<Record<LayerAction, string>> = {
   layerStyle: "图层样式", duplicate: "复制图层", delete: "删除图层", rename: "重命名图层", newLayer: "新建图层", newGroup: "新建组",
   groupLayers: "从图层新建组", ungroup: "取消图层编组", merge: "合并图层", convertSmart: "转换为智能对象", rasterize: "栅格化图层",
   addMask: "添加图层蒙版", addMaskHide: "添加图层蒙版", deleteMask: "删除图层蒙版", applyMask: "应用图层蒙版", toggleMask: "停用/启用图层蒙版",
+  moveMask: "移动/复制图层蒙版", moveVectorMask: "移动/复制矢量蒙版", moveFilterMask: "移动/复制智能滤镜蒙版",
   targetMask: "选择图层蒙版", clip: "创建剪贴蒙版", unclip: "释放剪贴蒙版", copyStyle: "拷贝图层样式", pasteStyle: "粘贴图层样式",
   clearStyle: "清除图层样式", toggleEffects: "显示/隐藏图层样式", link: "链接图层", unlink: "取消链接图层", lock: "锁定图层", unlock: "解除锁定",
   solo: "只显示此图层", editContents: "编辑智能对象内容", toggleFilter: "显示/隐藏智能滤镜", toggleEffect: "显示/隐藏图层效果", moveFilter: "移动智能滤镜", effectStyle: "编辑图层效果", setColor: "图层颜色", loadSelection: "载入选区",

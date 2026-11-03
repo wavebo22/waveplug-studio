@@ -17,7 +17,13 @@
 | 删除时选中里有刚删掉的图层 → `无法执行「select」` | 面板过滤掉不在最新读取里的 id；`run()` 的 `prepare` 只选文档里还存在的图层 | `src/ui/layerTree.ts` `deleteSelected`、`src/ps/uxpLayers.ts` `run` | — |
 
 ## 2. 图层选择与 Delete：自动选中下一层、点击空白取消选择（已构建，PS 待复测）\n
-**2026-11-04 快捷键专属焦点修复**：用户反馈 Delete 快捷键偶发失效，但垃圾桶和拖拽删除正常。已将快捷键监听改为 `window` 捕获阶段；删除 / 选层后延迟重试焦点；实体的第二次 Delete 在前一次删除忙时最多排队一次，并在刷新后按 Photoshop 真实选中层继续。新增无上限快捷键事件日志，弥补旧版只记录前 50 次的问题。`npm run typecheck`、`npm test`（102 项）、`npm run build` 通过；**尚未在 Photoshop 实机复测**。详见 [`DELETE_AUDIT.md`](DELETE_AUDIT.md)。
+**2026-11-04 画板删除卡顿 / 删除不可用（最新）**：截图是画板「画板 1 拷贝」删除被拒绝。日志记录画板 ID 398 三次删除成功也耗时 34–41 秒；在失败阶段同一画板内「组 2」为完全锁定。新增画板子图层锁定预检（不自动解锁）、左侧红区可删状态同步、执行中的持久忙碌提示和 Photoshop 原生可取消进度、耗时日志及测试。**画板底层删除仍可能耗时几十秒，不能保证从根源消除 Photoshop 的长耗时；尚未在 PS 复测。**详见 [`DELETE_AUDIT.md`](DELETE_AUDIT.md)。
+
+**2026-11-04 蒙版移动 / Alt 复制（前一轮）**：复用图层样式图标的拖拽目标行高亮及 Alt 复制提示。图层蒙版、矢量蒙版、智能滤镜蒙版沿原有左侧红区/底栏拖动删除功能外，新增拖向其他有效图层的移动与 Alt 复制。UXP 采用 `make/duplicate` 先创建目标蒙版并验证，再按需删除源蒙版，单步撤销；禁止静默覆盖已有蒙版。新增 `src/ps/maskTransfer.ts`、`tests/mask_transfer.test.ts` 以及蒙版目标有效性测试。**mainpc Photoshop 连接不可用，真实 Photoshop 执行有待验证，尤其是矢量/滤镜蒙版。**详见 [`DELETE_AUDIT.md`](DELETE_AUDIT.md)。
+
+**2026-11-04 左侧拖拽删除交互（前一轮）**：用户先要求提交基线，已在 `local-test` 创建 `8ce523f`。之后改为列表左侧 32px 的隐藏红色删除区域，拖动合法图层/组/蒙版/智能滤镜/样式/变体时显示，拖入并松开直接删除，离开取消；保留底部垃圾桶及右键菜单。WaveLayer Delete/Backspace 监听和快捷键排队已停用，Photoshop 原生快捷键不作修改。新增 103 项中的可删除性测试；**构建后仍需 PS 实机检查红区命中、拖动与撤销**。详见 [`DELETE_AUDIT.md`](DELETE_AUDIT.md)。
+
+**2026-11-04 快捷键专属焦点修复（历史，现已停用 Delete/Backspace 监听）**：用户反馈 Delete 快捷键偶发失效，但垃圾桶和拖拽删除正常。已将快捷键监听改为 `window` 捕获阶段；删除 / 选层后延迟重试焦点；实体的第二次 Delete 在前一次删除忙时最多排队一次，并在刷新后按 Photoshop 真实选中层继续。新增无上限快捷键事件日志，弥补旧版只记录前 50 次的问题。`npm run typecheck`、`npm test`（102 项）、`npm run build` 通过；**尚未在 Photoshop 实机复测**。详见 [`DELETE_AUDIT.md`](DELETE_AUDIT.md)。
 
 
 **2026-11-04 图层删除全链路排查**：见 [`DELETE_AUDIT.md`](DELETE_AUDIT.md)。已统一多种删除入口、逐层预检并隔离部分错误、依据宿主实际结果更新选中、加文档切换防护，并检查变体删除。新增纯逻辑测试；**尚未在 Photoshop 实机验证本轮修改**。

@@ -209,7 +209,7 @@ export interface LayerTree {
  *  group, which the panel shows as one layer), in the same undo step */
 /** `afterDeleteSelect`: the next visible layer picked by the panel before a delete;
  *  the Photoshop implementation validates that this layer survived before selecting it. */
-export interface RunOptions { above?: number; afterDeleteSelect?: number | null }
+export interface RunOptions { above?: number; afterDeleteSelect?: number | null; artboardIds?: number[] }
 
 /** what of the active layer Photoshop paints on: its pixels, layer mask, vector mask or smart filter mask */
 export type TargetPart = "layer" | "mask" | "vmask" | "filterMask";
