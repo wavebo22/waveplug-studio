@@ -375,6 +375,10 @@ export interface Row { layer: TreeLayer; context: boolean; filter?: SubRow }
 /** An AI result group holding only its variations: listed as one layer (变体图层) whose variations
  *  are picked from a row under it, while Photoshop keeps the group. */
 export const isVariantLayer = (l: TreeLayer) => !!l.ai && l.ai.variations > 0 && l.ai.variations === l.children;
+/** Compact rows are used for sub-rows and plain groups. A group with its own mask thumbnail
+ *  needs the normal layer height so the mask is not clipped vertically. */
+export const isCompactRow = (r: Row): boolean => !!r.filter
+  || (r.layer.kind === "group" && !isVariantLayer(r.layer) && !r.layer.mask && !r.layer.vmask);
 /** a row under a layer: `kind` effects (效果) or smart filters (智能滤镜), each effect / filter a chip on
  *  it, or a variant layer's variations; `index` is always 0 */
 export interface SubRow {
@@ -388,16 +392,38 @@ export interface SubRow {
  * The rows to show. Unfiltered: everything except what is inside a collapsed group. Filtered: the
  * matches and the groups they are in (as context), whatever is collapsed.
  */
+/** Advanced conditions refine (AND) the existing name, kind and quick filters. */
+export type AdvancedFilter = "visible" | "hidden" | "locked" | "unlocked" | "empty" |
+  "mask" | "clip" | "effects" | "smartFilters" | "artboard" | "selected";
 /** 搜索 and 类型 at the top of the panel: name contains `text`, kind is one of `kinds` (none: any). */
-export interface Query { text: string; kinds: ReadonlySet<LayerKind> }
+export interface Query {
+  text: string;
+  kinds: ReadonlySet<LayerKind>;
+  advanced?: ReadonlySet<AdvancedFilter>;
+  selectedIds?: ReadonlySet<number>;
+}
 
 /** Kinds as the 类型 buttons group them: the background is a pixel layer, fill layers go with adjustments. */
 const kindGroup = (k: LayerKind): LayerKind => k === "background" ? "pixel" : k === "fill" ? "adjustment" : k;
-export const queryActive = (q?: Query) => !!q && (!!q.text.trim() || q.kinds.size > 0);
+export const queryActive = (q?: Query) => !!q && (!!q.text.trim() || q.kinds.size > 0 || !!q.advanced?.size);
 export function queryMatch(l: TreeLayer, q?: Query): boolean {
   if (!q) return true;
   const t = q.text.trim().toLowerCase();
-  return (!t || l.name.toLowerCase().includes(t)) && (!q.kinds.size || q.kinds.has(kindGroup(l.kind)));
+  if (t && !l.name.toLowerCase().includes(t) || q.kinds.size && !q.kinds.has(kindGroup(l.kind))) return false;
+  const a = q.advanced;
+  if (!a?.size) return true;
+  const locked = l.lockAll || l.lockPixels || l.lockPosition || l.lockTransparency;
+  return (!a.has("visible") || l.visible)
+    && (!a.has("hidden") || !l.visible)
+    && (!a.has("locked") || locked)
+    && (!a.has("unlocked") || !locked)
+    && (!a.has("empty") || l.kind === "pixel" && l.width === 0 && l.height === 0)
+    && (!a.has("mask") || l.mask || l.vmask || l.filterMask)
+    && (!a.has("clip") || l.clipped)
+    && (!a.has("effects") || l.effectList.length > 0)
+    && (!a.has("smartFilters") || l.filters.length > 0)
+    && (!a.has("artboard") || !!l.artboard)
+    && (!a.has("selected") || !!q.selectedIds?.has(l.id));
 }
 
 export function visibleRows(layers: TreeLayer[], collapsed: ReadonlySet<number>, f: Filter, users: Map<string, number>, openSubs: ReadonlySet<number> = new Set(), q?: Query): Row[] {

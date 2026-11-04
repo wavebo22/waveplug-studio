@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { type MenuItem, type RawLayer, ancestors, effectsOf, isVariantLayer, packChips, rawProblem, buildTree, clickSelect, contentUsers, deleteTargets, nextLayerAfterDelete, planLayerDeletion, canDropToDelete, canDropMaskOnto, copyPlan, dropPlan, previewMoveTree, dropZone, filterCounts, layerMenu, layerTags, linkPeers, lockPlan, lockedByGroup, rowLockIcons, sharedColors, selectionAfterLocalClear, visibleRows } from "../src/core/layers/tree.ts";
+import { type MenuItem, type RawLayer, ancestors, effectsOf, isVariantLayer, isCompactRow, packChips, rawProblem, buildTree, clickSelect, contentUsers, deleteTargets, nextLayerAfterDelete, planLayerDeletion, canDropToDelete, canDropMaskOnto, copyPlan, dropPlan, previewMoveTree, dropZone, filterCounts, layerMenu, layerTags, linkPeers, lockPlan, lockedByGroup, rowLockIcons, sharedColors, selectionAfterLocalClear, visibleRows } from "../src/core/layers/tree.ts";
 import { ThumbCache, frameThumb, thumbArea } from "../src/core/layers/thumbs.ts";
 
 const raw = (id: number, name: string, kind: number, extra: Partial<RawLayer> = {}): RawLayer =>
@@ -26,6 +26,18 @@ test("图层列表: depth, parent, children and AI variations from Photoshop's f
   assert.deepEqual(t.find(l => l.id === 10)!.ai, { label: "AI填充", variations: 2, ids: [11, 12], shown: 11 });
   assert.equal(t.find(l => l.id === 30)!.kind, "background");
   assert.equal(t.find(l => l.id === 21)!.kind, "smartObject");
+});
+
+test("图层组行高：有图层蒙版或矢量蒙版时使用正常高度，无蒙版时保持紧凑", () => {
+  const layers = buildTree([
+    raw(1, "普通组", 7), raw(2, "普通组子层", 1), end(),
+    raw(3, "带图层蒙版的组", 7, { mask: true }), raw(4, "蒙版组子层", 1), end(),
+    raw(5, "带矢量蒙版的组", 7, { vmask: true }), raw(6, "矢量蒙版组子层", 1), end(),
+  ]);
+  const compact = (id: number) => isCompactRow({ layer: layers.find(l => l.id === id)!, context: false });
+  assert.equal(compact(1), true);
+  assert.equal(compact(3), false);
+  assert.equal(compact(5), false);
 });
 
 test("图层列表: status cells", () => {
@@ -461,6 +473,30 @@ test("搜索 / 类型: matches with their groups as context", () => {
   // a variant layer's variations aren't listed
   assert.deepEqual(q("", ["pixel"]).map(x => x[0]), [30]);
   assert.deepEqual(q("v1", ["pixel"]), []);
+});
+
+test("顶部高级筛选：条件叠加、选中与原有类型/快捷过滤兼容", () => {
+  const t = buildTree([
+    raw(1, "像素", 1),
+    raw(2, "隐藏", 1, { visible: false }),
+    raw(3, "带蒙版", 1, { mask: true }),
+    raw(4, "已锁定", 1, { lockPosition: true }),
+    raw(5, "智能滤镜", 5, { contentId: "a", file: "a.psb", filters: [{ name: "模糊", enabled: true }] }),
+  ]);
+  const users = contentUsers(t);
+  const ids = (advanced: string[], kinds: string[] = [], selected: number[] = []) =>
+    visibleRows(t, new Set(), "all", users, new Set(),
+      { text: "", kinds: new Set(kinds as never[]), advanced: new Set(advanced as never[]), selectedIds: new Set(selected) })
+      .map(r => r.layer.id);
+  assert.deepEqual(ids(["visible"]), [1, 3, 4, 5]);
+  assert.deepEqual(ids(["hidden"]), [2]);
+  assert.deepEqual(ids(["mask"]), [3]);
+  assert.deepEqual(ids(["locked"]), [4]);
+  assert.deepEqual(ids(["smartFilters"]), [5]);
+  assert.deepEqual(ids(["selected"], [], [3, 5]), [3, 5]);
+  assert.deepEqual(ids(["visible", "mask"], ["pixel"]), [3]);
+  // Filter disabled in the UI passes no Query and uses "all": every layer remains visible.
+  assert.deepEqual(visibleRows(t, new Set(), "all", users).map(r => r.layer.id), [1, 2, 3, 4, 5]);
 });
 
 test("变体图层: an AI group of only variations is one row, its variations a row under it", () => {

@@ -9,12 +9,17 @@
 | 2b | [`STABILITY_HANDOFF.md`](STABILITY_HANDOFF.md) | 11-03 稳定性 / 性能修复：已修的、Delete 键没解决的证据和下一步、核实过还没修的 | 接手时先读；碰网络、扩图、缩略图、Delete 键之前 |
 | 2c | [`DELETE_AUDIT.md`](DELETE_AUDIT.md) | 图层删除全链路审计、源码修复及需实测的边界 | Delete / 垃圾桶 / 多选删除 |
 | 2d | WAVELAYER_DRAG_PERFORMANCE.md | WaveLayer 拖拽优化研究、实测指标、乐观排序实验 | 修改图层拖拽之前 |
+| 2e | [`UI_DESIGN_SYSTEM.md`](UI_DESIGN_SYSTEM.md) | UI 规范 v0 草案：token、组件规则、UXP 限制、现状审计、迁移步骤 | 写或改任何界面样式之前 |
+| 2f | [`../native/overlay/HANDOFF.md`](../native/overlay/HANDOFF.md) | 浮动生成条（`native/overlay`，Rust 写的 Windows 小程序）：架构、协议、选区→屏幕坐标换算、窗口行为、已知问题、下一步 | 碰 `native/overlay` 或插件的 overlay 代码之前 |
 | 3 | [`DEVELOPMENT.md`](DEVELOPMENT.md) | 构建、打包、用 UPIA 安装、开发版、日志位置、已确认的 UXP 行为 | 要打包、安装或排查环境时 |
 | — | [`../README.md`](../README.md) | 面向用户的使用说明（1.0 时写的，部分功能没写进去） | 想知道用户看到什么时 |
 | — | [`../CHANGELOG.md`](../CHANGELOG.md) | 已发布版本的改动 | 发版时 |
 | — | [`history/`](history/) | 历史资料：V1.4 设计交接、0.1.x 实机测试交接。**已过时，只作参考** | 需要追溯最初的设计意图时 |
 
 ## 当前状态一览（2026-11-04）
+- **11-04 WaveLayer 图标换成 PS 式实心单色（PS 实测确认，用户反馈看得懂）**：按用户提供的 PS 原版图层面板截图重画 26 个图标（`dom.ts` 的 `PS_GLYPHS`，实心、even-odd 单路径）：底栏链接改横向链条，蒙版链接改竖向链条（`psChainV`），智能对象改折角纸，剪贴箭头改向下，锁定透明像素改棋盘格（`psChecker`）。图层类型（组 / 文字 / 调整 / 形状）和状态图标（可编辑、独立、链接）去掉彩色，统一 `--c-text-2`；不可编辑、AI、共用分组色保留。未提交 Git。
+- **11-04 选区浮动生成条原型（插件端已构建；Rust 小程序未编译）**：`native/overlay` 是 Rust 写的 Windows 小程序，画完选区在鼠标旁弹出「提示词 · 数量 · 生成」，在面板外显示；插件通过 `ws://127.0.0.1:47821` 连接（`src/app/overlay.ts`，没运行时每 3 秒静默重试，不影响原功能）。编译与使用见 [`../native/overlay/README.md`](../native/overlay/README.md)。未提交 Git。
+- **11-04 WaveLayer 顶部重排（PS 实测确认）**：按用户确认的效果图改为 PS 式三行——搜索 + 展开/折叠 + 漏斗/竖向筛选开关；混合模式 + 不透明度；锁定 + 填充（两个百分比框右对齐成一列）。缩略图按钮移到标题行，选中图层信息改为悬停提示。窄面板自动换行。详见 [`UI_DESIGN_SYSTEM.md`](UI_DESIGN_SYSTEM.md) 第 7 节。未提交 Git。
 - **11-04 WaveLayer 双击 PNG 智能对象先转 PSB 再打开（已构建，Photoshop 待实测）**：双击智能对象缩略图或智能对象标识、以及右键「编辑智能对象内容」均复用统一编辑入口。实时读取目标图层 smartObject.fileReference；仅 PNG（大小写不敏感）会先选中所点的**唯一**图层，执行已有的「转为可编辑」工具并确认成功、取得新 PSB 图层 ID 后才使用 placedLayerEditContents 打开；转换失败或结果 ID 异常则报明确错误，不打开原 PNG。PSB/PSD 及其他格式仍直接打开。新增 5 项纯流程测试 + 1 项 UXP 模拟调用顺序与错误处理测试；未在用户 PSD 实测、未提交 Git。
 
 - **11-04 WaveLayer 智能对象右键极简状态/操作栏（已构建，PS 待验证）**：仍为左侧快捷区、右侧普通图层菜单；左侧压缩为两枚单行状态标签（仅 PNG/PSB 等内容格式，以及 链接×N/独立/外链），下方四项非重复操作（替换/导出/解包/重置）改为从上到下单列排列，根据实机截图再次收紧为 44px 侧栏（状态标签与图标按钮统一为 30px，侧栏右侧仅 1px 内边距），右侧普通菜单左内边距缩至 2px；运行时侧栏宽度限制在 40–44px，普通菜单总宽也缩至最多 292px；右侧普通图层菜单保持并排，去掉大标题、状态字段名、固定说明行。状态颜色直接复用 WaveLayer 图层标签现有 lt-tag 属性配色：可编辑 PSB 绿色、PNG 等不可编辑珊瑚色、共享琥珀色、独立青绿色、外链蓝色。保留类型单击转 PSB、共享单击选同源/快速双击断开共享及锁定/多选保护，四个图标重绘为与对话示意一致的 Lucide 风格刷新、下载、图层、逆时针旋转线性图标；链接状态兼容 UXP dblclick 与两次 click 两种事件序列，避免重复断开，执行所有智能对象工具前先按 WaveLayer 实际目标图层 ID 同步 Photoshop 选中状态。图标悬停可看名称/提示。现有未提交开发改动和 PSD 保留，尚未 Git 提交。

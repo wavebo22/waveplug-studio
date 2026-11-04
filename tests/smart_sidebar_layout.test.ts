@@ -16,8 +16,14 @@ test("smart-object right-click sidebar is a single vertical column, beside ordin
   assert.match(css, /\.pm-sidebar\s*\{[^}]*width:\s*44px/);
   assert.match(css, /\.pm-main-menu \.pm-item\s*\{[^}]*padding-left:\s*2px;\s*padding-right:\s*6px/);
   const rows = readFileSync(new URL("../src/ui/layerTree.ts", import.meta.url), "utf8");
-  assert.match(rows, /replace\(r\.move, lockIcons\.move \? ic\("move", 13\) : null\)/);
-  assert.match(rows, /replace\(r\.edit, lockIcons\.edit \? ic\("brush", 13\) : null\)/);
+  // Layer rows use Photoshop's native visibility eye only; move/edit lock switches are removed.
+  assert.match(rows, /replace\(r\.eye, l\.visible \? ic\("eye", 14\) : null\)/);
+  assert.doesNotMatch(rows, /replace\(r\.move, lockIcons\.move/);
+  assert.doesNotMatch(rows, /replace\(r\.edit, lockIcons\.edit/);
+  for (const name of ["expandGroupsBtn", "expandEffectsBtn", "collapseGroupsBtn", "collapseEffectsBtn", "collapseAllBtn"])
+    assert.match(rows, new RegExp("const " + name + " = h\\("));
+  assert.match(rows, /lt-expand-divider/);
+  assert.match(rows, /expandCollapseControls/);
   const glyphs = readFileSync(new URL("../src/ui/dom.ts", import.meta.url), "utf8");
   for (const name of ["soReplace", "soExport", "soUnpack", "soReset"])
     assert.match(glyphs, new RegExp("\\b" + name + ":"));

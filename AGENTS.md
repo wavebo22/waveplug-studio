@@ -13,3 +13,4 @@ Photoshop UXP 插件：连接本地 ComfyUI，把 AI 结果以图层组 + 变体
 - 纯逻辑放 `src/core/` 并写测试；修改 PS 文档的操作放在 `step()` 里，保证是一步历史记录。
 - 改文件时不要用「先清空再写」的写法（曾经清空过源码），写到 `.new` 文件再 `mv`，或者用编辑工具。
 - `workflows/` 下两个未跟踪的 JSON 不属于本项目的改动，不要动。
+- 写或改界面样式前读 [`docs/UI_DESIGN_SYSTEM.md`](docs/UI_DESIGN_SYSTEM.md)：只用 `styles.css` 开头的 token（颜色、间距、控件高度），字号不小于 11px，有现成组件就复用。

@@ -64,3 +64,15 @@ export function planWorkbenchCopies(
   }
   return { batches, count: batches.reduce((sum, batch) => sum + batch.layers.length, 0), nestedSkipped };
 }
+
+/** When optional selected-layer placement is enabled, use the topmost selected layer
+ *  from Photoshop's top-to-bottom layer list. No valid selection means the caller should use top. */
+export function workbenchPlacementAnchor(
+  enabled: boolean,
+  documentOpen: boolean,
+  layersTopToBottom: readonly { id: number }[],
+  selectedIds: ReadonlySet<number>,
+): number | null {
+  if (!enabled || !documentOpen || !selectedIds.size) return null;
+  return layersTopToBottom.find(layer => selectedIds.has(layer.id))?.id ?? null;
+}

@@ -4,12 +4,17 @@
 
 import { h, listen } from "./dom.ts";
 
-export function createSlider(opts: { title?: string; onInput: (v: number) => void; onChange: (v: number) => void }) {
+export function createSlider(opts: { title?: string; min?: number; max?: number; onInput: (v: number) => void; onChange: (v: number) => void }) {
   const fill = h("div", { class: "sl-fill" }), knob = h("div", { class: "sl-knob" });
   const track = h("div", { class: "sl-track" }, fill, knob);
   const el = h("div", { class: "sl", title: opts.title }, track);
-  let value = 100, disabled = false, drag: { x0: number; v0: number } | null = null;
-  const show = (v: number) => { value = Math.max(0, Math.min(100, Math.round(v))); fill.style.width = value + "%"; knob.style.left = value + "%"; };
+  const min = opts.min ?? 0, max = opts.max ?? 100;
+  let value = max, disabled = false, drag: { x0: number; v0: number } | null = null;
+  const show = (v: number) => {
+    value = Math.max(min, Math.min(max, Math.round(v)));
+    const p = (value - min) / Math.max(1, max - min) * 100;
+    fill.style.width = p + "%"; knob.style.left = p + "%";
+  };
 
   el.addEventListener("mousedown", e => {
     const m = e as MouseEvent;
@@ -19,14 +24,14 @@ export function createSlider(opts: { title?: string; onInput: (v: number) => voi
     // offsetX is relative to what was pressed: the track and the fill both start at the track's left
     if (m.target !== knob && typeof m.offsetX === "number") {
       const x = m.target === el ? m.offsetX - track.offsetLeft : m.offsetX;
-      show(x / w * 100);
+      show(min + x / w * (max - min));
       opts.onInput(value);
     }
     drag = { x0: m.clientX, v0: value };
   });
   listen(document, "mousemove", e => {
     if (!drag) return;
-    show(drag.v0 + ((e as MouseEvent).clientX - drag.x0) / (track.clientWidth || 1) * 100);
+    show(drag.v0 + ((e as MouseEvent).clientX - drag.x0) / (track.clientWidth || 1) * (max - min));
     opts.onInput(value);
   });
   listen(document, "mouseup", () => { if (!drag) return; drag = null; opts.onChange(value); });

@@ -1,6 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { appendStagedLayers, planWorkbenchCopies, pointInWorkbench } from "../src/core/layers/workbench.ts";
+import { readFileSync } from "node:fs";
+import { appendStagedLayers, planWorkbenchCopies, pointInWorkbench, workbenchPlacementAnchor } from "../src/core/layers/workbench.ts";
 import {
   addToWorkbenchDemo, removeFromWorkbenchDemo, clearWorkbenchDemo,
   onWorkbenchDemoChange, workbenchDemoState,
@@ -68,4 +69,27 @@ test("一键放入：组与其子孙同时暂存时仅复制外层组", () => {
   ]);
   assert.deepEqual(planWorkbenchCopies([item(7, 31)], parent).batches,
     [{ docId: 7, layers: [item(7, 31)] }]);
+});
+
+test("工作台默认位置：开启时使用最上方选中图层；关闭、无选中或文档未就绪时置顶", () => {
+  const layersTopToBottom = [{ id: 30 }, { id: 20 }, { id: 10 }];
+  assert.equal(workbenchPlacementAnchor(true, true, layersTopToBottom, new Set([10, 30])), 30);
+  assert.equal(workbenchPlacementAnchor(true, true, layersTopToBottom, new Set([20])), 20);
+  assert.equal(workbenchPlacementAnchor(false, true, layersTopToBottom, new Set([20])), null);
+  assert.equal(workbenchPlacementAnchor(true, true, layersTopToBottom, new Set()), null);
+  assert.equal(workbenchPlacementAnchor(true, false, layersTopToBottom, new Set([20])), null);
+  assert.equal(workbenchPlacementAnchor(true, true, layersTopToBottom, new Set([999])), null);
+});
+
+test("工作台默认位置开关：偏好持久化并将目标文档/图层传给置入逻辑", () => {
+  const ui = readFileSync(new URL("../src/ui/workbenchDemo.ts", import.meta.url), "utf8");
+  const host = readFileSync(new URL("../src/ps/uxpWorkbench.ts", import.meta.url), "utf8");
+  assert.match(ui, /wp\.workbench\.defaultPosition/);
+  assert.match(ui, /type: "checkbox"/);
+  assert.match(ui, /defaultPositionInput\.checked = useSelectedPosition/);
+  assert.doesNotMatch(ui, /icon\("target", 12\), "默认位置"/);
+  assert.match(ui, /localStorage\.setItem\(DEFAULT_POSITION_KEY, useSelectedPosition \? "selected" : "top"\)/);
+  assert.match(ui, /tree\.placeStaged\(staged, options\)/);
+  assert.match(host, /options\.targetDocId !== targetId/);
+  assert.match(host, /group\.move\(anchor, ps\(\)\.constants\.ElementPlacement\.PLACEBEFORE\)/);
 });

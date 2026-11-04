@@ -11,6 +11,11 @@ import {
   removeFromWorkbenchDemo, workbenchDemoState,
 } from "./workbenchStore.ts";
 
+export interface WorkbenchPlacementTarget {
+  docId: number | null;
+  /** Topmost selected layer in the current document, or null when nothing is selected. */
+  layerId: number | null;
+}
 export interface WorkbenchSection {
   el: HTMLElement;
   toggleButton: HTMLElement;
@@ -21,8 +26,16 @@ export interface WorkbenchSection {
   add(items: StagedLayer[]): void;
 }
 
-export function createWorkbenchSection(tree: LayerTree): WorkbenchSection {
+const DEFAULT_POSITION_KEY = "wp.workbench.defaultPosition";
+export function createWorkbenchSection(
+  tree: LayerTree,
+  getPlacementTarget?: () => WorkbenchPlacementTarget,
+): WorkbenchSection {
   let open = false, autoOpened = false, dragging = false, dragHover = false, placing = false;
+  let useSelectedPosition = (() => {
+    try { return localStorage.getItem(DEFAULT_POSITION_KEY) === "selected"; }
+    catch { return false; }
+  })();
   const title = h("span", { class: "wb-heading" }, "编辑工作台");
   const count = h("span", { class: "wb-count" }, "0 项");
   const toggleButton = h("button", { class: "lt-head-btn wb-toggle", title: "展开或收起编辑工作台" }, "工作台");
@@ -36,10 +49,24 @@ export function createWorkbenchSection(tree: LayerTree): WorkbenchSection {
   const items = h("div", { class: "wb-items" });
   const copy = h("button", { class: "wb-icon-btn wb-place", title: "置入：将工作台全部图层复制到当前 PSD 的新文件夹（可撤销）",
     "aria-label": "置入当前文档" }, icon("wbPlace", 16));
+  const defaultPositionInput = h("input", {
+    class: "wb-default-position",
+    type: "checkbox",
+    checked: useSelectedPosition,
+    title: "勾选：置于当前选中图层上方；无选中图层时置顶。不勾选：始终置顶",
+    "aria-label": "默认置于选中图层上方",
+  }) as HTMLInputElement;
+  defaultPositionInput.addEventListener("change", () => {
+    if (placing) { defaultPositionInput.checked = useSelectedPosition; return; }
+    useSelectedPosition = defaultPositionInput.checked;
+    try { localStorage.setItem(DEFAULT_POSITION_KEY, useSelectedPosition ? "selected" : "top"); }
+    catch { /* preference remains active for this panel session */ }
+    paint();
+  });
   const exportButton = h("button", { class: "wb-icon-btn wb-pending", title: "导出：尚未接入，后续版本开放",
     "aria-label": "导出（尚未接入）" }, icon("wbExport", 16));
   (exportButton as any).disabled = true;
-  const actions = h("div", { class: "wb-actions" }, copy, exportButton);
+  const actions = h("div", { class: "wb-actions" }, defaultPositionInput, copy, exportButton);
   const line = h("span", { class: "wb-state" }, "仅暂存图层引用；源 PSD 需要保持打开");
   const noticeTitle = h("span", { class: "wb-notice-title" });
   const noticeReason = h("div", { class: "wb-notice-reason" });
@@ -91,6 +118,14 @@ export function createWorkbenchSection(tree: LayerTree): WorkbenchSection {
     (copy as any).disabled = placing || n === 0;
     (clear as any).disabled = placing;
     copy.classList.toggle("busy", placing);
+    if (!placing) copy.title = useSelectedPosition
+      ? "置入：将工作台内容放到当前选中图层上方；无选中图层时置顶"
+      : "置入：将工作台内容放到当前 PSD 图层顶端";
+    defaultPositionInput.checked = useSelectedPosition;
+    defaultPositionInput.title = useSelectedPosition
+      ? "已勾选：置于当前 PSD 最上方的选中图层上方；没有选中图层时置顶"
+      : "未勾选：始终置于当前 PSD 图层顶端";
+    defaultPositionInput.disabled = placing;
     replace(items, ...state.staged.map(item => {
       const remove = h("button", { class: "wb-remove", title: "从工作台移出，不删除 Photoshop 图层" }, "×");
       (remove as any).disabled = placing;
@@ -138,8 +173,15 @@ export function createWorkbenchSection(tree: LayerTree): WorkbenchSection {
     paint();
     copy.setAttribute("title", "正在置入图层，请勿重复点击或切换 PSD");
     replace(line, "正在复制图层并创建文件夹，请勿切换 PSD");
-    void new Promise<void>(resolve => setTimeout(resolve, 25)).then(() => tree.placeStaged(staged)).then(result => {
-      replace(line, `已放入 ${result.count} 个图层到「${result.groupName}」；可 Ctrl+Z 撤销`
+    const target = getPlacementTarget?.() ?? { docId: null, layerId: null };
+    const options = target.docId === null ? undefined : {
+      targetDocId: target.docId,
+      aboveLayerId: useSelectedPosition ? target.layerId ?? undefined : undefined,
+    };
+    void new Promise<void>(resolve => setTimeout(resolve, 25)).then(() => tree.placeStaged(staged, options)).then(result => {
+      const placementText = result.placement === "above-selection"
+        ? `（位于「${result.anchorName ?? "所选图层"}」上方）` : "（置于图层顶端）";
+      replace(line, `已放入 ${result.count} 个图层到「${result.groupName}」${placementText}；可 Ctrl+Z 撤销`
         + (result.nestedSkipped ? `（已合并 ${result.nestedSkipped} 个重复的组内子图层）` : ""));
       showNotice(explainCompatibilityWarnings(result.compatibility ?? []));
     }).catch(error => {

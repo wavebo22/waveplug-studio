@@ -10,6 +10,7 @@ import type { Rect } from "../core/image/region.ts";
 import type { Side, TaskType } from "../core/workflow/profile.ts";
 import type { ToolLayer, ToolResult } from "../core/layers/smart.ts";
 import type { DocScan, SlimKind } from "../core/layers/slim.ts";
+import type { CanvasView } from "../core/overlay/protocol.ts";
 import type { LayerAction, MoveStep, TreeLayer } from "../core/layers/tree.ts";
 
 export type Pads = Record<Side, number>;
@@ -80,6 +81,8 @@ export interface PsHost {
   docExists(id: number): boolean;
   /** Bounds of the active selection, or null when there is none. */
   selectionBounds(docId: number): Promise<Rect | null>;
+  /** Where the document's canvas is on screen (for the floating bar, native/overlay); Photoshop only. */
+  canvasView?(docId: number): Promise<CanvasView | null>;
   /** Exact grayscale pixels of the active selection (not just its rectangular bounds). */
   selectionMask(docId: number, rect: Rect): Promise<Pixels>;
   /** The fill group the active layer is (or is inside), else null. */
@@ -182,7 +185,10 @@ export interface LayerDeleteResult {
 export interface LayerTree {
   /** Insert all staged references into the active PSD inside one new layer group (single undo step).
    *  Source PSDs must still be open. Nothing is removed from the workbench or source PSDs. */
-  placeStaged(entries: import("../core/layers/workbench.ts").StagedLayer[]): Promise<import("./uxpWorkbench.ts").WorkbenchPlacementResult>;
+  placeStaged(
+    entries: import("../core/layers/workbench.ts").StagedLayer[],
+    options?: import("./uxpWorkbench.ts").WorkbenchPlacementOptions,
+  ): Promise<import("./uxpWorkbench.ts").WorkbenchPlacementResult>;
   /** All layers top to bottom with their status, and the selected ids; null without a document.
    *  `docKey`: the document across sessions (its file, or its name before it is saved). */
   read(): Promise<{ docId: number; docKey: string; layers: TreeLayer[]; selected: number[]; width: number; height: number } | null>;

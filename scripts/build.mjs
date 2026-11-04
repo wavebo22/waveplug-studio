@@ -13,6 +13,7 @@ for (const f of ["manifest.json", "index.html", "styles.css"]) cpSync(`plugin/${
 cpSync("plugin/icons", "dist/plugin/icons", { recursive: true });
 cpSync("plugin/styles.css", "dist/preview/styles.css");
 cpSync("src/preview/preview.html", "dist/preview/index.html");
+cpSync("src/preview/gallery.html", "dist/preview/gallery.html");
 cpSync("tests/fixtures/ui/guhai_inpaint_ps.json", "dist/preview/fixture.json");
 cpSync("tests/fixtures/ui/guhai_remove_inpaint_outpaint.json", "dist/preview/fixture_outpaint.json");
 cpSync("tests/fixtures/ui/qwen_txt2img.json", "dist/preview/fixture_txt2img.json");
@@ -39,6 +40,7 @@ cpSync("dev/loader.js", "dist/dev/loader.js");
 const targets = [
   { ...common, entryPoints: ["src/main.uxp.ts"], outfile: "dist/plugin/index.js" },
   { ...common, entryPoints: ["src/preview/main.preview.ts"], outfile: "dist/preview/preview.js" },
+  { ...common, entryPoints: ["src/preview/gallery.ts"], outfile: "dist/preview/gallery.js" },
 ];
 
 if (watch) for (const t of targets) await (await context(t)).watch();

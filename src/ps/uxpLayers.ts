@@ -329,8 +329,8 @@ async function repairLayerPlacement(doc: any, itemId: number, relativeId: number
 }
 
 export class UxpLayerTree implements LayerTree {
-  async placeStaged(entries: StagedLayer[]) {
-    return whenFree(() => placeWorkbenchLayers(entries));
+  async placeStaged(entries: StagedLayer[], options?: import("./uxpWorkbench.ts").WorkbenchPlacementOptions) {
+    return whenFree(() => placeWorkbenchLayers(entries, options));
   }
   async read() {
     const d = ps().app.activeDocument;

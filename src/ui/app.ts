@@ -22,6 +22,8 @@ import { downscale, onWhite } from "../core/image/compose.ts";
 import { BLEND_PREFIX, EXPAND_PREFIX, EXTRACT_PREFIX, FILL_PREFIX, GENERATE_PREFIX, UPSCALE_PREFIX } from "../ps/host.ts";
 import { RATIOS, createExpandEditor } from "./expandEditor.ts";
 import { createToolsView } from "./tools.ts";
+import { connectOverlay } from "../app/overlay.ts";
+import { type OverlayEvent, docToScreen, overlayStep, selectionKey } from "../core/overlay/protocol.ts";
 
 type Conn = { state: "checking" | "ok" | "down"; text: string };
 
@@ -85,6 +87,10 @@ export function mountApp(root: HTMLElement, svc: Services) {
   let doc: DocInfo | null = null, sel: Rect | null = null, group: FillGroup | null = null;
   // Variations follow the selected Photoshop AI layer.
   let lastGroupKey = "";
+  /** 选区浮动生成条 (native/overlay): only in Photoshop, only for the modes that work on a selection */
+  const OVERLAY_MODES: ReadonlySet<TaskType> = new Set<TaskType>(["inpaint", "blend", "extract", "txt2img"]);
+  let overlay: ReturnType<typeof connectOverlay> | null = null;
+  let lastSelKey: string | null = null;
   const near = (a: Rect, b: Rect) => a.left === b.left && a.top === b.top && a.right === b.right && a.bottom === b.bottom;
   const willAdd = () => {
     if (!group || group.kind !== mode || mode === "upscale") return false;
@@ -612,7 +618,34 @@ export function mountApp(root: HTMLElement, svc: Services) {
     if (switchTo) setMode(switchTo);
     void loadDocThumb();
     renderHistory(); renderSelection(); renderAction();
+    syncOverlay();
     if (again) { again = false; void refresh(); }
+  }
+
+  /** A new selection pops the floating bar up next to the pointer; no selection puts it away. */
+  function syncOverlay() {
+    const key = selectionKey(doc?.id ?? null, sel);
+    const step = overlayStep(lastSelKey, key);
+    lastSelKey = key;
+    if (!overlay || !step) return;
+    if (step === "hide" || run || !OVERLAY_MODES.has(mode) || !doc || !sel) { overlay.send({ type: "hide" }); return; }
+    const link = overlay, d = doc, s = sel;
+    // the selection on screen, from Photoshop's view: the bar sits a fixed distance under it
+    void (svc.host.canvasView?.(d.id) ?? Promise.resolve(null)).catch(() => null).then(view => {
+      if (selectionKey(d.id, s) !== lastSelKey) return; // a newer selection already
+      const anchor = view ? docToScreen(s, view) : undefined;
+      log("info", "overlay show", JSON.stringify({ sel: s, view, anchor }));
+      link.send({ type: "show", prompt: prompt.value, count: normalizeVariationCount(countInput.value), anchor });
+    });
+  }
+
+  /** 生成 in the floating bar: the same as typing the prompt here and pressing 生成. */
+  function onOverlay(e: OverlayEvent) {
+    if (e.type !== "generate" || run || !OVERLAY_MODES.has(mode)) return;
+    setPromptText(e.prompt);
+    countInput.value = String(e.count);
+    saveCount(e.count);
+    void generate();
   }
 
   /** The expand editor shows the current canvas; reloaded when the document or its size changes. */
@@ -1151,6 +1184,7 @@ export function mountApp(root: HTMLElement, svc: Services) {
     const written = { group: null as FillGroup | null };
     stash = null;
     renderAll();
+    overlay?.send({ type: "hide" });
     try {
       const res = await runInpaint(svc.host, comfy, {
         profile: p, prompt: again ? again.prompt : cleanPrompt(prompt.value), seed: ps.seedMode === "fixed" ? ps.seed : null, params: effectiveParams(p, ps),
@@ -1270,6 +1304,7 @@ export function mountApp(root: HTMLElement, svc: Services) {
   log("info", "start", svc.version, svc.host.kind, settings.comfyUrl);
   renderAll();
   svc.host.onChange(() => { void refresh(); if (toolsMode()) void toolsView.refresh(); });
+  if (svc.host.kind === "uxp") overlay = connectOverlay(onOverlay);
   void refresh();
   if (toolsMode()) void toolsView.refresh();
   void checkConn();

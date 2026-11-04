@@ -5,6 +5,7 @@ import { encodePng, type Pixels, withPlacementHints } from "../core/image/png.ts
 import { type Rect, nonZeroBounds, rectH, rectW } from "../core/image/region.ts";
 import { placeGray } from "../core/image/compose.ts";
 import { flushLog, log } from "../app/log.ts";
+import type { CanvasView } from "../core/overlay/protocol.ts";
 import { type ActiveLayer, type Capture, type DocInfo, BLEND_PREFIX, EXPAND_PREFIX, EXTRACT_PREFIX, FILL_PREFIX, GENERATE_PREFIX, UPSCALE_PREFIX, type FillGroup, type LayerInfo, type Pads, type PsHost, type Variation, type VariationMask, padsLabel, parsePads } from "./host.ts";
 
 declare const require: (m: string) => any;
@@ -183,6 +184,18 @@ export class UxpHost implements PsHost {
     if (!s || s.left === undefined) return null;
     const v = (x: any) => Math.round(typeof x === "number" ? x : x._value);
     return { left: v(s.left), top: v(s.top), right: v(s.right), bottom: v(s.bottom) };
+  }
+
+  async canvasView(docId: number): Promise<CanvasView | null> {
+    const doc = { _ref: "document", _id: docId };
+    const get = (p: string) => ({ _obj: "get", _target: [{ _property: p }, doc], _options: DONT });
+    const [z, c, vi, res] = await play([get("zoom"), get("center"), get("viewInfo"), get("resolution")]);
+    const num = (x: any) => typeof x === "number" ? x : Number(x?._value);
+    const b = vi?.viewInfo?.activeView?.globalBounds, zoom = num(z?.zoom), ppi = num(res?.resolution) || 72;
+    const h = num(c?.center?.horizontal), v = num(c?.center?.vertical);
+    if (!b || ![zoom, h, v, b.left, b.top, b.right, b.bottom].every(Number.isFinite) || zoom <= 0) return null;
+    // `center` is in points (1/72 inch): back to document pixels
+    return { view: { left: b.left, top: b.top, right: b.right, bottom: b.bottom }, center: { x: h * ppi / 72, y: v * ppi / 72 }, zoom };
   }
 
   async selectionMask(docId: number, rect: Rect): Promise<Pixels> {

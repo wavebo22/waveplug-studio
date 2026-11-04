@@ -168,23 +168,41 @@ async function duplicateSafely(
   return areTargetIds ? returnedIds : roots.map(x => x.id);
 }
 
+export interface WorkbenchPlacementOptions {
+  /** Active document reported by the WaveLayer panel when the placement button was clicked. */
+  targetDocId?: number;
+  /** Place the new workbench group immediately above this layer, at the same hierarchy level. */
+  aboveLayerId?: number;
+}
 export interface WorkbenchPlacementResult {
   docId: number;
   groupId: number;
   groupName: string;
   count: number;
   nestedSkipped: number;
+  placement: "top" | "above-selection";
+  anchorName?: string;
   /** Nonblocking cautions about source/target formats, only after real copies succeeded. */
   compatibility?: WorkbenchCompatibilityNotice[];
 }
 
 /** All references are checked BEFORE the first modification. If any copy/grouping fails,
  *  step() rolls back the target document instead of leaving half a workbench import. */
-export async function placeWorkbenchLayers(entries: readonly StagedLayer[]): Promise<WorkbenchPlacementResult> {
+export async function placeWorkbenchLayers(
+  entries: readonly StagedLayer[],
+  options: WorkbenchPlacementOptions = {},
+): Promise<WorkbenchPlacementResult> {
   if (!entries.length) throw new Error("工作台没有暂存图层");
   const active = ps().app.activeDocument;
   if (!active) throw new WorkbenchPlaceError("NO_TARGET", "当前没有打开用于接收素材的 PSD。", "先打开并激活目标 Photoshop 文档，再点击置入。");
   const targetId = active.id;
+  if (options.targetDocId !== undefined && options.targetDocId !== targetId) {
+    throw new WorkbenchPlaceError(
+      "TARGET_SWITCHED",
+      "图层面板对应的 PSD 与当前活动文档不一致，已取消置入。",
+      "请先激活要接收素材的 PSD，等待 WaveLayer 图层列表同步后再置入，避免素材放入错误文档。",
+    );
+  }
 
   return step("WaveLayer 放入工作台素材", targetId, async ctx => {
     if (ps().app.activeDocument?.id !== targetId)
@@ -201,6 +219,16 @@ export async function placeWorkbenchLayers(entries: readonly StagedLayer[]): Pro
         String((error as Error)?.message ?? error),
       );
     }
+    // Resolve the requested anchor before the first mutation. A stale/missing selection
+    // safely falls back to the top of the active document.
+    const requestedAnchor = Number.isInteger(options.aboveLayerId) && options.aboveLayerId! > 0
+      ? findLayer(target.layers, options.aboveLayerId!) : null;
+    const placementAnchorId: number | null = requestedAnchor?.id ?? null;
+    const anchorName = requestedAnchor ? String(requestedAnchor.name ?? "") : undefined;
+    if (options.aboveLayerId !== undefined && !requestedAnchor)
+      log("warn", "workbench placement anchor missing; fallback to top",
+        JSON.stringify({ targetId, aboveLayerId: options.aboveLayerId }));
+
     const sources = new Map<number, { doc: any; layers: Map<number, any>; parents: Map<number, number | null> }>();
     for (const ref of entries) {
       if (!Number.isInteger(ref.docId) || !Number.isInteger(ref.layerId) || ref.docId <= 0 || ref.layerId <= 0)
@@ -298,6 +326,25 @@ export async function placeWorkbenchLayers(entries: readonly StagedLayer[]): Pro
         "GROUP_CREATE_FAILED", `Photoshop 执行创建「${groupName}」后未返回有效的图层组对象。`,
         "请检查目标 PSD 是否出现新文件夹或残留副本，并重新加载 WaveLayer 开发版。",
       );
+    if (placementAnchorId !== null) {
+      const anchor = findLayer(target.layers, placementAnchorId);
+      if (!anchor)
+        throw new WorkbenchPlaceError(
+          "PLACEMENT_ANCHOR_MISSING",
+          "准备插入时，原选中图层已不存在，已取消置入。",
+          "请重新选择目标图层并再次置入；本次不会改为放到其他位置。",
+        );
+      try {
+        await group.move(anchor, ps().constants.ElementPlacement.PLACEBEFORE);
+      } catch (error) {
+        throw new WorkbenchPlaceError(
+          "PLACEMENT_FAILED",
+          `Photoshop 未能将「${groupName}」放到「${anchorName ?? anchor.name}」上方。`,
+          "请确认目标图层没有被删除或移动，然后重试。此次置入会尝试整体回滚。",
+          String((error as Error)?.message ?? error),
+        );
+      }
+    }
     const destination = ps().constants.ElementPlacement.PLACEINSIDE;
     // PLACEINSIDE inserts at the top: process bottom first to keep the staged order.
     for (const layerId of [...copiedIds].reverse()) {
@@ -336,9 +383,12 @@ export async function placeWorkbenchLayers(entries: readonly StagedLayer[]): Pro
 
     log("info", "workbench placed", JSON.stringify({
       targetId, groupId: group.id, count: copiedIds.length, nestedSkipped: plan.nestedSkipped,
-      sourceDocs: plan.batches.map(b => b.docId),
+      placement: placementAnchorId === null ? "top" : "above-selection",
+      aboveLayerId: placementAnchorId, sourceDocs: plan.batches.map(b => b.docId),
     }));
     return { docId: targetId, groupId: group.id, groupName, count: copiedIds.length,
-      nestedSkipped: plan.nestedSkipped, compatibility };
+      nestedSkipped: plan.nestedSkipped,
+      placement: placementAnchorId === null ? "top" : "above-selection",
+      anchorName, compatibility };
   });
 }

@@ -178,7 +178,10 @@ class MockLayerTree implements LayerTree {
       L(50, "背景", 12, { locked: true, lockAll: true }),
     ];
   }
-  async placeStaged(entries: import("../core/layers/workbench.ts").StagedLayer[]) {
+  async placeStaged(
+    entries: import("../core/layers/workbench.ts").StagedLayer[],
+    options?: import("../ps/uxpWorkbench.ts").WorkbenchPlacementOptions,
+  ) {
     const refs = entries.filter(x => x.docId === 1 && x.layerId > 0);
     if (!refs.length) throw new Error("预览中没有可用的来源图层");
     const copies: RawLayer[] = [];
@@ -192,11 +195,18 @@ class MockLayerTree implements LayerTree {
     const groupId = this.next++, groupName = "工作台素材";
     const start: RawLayer = { id: groupId, name: groupName, kind: 7, section: "start", visible: true, locked: false, mask: false };
     const end: RawLayer = { id: 0, name: "", kind: 13, section: "end", visible: true, locked: false, mask: false };
-    this.raw.unshift(start, ...copies, end);
+    const anchorIndex = options?.targetDocId === 1 && Number.isInteger(options.aboveLayerId)
+      ? this.raw.findIndex(layer => layer.id === options.aboveLayerId && layer.section !== "end") : -1;
+    const insertAt = anchorIndex >= 0 ? anchorIndex : 0;
+    this.raw.splice(insertAt, 0, start, ...copies, end);
     this.selected = [groupId];
     await sleep(30);
     this.changed();
-    return { docId: 1, groupId, groupName, count: refs.length, nestedSkipped: 0 };
+    return {
+      docId: 1, groupId, groupName, count: refs.length, nestedSkipped: 0,
+      placement: anchorIndex >= 0 ? "above-selection" as const : "top" as const,
+      anchorName: anchorIndex >= 0 ? this.raw[anchorIndex + copies.length + 2]?.name : undefined,
+    };
   }
   async read(): Promise<{ docId: number; docKey: string; layers: TreeLayer[]; selected: number[]; width: number; height: number }> { return { docId: 1, docKey: "preview.psd", layers: buildTree(this.raw), selected: [...this.selected], width: 1920, height: 1200 }; }
   async pickColor(hex: string) { return hex === "#3fb59f" ? "#e07ad0" : "#3fb59f"; }
