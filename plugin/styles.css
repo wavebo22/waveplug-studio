@@ -474,7 +474,7 @@ button, .ub { font: inherit; color: inherit; background: none; border: 0; paddin
 .lt-chip.held { opacity: .4; border-style: dashed; border-color: var(--accent-hi); }
 /* the label beside the pointer while dragging: what, and what letting go here does (green move, amber
    copy, red delete, gray not here) */
-.lt-ghost { position: absolute; z-index: 25; pointer-events: none; display: flex; align-items: center; max-width: 260px; height: 24px; padding: 0 8px; border-radius: 12px;
+.lt-ghost { position: absolute; left: 0; top: 0; z-index: 25; pointer-events: none; display: flex; align-items: center; max-width: 260px; height: 24px; padding: 0 8px; border-radius: 12px;
   background: #262626; border: 2px solid var(--accent-hi); color: #f2f2f2; font-size: var(--fs-s); white-space: nowrap; overflow: hidden; }
 .lt-ghost-what { font-weight: 600; overflow: hidden; text-overflow: ellipsis; }
 .lt-ghost-act { margin-left: 8px; color: var(--accent-hi); flex: none; }
@@ -544,6 +544,33 @@ button, .ub { font: inherit; color: inherit; background: none; border: 0; paddin
 .pm-hint { margin-left: 18px; font-size: var(--fs-s); color: #a8a8a8; }
 .pm-item:hover .pm-hint { color: var(--accent-ink); }
 .pm-sep { height: 1px; margin: 4px 0; background: rgba(255, 255, 255, .14); }
+/* Smart-object compact rail. Status chips reuse the EXACT same lt-tag palette as
+   the layer rows: edit/PSB green, image/PNG coral, shared amber, own teal, link blue. */
+.pm-with-quick { box-sizing: border-box; min-width: 0; padding: 0; overflow: hidden; }
+.pm-split { display: flex; min-width: 0; align-items: stretch; }
+.pm-sidebar { flex: 0 0 44px; width: 44px; min-width: 0; padding: 6px 1px 6px 4px;
+  background: var(--bg); border-right: 1px solid var(--field-line); }
+.pm-stat-row { display: flex; flex-direction: column; align-items: center; min-width: 0; margin-bottom: 4px; }
+.pm-stat.lt-tag { display: block; box-sizing: border-box; flex: 0 0 auto; width: 30px; min-width: 30px;
+  height: 22px; line-height: 20px; margin: 0 0 4px; padding: 0; text-align: center;
+  overflow: hidden; text-overflow: clip; white-space: nowrap; font-size: 9px; letter-spacing: -.2px;
+  text-decoration: none; cursor: default; }
+.pm-stat.lt-tag.can { cursor: pointer; }
+.pm-stat.lt-tag.can:hover, .pm-stat.lt-tag.can:focus { background: var(--hover); outline: none; }
+.pm-quick-grid { display: flex; flex-direction: column; align-items: center; min-width: 0; }
+.pm-quick { display: flex; box-sizing: border-box; flex: 0 0 auto; width: 30px; height: 30px; margin-bottom: 4px;
+  align-items: center; justify-content: center; border: 1px solid var(--field-line); border-radius: var(--r);
+  background: var(--field); color: var(--text); cursor: pointer; }
+.pm-quick:hover, .pm-quick:focus { border-color: var(--accent); background: var(--hover); color: var(--accent-hi); outline: none; }
+.pm-quick.off { color: var(--faint); opacity: .55; cursor: default; }
+.pm-quick.off:hover { border-color: var(--field-line); background: var(--field); }
+.pm-quick .icon { flex: none; pointer-events: none; }
+.pm-main-menu { flex: 1 1 auto; min-width: 0; box-sizing: border-box; overflow-y: auto; padding: 4px 0; }
+.pm-main-menu .pm-item { box-sizing: border-box; overflow: hidden; padding-left: 2px; padding-right: 6px; }
+.pm-main-menu .pm-label { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+.pm-main-menu .pm-hint { display: none; }
+.pm-group-heading { padding: 5px 10px 3px; color: #9a9d9c; font-size: var(--fs-s); }
+
 /* 图层颜色: colour squares in a menu (the current one framed; "no colour" crossed out in red) */
 .pm-swatches { display: flex; flex-wrap: wrap; padding: 4px 9px; }
 .pm-swatch { position: relative; width: 22px; height: 22px; margin: 3px; border-radius: 3px; border: 2px solid rgba(255, 255, 255, .25); cursor: pointer; }

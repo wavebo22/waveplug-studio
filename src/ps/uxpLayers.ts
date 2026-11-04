@@ -3,12 +3,13 @@
 
 import { log } from "../app/log.ts";
 import { type Bounds, frameThumb, thumbArea } from "../core/layers/thumbs.ts";
+import { openSmartContents } from "../core/layers/smartOpen.ts";
 import type { ToolResult } from "../core/layers/smart.ts";
 import { type LayerAction, type MoveStep, type RawLayer, buildTree, nextLayerAfterDelete, planLayerDeletion, effectsOf, EFFECTS, rawProblem } from "../core/layers/tree.ts";
 import { addEffect, effectItem, hasEffects, removeEffect } from "../core/layers/effects.ts";
 import { type LayerDeleteResult, type LayerTree, type RunOptions, type TargetPart, ADJUSTMENTS } from "./host.ts";
 import { docById, findLayer, modal, onModalDone, play, step } from "./uxpHost.ts";
-import { act, selectLayers } from "./uxpTools.ts";
+import { act, selectLayers, UxpTools } from "./uxpTools.ts";
 import { type MaskKind, maskTransferDescriptors } from "./maskTransfer.ts";
 import { type StagedLayer } from "../core/layers/workbench.ts";
 import { placeWorkbenchLayers } from "./uxpWorkbench.ts";
@@ -1070,8 +1071,47 @@ export class UxpLayerTree implements LayerTree {
       return;
     }
     if (action === "editContents") {
-      // opens the content as its own document, like a double-click on the thumbnail in Photoshop
-      await whenFree(() => modal("WavePlug " + label, async () => { await prepare(); await act({ _obj: "placedLayerEditContents" }); }));
+      // WaveLayer's smart-object double click and its ordinary "编辑内容" menu share
+      // this command. For a PNG-backed smart object, reuse the existing "转为可编辑"
+      // tool to create a PSB FIRST; the tool replaces the layer and its numeric ID.
+      // Opening by the old ID can open the wrong content or fail after conversion.
+      const id = ids[0];
+      if (!Number.isInteger(id)) throw new Error("请选择一个智能对象");
+      const [metadata] = await play([{
+        _obj: "get",
+        _target: [{ _property: "smartObject" }, { _ref: "layer", _id: id }, docRef(docId)],
+        _options: { dialogOptions: "silent" },
+      }]);
+      if (metadata?._obj === "error" || !metadata?.smartObject)
+        throw new Error("无法读取智能对象内容格式，已停止打开以避免错误转换");
+      const file = String(metadata.smartObject.fileReference ?? "");
+      const open = (actualId: number) => whenFree(() => modal("WavePlug " + label, async () => {
+        requireActiveDoc(docId);
+        if (!findLayer(docById(docId).layers, actualId)) throw new Error("待编辑的智能对象图层已不存在");
+        await selectLayers([actualId]);
+        await act({ _obj: "placedLayerEditContents" });
+      }));
+      const result = await openSmartContents(id, file, {
+        convertPng: async () => {
+          // Double click can happen while a different row is selected in native Photoshop.
+          // Restrict the existing batch conversion tool to this exact WaveLayer row.
+          await whenFree(() => modal("WavePlug 选中待转换的 PNG 智能对象", async () => {
+            requireActiveDoc(docId);
+            if (!findLayer(docById(docId).layers, id)) throw new Error("PNG 智能对象图层已不存在");
+            await selectLayers([id]);
+          }));
+          requireActiveDoc(docId);
+          return whenFree(() => new UxpTools().makeEditable());
+        },
+        convertedLayerId: () => {
+          requireActiveDoc(docId);
+          return docById(docId).activeLayers?.[0]?.id ?? null;
+        },
+        open,
+      });
+      log("info", "smart contents opened", JSON.stringify({
+        docId, sourceId: id, actualId: result.layerId, sourceFile: file, pngConverted: result.converted,
+      }));
       return;
     }
     await whenFree(() => step("WavePlug " + label, docId, async () => {

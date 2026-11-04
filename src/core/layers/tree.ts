@@ -512,6 +512,66 @@ export function dropPlan(layers: TreeLayer[], dragIds: number[], targetId: numbe
 }
 
 /**
+ * Project a real layer move into WaveLayer's LOCAL tree, without touching Photoshop.
+ *
+ * Used only as an optimistic visual preview after mouseup. The host stays authoritative:
+ * on modal completion its real layer tree replaces this preview. Each move keeps an entire
+ * subtree together (including hidden AI variants) and changes only the moved root's
+ * parent, with descendant depths adjusted to match.
+ *
+ * Returns null when a plan references missing layers or would make an invalid hierarchy;
+ * in that case the UI simply waits for Photoshop's authoritative tree read.
+ */
+export function previewMoveTree(original: readonly TreeLayer[], steps: readonly MoveStep[]): TreeLayer[] | null {
+  if (!steps.length) return null;
+  const out = original.map(l => ({ ...l }));
+  const block = (id: number): { from: number; to: number } | null => {
+    const from = out.findIndex(l => l.id === id);
+    if (from < 0) return null;
+    let to = from + 1;
+    while (to < out.length && out[to].depth > out[from].depth) to++;
+    return { from, to };
+  };
+  for (const step of steps) {
+    const src = block(step.id), dest = block(step.rel);
+    if (!src || !dest || (dest.from >= src.from && dest.from < src.to)) return null;
+    const sourceRoot = out[src.from], target = out[dest.from];
+    if (step.place === "inside" && (target.kind !== "group" || !!target.ai)) return null;
+    const parentId = step.place === "inside" ? target.id : target.parentId;
+    const targetDepth = step.place === "inside" ? target.depth + 1 : target.depth;
+    const delta = targetDepth - sourceRoot.depth;
+    const subtree = out.slice(src.from, src.to).map((l, i) => ({
+      ...l, depth: l.depth + delta, parentId: i === 0 ? parentId : l.parentId,
+    }));
+    out.splice(src.from, src.to - src.from);
+    const targetBlock = block(step.rel);
+    if (!targetBlock) return null;
+    // MoveStep uses before/after, not above/below; a group is one atomic block.
+    const where = step.place === "before" ? targetBlock.from : step.place === "inside"
+      ? targetBlock.from + 1 : targetBlock.to;
+    out.splice(where, 0, ...subtree);
+  }
+  // Recompute direct child counts and clipping bases for the preview.
+  const byId = new Map(out.map(l => [l.id, l]));
+  for (const l of out) { l.children = 0; l.clipBase = false; }
+  const previous = new Map<number | null, TreeLayer>();
+  const parents: TreeLayer[] = [];
+  for (const l of out) {
+    if (l.depth < 0 || l.depth > parents.length ||
+        (l.depth === 0 && l.parentId !== null) ||
+        (l.depth > 0 && (parents[l.depth - 1]?.id !== l.parentId ||
+          byId.get(l.parentId!)?.kind !== "group"))) return null;
+    parents.length = l.depth;
+    parents.push(l);
+    if (l.parentId !== null) byId.get(l.parentId)!.children++;
+    const prev = previous.get(l.parentId);
+    l.clipBase = !!prev?.clipped && !l.clipped;
+    previous.set(l.parentId, l);
+  }
+  return out;
+}
+
+/**
  * Alt-drag uses copies of the dragged top-level items, leaving the original hierarchy untouched.
  * A step that refers to an earlier dragged source will instead refer to its newly created copy
  * (the Photoshop host maintains that mapping). This keeps multi-selection order when inserting
@@ -571,7 +631,89 @@ export type LayerAction =
   | "moveMask" | "moveVectorMask" | "moveFilterMask";
 
 /** 智能对象 tools offered in the menu (they act on the selection, like on the 工具 page) */
-export type SmartAction = "makeUnique" | "selectSameSource" | "makeEditable" | "unpack";
+export type SmartAction =
+  | "makeUnique" | "selectSameSource" | "makeEditable" | "unpack"
+  | "resetTransform" | "replaceContents" | "exportContents"
+  | "convertTogether" | "convertSeparately";
+/** The smart-object shortcut rail is deliberately separate from the normal layer menu.
+ * Ordinary duplicate/convert/rasterize and content open are already available elsewhere;
+ * content type and shared-source operations are exposed as status chips, not duplicate icons. */
+export type SmartQuickAction = "replaceContents" | "exportContents" | "unpack" | "resetTransform";
+export interface SmartQuickItem {
+  action: SmartQuickAction;
+  label: string;
+  icon: string;
+  hint: string;
+  enabled: boolean;
+  disabledReason?: string;
+}
+export interface SmartStatusChip {
+  label: string;
+  value: string;
+  /** Match WaveLayer's existing lt-tag palette: edit/content/shared/own/link. */
+  tone: "edit" | "content" | "shared" | "own" | "link" | "mask";
+  hint: string;
+  enabled: boolean;
+  disabledReason?: string;
+  action?: SmartAction;
+  doubleAction?: SmartAction;
+}
+export interface SmartQuickPanel {
+  type: SmartStatusChip;
+  shared: SmartStatusChip;
+  actions: SmartQuickItem[];
+}
+/** Derive the status section and non-duplicated shortcuts solely from the already read tree.
+ * No extra Photoshop queries occur when opening the right-click menu.
+ * A type or source chip acts only on one smart object; batch-safe icons stay available
+ * for multiple selections, and the underlying LayerTools handles any mixed selection. */
+export function smartQuickMenu(sel: readonly TreeLayer[], users: ReadonlyMap<string, number>): SmartQuickPanel | null {
+  const smart = sel.filter(l => l.kind === "smartObject");
+  if (!smart.length) return null;
+  const one = sel.length === 1 && smart.length === 1, l = smart[0], data = l.smart;
+  const file = data?.file ?? "";
+  const ext = (file.match(/\.([^./\\]+)$/)?.[1] ?? "").toUpperCase();
+  const linked = !!data?.linked;
+  const editable = !linked && (ext === "PSB" || ext === "PSD");
+  const number = data?.contentId ? Math.max(1, users.get(data.contentId) ?? 1) : 1;
+  const shared = number > 1 && !linked;
+  const reason = "请只选中一个智能对象";
+  const type: SmartStatusChip = {
+    label: "类型", value: one ? (ext || "未知") : "多选",
+    tone: !one ? "mask" : editable ? "edit" : linked ? "link" : "content",
+    enabled: one && !editable,
+    action: one && !editable ? "makeEditable" : undefined,
+    disabledReason: !one ? reason : "当前已是可编辑的 PSB/PSD 智能对象",
+    hint: editable ? "已是可编辑智能对象，无须转换"
+      : "单击将图片、矢量或外部链接的智能对象转换为可编辑 PSB；保持位置和变换",
+  };
+  const source: SmartStatusChip = {
+    label: "链接", value: !one ? "多选" : linked
+      ? "外链" : shared ? "链接×" + number : "独立",
+    tone: !one ? "mask" : linked ? "link" : shared ? "shared" : "own",
+    enabled: one && shared,
+    action: one && shared ? "selectSameSource" : undefined,
+    doubleAction: one && shared && !l.locked ? "makeUnique" : undefined,
+    disabledReason: !one ? reason : linked ? "外部链接不是嵌入内容共享；请先转为 PSB"
+      : !shared ? "当前智能对象没有同源副本" : "图层已锁定，不能断开共享",
+    hint: shared ? (l.locked
+      ? "单击：选中所有同源智能对象；图层已锁定，不能双击断开共享"
+      : "单击：选中所有共用内容的智能对象；快速双击：将当前智能对象断开共享，成为独立内容")
+      : linked ? "内容链接到外部文件，无法执行嵌入内容的独立副本操作"
+      : "该智能对象没有其他共用内容的副本",
+  };
+  const actions: SmartQuickItem[] = [
+    { action: "replaceContents", label: "替换内容…", icon: "soReplace",
+      hint: "替换智能对象内容文件，保留位置/变换；其他同源副本也会变化", enabled: true },
+    { action: "exportContents", label: "导出内容…", icon: "soExport",
+      hint: "导出选中智能对象的原始内容文件，同源内容只导出一次", enabled: true },
+    { action: "unpack", label: "解包图层", icon: "soUnpack",
+      hint: "将智能对象恢复为内部图层，复杂透视可能无法完整还原", enabled: true },
+    { action: "resetTransform", label: "重置变换", icon: "soReset",
+      hint: "恢复智能对象置入时的大小、旋转和变换", enabled: true },
+  ];
+  return { type, shared: source, actions };
+}
 
 export type MenuItem = { label: string; action: LayerAction | SmartAction; enabled: boolean; hint?: string } | "-";
 
@@ -689,6 +831,22 @@ export function lockedByGroup(layers: TreeLayer[]): Set<number> {
     if (l.kind === "group") stack.push({ depth: l.depth, locked: l.lockAll });
   }
   return out;
+}
+
+/** The eye column always has an explicit visible/hidden mark. Lock columns follow a
+ * quieter rule: show their glyph ONLY while that lock is active (directly or inherited).
+ * The 18px cells themselves remain in the row so they can still be clicked to enable a lock
+ * and never shift the layer name/status columns when the icon appears or disappears. */
+export function rowLockIcons(
+  layer: Pick<TreeLayer, "kind" | "lockAll" | "lockPosition" | "lockPixels">,
+  inherited = false,
+): { move: boolean; edit: boolean } {
+  if (layer.kind === "background") return { move: false, edit: false };
+  if (layer.kind === "group") return { move: inherited || layer.lockAll, edit: false };
+  return {
+    move: inherited || layer.lockPosition,
+    edit: inherited || layer.lockPixels,
+  };
 }
 
 /** 混合模式, Photoshop's order and names ("-" separates its groups); 穿透 only for groups. */

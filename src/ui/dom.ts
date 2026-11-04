@@ -90,6 +90,12 @@ const PATHS: Record<string, string> = {
   // the 图层 panel's set, drawn in the manner of Photoshop's Layers panel (outline + solid parts, FILLS):
   // eye, lock, chain, mask (frame + dot), half circle (adjustment / fill), folder, square + plus (new),
   // page + corner (smart object), square with anchors (shape), funnel (smart filters)
+  // Lucide v0.456-inspired clean line icons, matched to the conversation's preview:
+  // refresh-cw / download / layers / rotate-ccw; the four use a 24x24 viewBox below.
+  soReplace: "M3 12a9 9 0 0 1 9-9 9.75 9.75 0 0 1 6.74 2.74L21 8M21 3v5h-5M21 12a9 9 0 0 1-9 9 9.75 9.75 0 0 1-6.74-2.74L3 16M8 16H3v5",
+  soExport: "M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4M7 10l5 5 5-5M12 15V3",
+  soUnpack: "M12 2 2 7l10 5 10-5-10-5M2 17l10 5 10-5M2 12l10 5 10-5",
+  soReset: "M3 11a9 9 0 1 1 9 9 9.75 9.75 0 0 1-6.74-2.74L3 15M3 20v-5h5",
   psEye: "M2 10c2-3.6 4.8-5.5 8-5.5s6 1.9 8 5.5c-2 3.6-4.8 5.5-8 5.5S4 13.6 2 10z",
   psLock: "M7 9V6.8a3 3 0 0 1 6 0V9",
   psLink: "M8.6 11.4l2.8-2.8M9.2 6.6l1.4-1.4a2.8 2.8 0 0 1 4 4l-1.4 1.4M10.8 13.4l-1.4 1.4a2.8 2.8 0 0 1-4-4l1.4-1.4",
@@ -131,10 +137,12 @@ const FILLS: Record<string, string> = {
   psVector: "M8.6 2.6h2.8v2.8H8.6z",
 };
 
+const SMART_LUCIDE = new Set(["soReplace", "soExport", "soUnpack", "soReset"]);
+
 export function icon(name: keyof typeof PATHS | string, size = 14): SVGElement {
   const ns = "http://www.w3.org/2000/svg";
   const svg = document.createElementNS(ns, "svg");
-  svg.setAttribute("viewBox", "0 0 20 20");
+  svg.setAttribute("viewBox", SMART_LUCIDE.has(name) ? "0 0 24 24" : "0 0 20 20");
   svg.setAttribute("width", String(size));
   svg.setAttribute("height", String(size));
   svg.setAttribute("class", "icon");
@@ -142,7 +150,7 @@ export function icon(name: keyof typeof PATHS | string, size = 14): SVGElement {
   p.setAttribute("d", PATHS[name] ?? "");
   p.setAttribute("fill", "none");
   p.setAttribute("stroke", "currentColor");
-  p.setAttribute("stroke-width", "1.5");
+  p.setAttribute("stroke-width", SMART_LUCIDE.has(name) ? "2" : "1.5");
   p.setAttribute("stroke-linecap", "round");
   p.setAttribute("stroke-linejoin", "round");
   svg.append(p);

@@ -9,10 +9,11 @@ import { log } from "../app/log.ts";
 import { resultText } from "../core/layers/smart.ts";
 import { ThumbCache, thumbRetryDelay } from "../core/layers/thumbs.ts";
 import { MULTI_EFFECTS } from "../core/layers/effects.ts";
-import { type Filter, type LayerAction, type LayerKind, type LockKey, type MoveStep, type Row, type SmartAction, type TreeLayer, type Where, BLEND_MODES, ancestors, queryActive, clickSelect, contentUsers, canDropToDelete, canDropMaskOnto, copyPlan, dropPlan, dropZone, filterCounts, isVariantLayer, layerMenu, nextLayerAfterDelete, layerTags, linkPeers, lockPlan, packChips, lockedByGroup, sharedColors, selectionAfterLocalClear, visibleRows } from "../core/layers/tree.ts";
+import { type Filter, type LayerAction, type LayerKind, type LockKey, type MoveStep, type Row, type SmartAction, type TreeLayer, type Where, BLEND_MODES, ancestors, queryActive, clickSelect, contentUsers, canDropToDelete, canDropMaskOnto, copyPlan, dropPlan, previewMoveTree, dropZone, filterCounts, isVariantLayer, layerMenu, smartQuickMenu, nextLayerAfterDelete, layerTags, linkPeers, lockPlan, packChips, lockedByGroup, rowLockIcons, sharedColors, selectionAfterLocalClear, visibleRows } from "../core/layers/tree.ts";
 import { type LayerTools, type LayerTree, type RunOptions, type TargetPart, ADJUSTMENTS } from "../ps/host.ts";
 import { every, h, icon, isShown, listen, replace, setShown } from "./dom.ts";
 import { type PopItem, createPopup } from "./popupMenu.ts";
+import { onSmartTarget } from "./smartTarget.ts";
 import { createSlider } from "./slider.ts";
 import { createWorkbenchSection } from "./workbenchDemo.ts";
 
@@ -102,7 +103,11 @@ const labelTint = (l: TreeLayer, custom?: string) => {
   const n = parseInt(c.slice(1), 16);
   return `rgba(${n >> 16}, ${(n >> 8) & 255}, ${n & 255}, .55)`;
 };
-const SMART_VERB: Record<SmartAction, string> = { makeUnique: "已断开", selectSameSource: "已选中", makeEditable: "已转换", unpack: "已解包" };
+const SMART_VERB: Record<SmartAction, string> = {
+  makeUnique: "已断开", selectSameSource: "已选中", makeEditable: "已转换", unpack: "已解包",
+  resetTransform: "已重置", replaceContents: "已替换", exportContents: "已导出",
+  convertTogether: "已转换", convertSeparately: "已转换",
+};
 const isSmartAction = (a: string): a is SmartAction => a in SMART_VERB;
 
 /** `sub`: the row shows a smart filter (index 0: all of them) of layer `id` */
@@ -119,6 +124,9 @@ export function createLayerTreeView(tree: LayerTree, status: Status, tools?: Lay
   let docId: number | null = null, layers: TreeLayer[] = [], users = new Map<string, number>(), canvas = { width: 0, height: 0 };
   /** the layers by id (kept with `layers`): lookups in drawing and dragging, which run for every row */
   let byId = new Map<number, TreeLayer>();
+  // A local move projection is shown immediately after mouseup. While it is pending,
+  // ignore host reads of the old tree; the completed Photoshop modal event will reconcile it.
+  let orderPreview = false;
   let selected = new Set<number>(), rows: Row[] = [], filter: Filter = "all", anchor: number | null = null;
   /** collapsed groups per document; groups start collapsed */
   const expandedByDoc = new Map<number, Set<number>>();
@@ -250,7 +258,9 @@ export function createLayerTreeView(tree: LayerTree, status: Status, tools?: Lay
     if (zone === "variant") { toggleGroup(id); return; }
     if (zone === "name") setTimeout(() => startRename(id), 0);
     else if (zone === "thumb" && l.artboard) setTimeout(() => openColorMenu(id), 0);
-    else void run(zone === "thumb" ? "layerStyle" : "editContents", [id]);
+    // Photoshop convention: double-click smart-object thumbnail or smart badge.
+    // The host automatically converts PNG content to PSB before opening it.
+    else void run(zone === "thumb" && l.kind !== "smartObject" ? "layerStyle" : "editContents", [id]);
   };
   /** marks presses on `el` as `zone` and takes the native double-click there */
   const zoneOf = (el: HTMLElement, id: number, zone: Zone) => {
@@ -696,16 +706,19 @@ export function createLayerTreeView(tree: LayerTree, status: Status, tools?: Lay
     // groups lock only as a whole (锁定全部), like Photoshop: their switch sits in front of the folder;
     // their layers then show it
     const group = l.kind === "group", bare = l.kind === "background" || group, byGroup = groupLocked.has(l.id);
+    const lockIcons = rowLockIcons(l, byGroup);
     if (group) {
-      replace(r.move, ic("lock", 13));
+      replace(r.move, lockIcons.move ? ic("lock", 13) : null);
       r.move.className = "lt-toggle lt-grouplock" + (byGroup ? " inherit" : l.lockAll ? " on" : "");
       r.move.title = byGroup ? "外面的图层组已全部锁定" : l.lockAll ? "图层组已全部锁定：单击解锁" : "单击锁定整个图层组";
     } else {
-      replace(r.move, bare ? null : ic("move", 13));
+      // Keep the hit area, but show the glyph only while the lock is active,
+      // matching the eye column's hidden state (no permanent idle icon).
+      replace(r.move, lockIcons.move ? ic("move", 13) : null);
       r.move.className = "lt-toggle" + (bare ? "" : byGroup ? " inherit" : l.lockPosition ? " off" : "");
       r.move.title = bare ? "" : byGroup ? "所在的图层组已全部锁定" : l.lockPosition ? "位置已锁定：单击解锁" : "可移动：单击锁定位置";
     }
-    replace(r.edit, bare ? null : ic("brush", 13));
+    replace(r.edit, lockIcons.edit ? ic("brush", 13) : null);
     r.edit.className = "lt-toggle" + (bare ? "" : byGroup ? " inherit" : l.lockPixels ? " off" : "");
     r.edit.title = bare ? "" : byGroup ? "所在的图层组已全部锁定" : l.lockPixels ? "图像像素已锁定：单击解锁" : "可编辑：单击锁定图像像素";
     // a variant layer opens its variations from the ✦ on its picture, not a twisty
@@ -726,7 +739,9 @@ export function createLayerTreeView(tree: LayerTree, status: Status, tools?: Lay
     // one guide line per level, continuing from row to row like Blender's outliner
     replace(r.body, h("div", { class: "lt-indent" }, ...Array.from({ length: l.depth }, () => h("span", { class: "lt-guide" }))), r.twisty,
       l.clipped ? h("div", { class: "lt-clip", title: "剪贴到下方图层（剪贴蒙版）" }, ic("clip", 13)) : null,
-      zoneOf(h("div", { class: "lt-mark" + (pictured ? " has-thumb" : ""), style: pictured ? `width: ${thumbW(l) + 2}px` : "", title: "双击：图层样式；Ctrl+单击：载入选区（+Shift 添加，+Alt 减去）" }, mark), l.id, "thumb"),
+      zoneOf(h("div", { class: "lt-mark" + (pictured ? " has-thumb" : ""), style: pictured ? `width: ${thumbW(l) + 2}px` : "", title: l.kind === "smartObject"
+          ? "双击：编辑智能对象内容（PNG 自动转换为可编辑 PSB）；Ctrl+单击：载入选区"
+          : "双击：图层样式；Ctrl+单击：载入选区（+Shift 添加，+Alt 减去）" }, mark), l.id, "thumb"),
       // as in Photoshop: picture ⛓ layer mask ⛓ vector mask, each chain its mask's link
       l.mask ? maskChain(l, false) : null,
       l.mask ? maskCell(l, maskThumb) : null,
@@ -744,7 +759,7 @@ export function createLayerTreeView(tree: LayerTree, status: Status, tools?: Lay
     const t = l.kind === "smartObject" ? layerTags(l, users).find(x => x.cls === "own" || x.cls === "shared" || x.cls === "link") : undefined;
     if (!t) return null;
     const what = t.cls === "link" ? "外部链接" : t.cls === "shared" ? "共用内容（同色＝同一份内容）" : "内容独立";
-    return zoneOf(h("span", { class: "lt-badge k-smart " + t.cls + (t.cls === "shared" && color !== undefined ? " c" + color : ""), title: `智能对象 · ${what}\n${t.tip}\n双击：打开智能对象内容` },
+    return zoneOf(h("span", { class: "lt-badge k-smart " + t.cls + (t.cls === "shared" && color !== undefined ? " c" + color : ""), title: `智能对象 · ${what}\n${t.tip}\n双击：编辑内容（PNG 自动转可编辑 PSB）` },
       ic(t.cls === "link" ? "external" : "smart", 10)), l.id, "status");
   }
 
@@ -1181,7 +1196,7 @@ export function createLayerTreeView(tree: LayerTree, status: Status, tools?: Lay
   async function refresh() {
     // Ignore intermediate selections and layer states during a batch delete. The delete command
     // itself requests a fresh read after Photoshop commits its history step.
-    if (deleting) return;
+    if (deleting || orderPreview) return;
     // while a row is previewed only the selection changes, and that is ours: read once it ends
     if (peekHold) return;
     if (reading) { again = true; return; }
@@ -1191,7 +1206,7 @@ export function createLayerTreeView(tree: LayerTree, status: Status, tools?: Lay
         again = false;
         const gen = selectGen;
         const r = await tree.read().catch(e => { log("warn", "layer tree read", e); return null; });
-        if (deleting) return; // a read started before deletion must not restore stale selection
+        if (deleting || orderPreview) return; // a pre-move read must not overwrite the optimistic order
         // the list chose layers while this was read: keep its selection and read again afterwards
         const stale = selecting > 0 || gen !== selectGen;
         const before = [...selected].sort().join(",");
@@ -1380,8 +1395,18 @@ export function createLayerTreeView(tree: LayerTree, status: Status, tools?: Lay
       }
       if (isSmartAction(action)) {
         if (!tools) return;
-        const r = await tools[action]();
-        status(resultText(SMART_VERB[action], r), r.done ? "ok" : "error");
+        // Legacy LayerTools reads Photoshop.activeLayers, not the WaveLayer row ID.
+        // Always commit the exact targets before a smart shortcut, particularly the
+        // 链接×N double-click's makeUnique operation.
+        const r = await onSmartTarget(ids, ids => tree.select(doc, ids), async () =>
+          action === "convertTogether" ? tools.convert(false)
+          : action === "convertSeparately" ? tools.convert(true)
+          : action === "resetTransform" ? tools.resetTransform()
+          : action === "replaceContents" ? tools.replaceContents()
+          : action === "exportContents" ? tools.exportContents()
+          : tools[action]());
+        if (r) status(resultText(SMART_VERB[action], r), r.done ? "ok" : "error");
+        else status("已取消", "info");
       } else {
         const result = await tree.run(doc, action, ids, arg,
           action === "delete" ? { ...opts, afterDeleteSelect, artboardIds } : opts);
@@ -1452,6 +1477,9 @@ export function createLayerTreeView(tree: LayerTree, status: Status, tools?: Lay
     pointerX: number; pointerY: number;
     hoverTimer: ReturnType<typeof setTimeout> | null; scroller: ReturnType<typeof setInterval> | null;
   } | null = null;
+  // Mousemove can fire much more often than the active drop target changes. Recompute
+  // the multi-layer drag plan only when the hovered row/zone/Alt state or tree changes.
+  let dragPlanCache: { tree: TreeLayer[]; id: number; where: Where; alt: boolean; plan: MoveStep[] | null } | null = null;
   let suppressClick = false;
   const marker = h("div", { class: "lt-drop" });
   setShown(marker, false);
@@ -1496,8 +1524,16 @@ export function createLayerTreeView(tree: LayerTree, status: Status, tools?: Lay
     }
   });
 
+  // Cached overlay content, size and panel bounds: mousemove should never rebuild DOM
+  // or force a synchronous layout read at 60+ events/second.
+  let ghostContent = "";
+  let ghostSize = { width: 160, height: 26 };
+  let ghostPanel: { left: number; top: number; width: number; height: number } | null = null;
   function startDrag(id: number, e: MouseEvent, sub?: { what: SubDrag; row: number }) {
-    if (e.button !== 0 || docId === null || deleting) return;
+    if (e.button !== 0 || docId === null || deleting || orderPreview) return;
+    ghostContent = "";
+    ghostPanel = null;
+    dragPlanCache = null;
     // the selection when the grabbed layer is part of it, in list order; else just that layer
     const ids = sub ? [] : selected.has(id) ? layers.filter(l => selected.has(l.id)).map(l => l.id) : [id];
     const idx = sub ? sub.row : Math.max(0, rows.findIndex(r => r.layer.id === id));
@@ -1598,15 +1634,26 @@ export function createLayerTreeView(tree: LayerTree, status: Status, tools?: Lay
       act = d.target ? (d.alt ? "+ 复制" : "移动") : "不能放在这里";
       cls = d.target ? (d.alt ? " copy" : "") : " no";
     }
-    replace(ghost, h("span", { class: "lt-ghost-what" }, what), act ? h("span", { class: "lt-ghost-act" }, act) : null);
-    ghost.className = "lt-ghost" + cls;
-    setShown(ghost, true);
-    // Follow the actual pointer through the layer list AND the embedded workbench.
-    const panel = el.getBoundingClientRect();
-    ghost.style.left = Math.max(4, Math.min(d.pointerX - panel.left + 14,
-      el.clientWidth - (ghost.offsetWidth || 160) - 4)) + "px";
-    ghost.style.top = Math.max(4, Math.min(d.pointerY - panel.top + 12,
-      el.clientHeight - (ghost.offsetHeight || 26) - 4)) + "px";
+    const content = what + "\x1f" + act + "\x1f" + cls;
+    if (content !== ghostContent) {
+      replace(ghost, h("span", { class: "lt-ghost-what" }, what), act ? h("span", { class: "lt-ghost-act" }, act) : null);
+      ghost.className = "lt-ghost" + cls;
+      setShown(ghost, true);
+      // Size changes only when the label/action changes, not on every mousemove.
+      ghostSize = { width: ghost.offsetWidth || 160, height: ghost.offsetHeight || 26 };
+      ghostContent = content;
+    }
+    // Its containing panel is stable during a drag. Opening the workbench resets
+    // this cache. UXP does not consistently support 3D transforms, so use the proven
+    // absolute position with NO layout reads after the first measurement.
+    if (!ghostPanel) {
+      const rect = el.getBoundingClientRect();
+      ghostPanel = { left: rect.left, top: rect.top, width: rect.width, height: rect.height };
+    }
+    const x = Math.max(4, Math.min(d.pointerX - ghostPanel.left + 14, ghostPanel.width - ghostSize.width - 4));
+    const y = Math.max(4, Math.min(d.pointerY - ghostPanel.top + 12, ghostPanel.height - ghostSize.height - 4));
+    ghost.style.left = x + "px";
+    ghost.style.top = y + "px";
   }
   function trackDrop() {
     if (!drag || !rows.length) return;
@@ -1628,7 +1675,13 @@ export function createLayerTreeView(tree: LayerTree, status: Status, tools?: Lay
     const l = rows[idx].layer, open = filter !== "all" || !collapsed.has(l.id);
     // a smart filter row stands for "below its smart object"
     const where = rows[idx].filter ? "below" : dropZone(l, frac, open);
-    const plan = drag.alt ? copyPlan(layers, drag.ids, l.id, where) : dropPlan(layers, drag.ids, l.id, where);
+    let plan: MoveStep[] | null;
+    if (dragPlanCache && dragPlanCache.tree === layers && dragPlanCache.id === l.id &&
+        dragPlanCache.where === where && dragPlanCache.alt === drag.alt) plan = dragPlanCache.plan;
+    else {
+      plan = drag.alt ? copyPlan(layers, drag.ids, l.id, where) : dropPlan(layers, drag.ids, l.id, where);
+      dragPlanCache = { tree: layers, id: l.id, where, alt: drag.alt, plan };
+    }
     drag.target = plan ? { id: l.id, where, plan } : null;
     // hovering a closed group opens it after a moment
     const opens = where === "inside" && !open && l.children > 0 && plan ? l.id : null;
@@ -1658,6 +1711,7 @@ export function createLayerTreeView(tree: LayerTree, status: Status, tools?: Lay
       if (Math.abs(m.clientY - drag.y0) < 5 && Math.abs(m.clientX - drag.x0) < 5) return;
       drag.active = true;
       if (!drag.sub) workbench.openForDrag();
+      ghostPanel = null; // opening the workbench may change panel geometry
       list.classList.add("dragging");
       setShown(hit, true);
       setShown(leftDelete, drag.canDelete);
@@ -1682,6 +1736,9 @@ export function createLayerTreeView(tree: LayerTree, status: Status, tools?: Lay
   function endDrag(): typeof drag {
     const d = drag;
     drag = null;
+    ghostContent = "";
+    ghostPanel = null;
+    dragPlanCache = null;
     if (d?.hoverTimer) clearTimeout(d.hoverTimer);
     if (d?.scroller) clearInterval(d.scroller);
     setShown(marker, false);
@@ -1783,18 +1840,34 @@ export function createLayerTreeView(tree: LayerTree, status: Status, tools?: Lay
   });
 
   async function drop(targetId: number, where: Where, plan: MoveStep[], count: number, copy: boolean) {
-    if (docId === null) return;
-    const doc = docId, generation = selectGen;
+    if (docId === null || orderPreview) return;
+    const doc = docId, generation = selectGen, dragStart = Date.now();
+    let visualMs = 0, nativeStart = 0, nativeMs = 0;
     if (where === "inside") expanded().add(targetId);
+    // Native Photoshop operations can take hundreds of milliseconds or longer. Render the
+    // intended order in WaveLayer NOW, without waiting for a modal history step or a full
+    // Photoshop layer-tree read. A result group and all its hidden variants stay atomic.
+    const projected = copy ? null : previewMoveTree(layers, plan);
+    if (projected) {
+      orderPreview = true;
+      layers = projected;
+      byId = new Map(layers.map(l => [l.id, l]));
+      render();
+      visualMs = Date.now() - dragStart;
+    }
+    let needsRestore = false;
     try {
+      // Give the UI a paint opportunity before Photoshop's modal blocks host interaction.
+      if (projected) await new Promise<void>(resolve => setTimeout(resolve, 16));
       // An earlier Ctrl/Shift selection modal must finish before a drag creates clones.
       await selectTail;
       await endPeek(false);
       if (copy) {
         status("正在复制 " + count + " 个图层…", "busy");
-        // Let the UXP panel paint before duplicating a potentially large group or artboard.
         await new Promise<void>(resolve => setTimeout(resolve, 30));
+        nativeStart = Date.now();
         const r = await tree.copy(doc, plan);
+        nativeMs = Date.now() - nativeStart;
         if (r.ids.length && docId === doc && selectGen === generation) {
           selected = new Set(r.ids);
           anchor = r.ids[0];
@@ -1808,17 +1881,28 @@ export function createLayerTreeView(tree: LayerTree, status: Status, tools?: Lay
           ? "已复制 " + r.done + " 个图层；" + r.skipped.slice(0, 2).join("；")
           : "已复制 " + r.done + " 个图层", r.done ? (r.skipped.length ? "info" : "ok") : "error");
       } else {
+        nativeStart = Date.now();
         const r = await tree.move(doc, plan);
-        if (r.skipped.length || r.done < count) status(resultText("已移动", { ...r, unit: "个图层" }), r.done ? "info" : "error");
+        nativeMs = Date.now() - nativeStart;
+        needsRestore = !!r.skipped.length || r.done < count;
+        if (needsRestore) status(resultText("已移动", { ...r, unit: "个图层" }), r.done ? "info" : "error");
         else status("已移动 " + r.done + " 个图层", "ok");
       }
     } catch (e) {
+      needsRestore = true;
       log("warn", copy ? "layer copy" : "layer move", e);
       status((copy ? "复制" : "移动") + "图层失败：" + ((e as Error).message ?? e), "error");
+    } finally {
+      if (nativeStart && !nativeMs) nativeMs = Date.now() - nativeStart;
+      orderPreview = false;
+      log("info", "layer drag performance", JSON.stringify({
+        copy, layers: count, visualMs, nativeMs, totalMs: Date.now() - dragStart,
+        optimistic: !!projected, recovery: needsRestore,
+      }));
+      // Photoshop's modal-done event provides the success refresh. On an error (including
+      // before executeAsModal starts), force a read to undo the speculative visual order.
+      if (needsRestore) void refresh();
     }
-    // The host's onModalDone triggers one debounced view.refresh() after the history
-    // step commits. Do NOT also start an immediate read here: it races the native
-    // move notifications and forces a second 200-400 ms full 200-layer scan.
   }
 
   // ── right-click menu, rename, toolbar ──
@@ -1835,9 +1919,42 @@ export function createLayerTreeView(tree: LayerTree, status: Status, tools?: Lay
     // like Photoshop: right-clicking a layer outside the selection selects it first
     if (!selected.has(id)) void clickRow(id, { ctrl: false, shift: false });
     const sel = selectedLayers(), ids = sel.map(l => l.id);
-    const items: PopItem[] = layerMenu(sel)
-      .filter(m => m === "-" || !isSmartAction(m.action) || tools)
-      .map(m => m === "-" ? m : { label: m.label, hint: m.hint, enabled: m.enabled, run: () => m.action === "rename" ? startRename(ids[0]) : void run(m.action, ids) });
+    // Smart objects use a narrow left rail (status + four unique tools) alongside
+    // Photoshop-like ordinary text commands. Conversion/duplicate remain for regular
+    // layers only, not redundant smart-object icons.
+    const smartClick = byId.get(id)?.kind === "smartObject" && !!tools;
+    const panel = smartClick ? smartQuickMenu(sel, users) : null;
+    const items: PopItem[] = [];
+    if (panel) {
+      const bindStatus = (chip: typeof panel.type) => ({
+        label: chip.label, value: chip.value, tone: chip.tone,
+        hint: chip.hint, enabled: chip.enabled, disabledReason: chip.disabledReason,
+        run: chip.action ? () => { void run(chip.action!, ids); } : undefined,
+        runDouble: chip.doubleAction ? () => { void run(chip.doubleAction!, ids); } : undefined,
+      });
+      items.push({ sidebar: {
+        title: "智能对象",
+        type: bindStatus(panel.type),
+        shared: bindStatus(panel.shared),
+        icons: panel.actions.map(q => ({
+          label: q.label, icon: q.icon, hint: q.hint,
+          enabled: q.enabled, disabledReason: q.disabledReason,
+          run: () => void run(q.action, ids),
+        })),
+      } });
+    }
+    // For a smart-object right-click, old dedicated SmartAction rows are now entirely
+    // represented by the left rail; native "duplicate", "edit contents" and "rasterize"
+    // remain in the RIGHT normal menu rather than duplicating a shortcut icon.
+    const ordinary = layerMenu(sel)
+      .filter(m => m === "-" || (
+        !isSmartAction(m.action) && !(panel && m.action === "convertSmart")
+      ))
+      .map(m => m === "-" ? m : {
+        label: m.label, hint: m.hint, enabled: m.enabled,
+        run: () => m.action === "rename" ? startRename(ids[0]) : void run(m.action, ids),
+      });
+    items.push(...ordinary);
     items.push({ label: "图层颜色…", hint: "眼睛列的底色", enabled: ids.length > 0, run: () => setTimeout(() => openColorMenu(ids[0], ids), 0) });
     // after this mousedown has reached the document (which closes open menus)
     setTimeout(() => popup.open(items, rowBottom(Math.max(0, rows.findIndex(r => r.layer.id === id)))), 0);

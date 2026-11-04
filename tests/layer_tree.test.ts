@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { type MenuItem, type RawLayer, ancestors, effectsOf, isVariantLayer, packChips, rawProblem, buildTree, clickSelect, contentUsers, deleteTargets, nextLayerAfterDelete, planLayerDeletion, canDropToDelete, canDropMaskOnto, copyPlan, dropPlan, dropZone, filterCounts, layerMenu, layerTags, linkPeers, lockPlan, lockedByGroup, sharedColors, selectionAfterLocalClear, visibleRows } from "../src/core/layers/tree.ts";
+import { type MenuItem, type RawLayer, ancestors, effectsOf, isVariantLayer, packChips, rawProblem, buildTree, clickSelect, contentUsers, deleteTargets, nextLayerAfterDelete, planLayerDeletion, canDropToDelete, canDropMaskOnto, copyPlan, dropPlan, previewMoveTree, dropZone, filterCounts, layerMenu, layerTags, linkPeers, lockPlan, lockedByGroup, rowLockIcons, sharedColors, selectionAfterLocalClear, visibleRows } from "../src/core/layers/tree.ts";
 import { ThumbCache, frameThumb, thumbArea } from "../src/core/layers/thumbs.ts";
 
 const raw = (id: number, name: string, kind: number, extra: Partial<RawLayer> = {}): RawLayer =>
@@ -37,6 +37,24 @@ test("图层列表: status cells", () => {
   const linked = buildTree([raw(1, "L", 5, { contentId: "x", linked: true, file: "logo.ai" })]);
   assert.deepEqual(layerTags(linked[0], contentUsers(linked)).map(x => x.text), ["链接", "矢量"]);
   assert.deepEqual(filterCounts(t, users), { shared: 2, uneditable: 1, ai: 1 });
+});
+
+test("行内移动/编辑锁图标: 仅锁定或继承锁定时显示，未开启时隐藏", () => {
+  const tree = buildTree([
+    raw(1, "普通未锁定", 1),
+    raw(2, "仅锁位置", 1, { lockPosition: true }),
+    raw(3, "仅锁像素", 1, { lockPixels: true }),
+    raw(4, "全锁组", 7, { lockAll: true }), raw(5, "组内图层", 1), end(),
+    raw(6, "背景", 12, { locked: true }),
+  ]);
+  const byId = new Map(tree.map(l => [l.id, l]));
+  const inherited = lockedByGroup(tree);
+  assert.deepEqual(rowLockIcons(byId.get(1)!, false), { move: false, edit: false });
+  assert.deepEqual(rowLockIcons(byId.get(2)!, false), { move: true, edit: false });
+  assert.deepEqual(rowLockIcons(byId.get(3)!, false), { move: false, edit: true });
+  assert.deepEqual(rowLockIcons(byId.get(4)!, inherited.has(4)), { move: true, edit: false });
+  assert.deepEqual(rowLockIcons(byId.get(5)!, inherited.has(5)), { move: true, edit: true });
+  assert.deepEqual(rowLockIcons(byId.get(6)!, false), { move: false, edit: false });
 });
 
 test("图层列表: collapsed groups hide their contents, filters keep the groups of matches", () => {
@@ -220,6 +238,46 @@ test("拖动: move plans keep the dragged layers' order", () => {
   assert.deepEqual(dropPlan(t, [1, 24], 30, "above"), [{ id: 1, rel: 20, place: "after" }, { id: 24, rel: 1, place: "after" }]);
   // Photoshop lists the background as a pixel layer with background: true
   assert.equal(buildTree([raw(5, "背景", 1, { background: true })])[0].kind, "background");
+});
+
+test("拖动视觉预览: AI 变体组作为整体移动，原树不可变", () => {
+  const t = buildTree(doc()), original = t.map(l => [l.id, l.parentId, l.depth, l.children]);
+  const plan = dropPlan(t, [1], 10, "below");
+  assert.ok(plan);
+  const result = previewMoveTree(t, plan);
+  assert.ok(result);
+  assert.deepEqual(result.map(l => l.id), [10, 11, 12, 1, 20, 21, 22, 23, 24, 30]);
+  assert.deepEqual(result.find(l => l.id === 10)?.ai?.ids, [11, 12]);
+  assert.deepEqual(result.map(l => [l.id, l.parentId, l.depth]).slice(0, 4), [
+    [10, null, 0], [11, 10, 1], [12, 10, 1], [1, null, 0],
+  ]);
+  assert.deepEqual(t.map(l => [l.id, l.parentId, l.depth, l.children]), original);
+  // Moving the group means all its hidden variants go too.
+  const group = previewMoveTree(t, dropPlan(t, [10], 20, "inside")!);
+  assert.ok(group);
+  assert.deepEqual(group.map(l => l.id), [1, 20, 10, 11, 12, 21, 22, 23, 24, 30]);
+  assert.equal(group.find(l => l.id === 10)?.parentId, 20);
+  assert.equal(group.find(l => l.id === 11)?.depth, 2);
+  assert.equal(group.find(l => l.id === 20)?.children, 4);
+});
+
+test("拖动视觉预览: 多选重排、跨组移动及失败预览均不影响源树", () => {
+  const t = buildTree(doc());
+  const multi = previewMoveTree(t, dropPlan(t, [24, 21], 1, "below")!);
+  assert.ok(multi);
+  assert.deepEqual(multi.map(l => l.id), [1, 21, 24, 10, 11, 12, 20, 22, 23, 30]);
+  assert.equal(multi.find(l => l.id === 20)?.children, 1);
+  assert.equal(multi.find(l => l.id === 21)?.parentId, null);
+  const nested = previewMoveTree(t, dropPlan(t, [22], 1, "above")!);
+  assert.ok(nested);
+  assert.deepEqual(nested.map(l => l.id).slice(0, 4), [22, 23, 1, 10]);
+  assert.equal(nested.find(l => l.id === 22)?.depth, 0);
+  assert.equal(nested.find(l => l.id === 23)?.depth, 1);
+  assert.equal(nested.find(l => l.id === 20)?.children, 2);
+  assert.equal(previewMoveTree(t, [{ id: 10, rel: 11, place: "before" }]), null);
+  assert.equal(previewMoveTree(t, [{ id: 11, rel: 10, place: "inside" }]), null);
+  assert.equal(previewMoveTree(t, [{ id: 1, rel: 999, place: "after" }]), null);
+  assert.deepEqual(t.map(l => l.id), [1, 10, 11, 12, 20, 21, 22, 23, 24, 30]);
 });
 
 test("Alt 拖动: 普通单图层/多选复制，保留原层及其排序", () => {
