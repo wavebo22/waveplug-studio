@@ -28,6 +28,9 @@
 
 ## 3. 备份位置
 
+> **2026-11-06 更新**：下面的 `backups/` 快照目录和 ZIP 已按用户要求删除。实验的全部源码仍可从 Git 提交 `02eb3c9` 取回（例如 `git show 02eb3c9:src/core/layers/alphaOutline.ts`）；只有当时的测试 exe 和 POC 日志副本不再保留。悬停功能后来改为「悬停边框」，见 `docs/LAYER_PANEL_HANDOFF.md` 第 5 节。
+
+
 完整文件快照目录：
 
 F:\waveplug\studio\backups\hover-outline-poc-2026-11-06_0518
