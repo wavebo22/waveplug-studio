@@ -28,7 +28,9 @@ export type OverlayCommand =
    *  no surface is up), gone after `ms` or a click */
   | { type: "toast"; title: string; text: string; view: ScreenRect | null; ms: number }
   /** Start or reconcile the configured local ComfyUI process under the native helper. */
-  | { type: "manage-comfy"; path: string; base: string; closeWithPhotoshop: boolean; restartIfNeeded: boolean; disableBrowser: boolean; startIfMissing: boolean }
+  | { type: "manage-comfy"; path: string; base: string; closeWithPhotoshop: boolean; restartIfNeeded: boolean; disableBrowser: boolean; startIfMissing: boolean; restart?: boolean }
+  /** Start the helper's exe again and quit the running copy; the ComfyUI it started keeps running. */
+  | { type: "restart-helper" }
   /** A normal WaveLayer row began dragging; the native surface tracks the global cursor until release. */
   | { type: "layer-drag-start"; docId: number; layers: { layerId: number; name: string }[]; totalCount: number; thumb?: string }
   /** Escape / cancellation: stop the external reference drop without changing the layer. */
@@ -40,7 +42,7 @@ export type OverlayCommand =
 /** helper → plugin. `action` is the surface's own (checked by that surface). */
 export type ComfyManagerStatus = {
   type: "comfy-status";
-  state: "not-configured" | "path-missing" | "remote" | "starting" | "ready" | "already-running" | "managed-running" | "restart-required" | "autostart-disabled" | "failed" | "timeout";
+  state: "not-configured" | "path-missing" | "remote" | "starting" | "ready" | "already-running" | "managed-running" | "restart-required" | "autostart-disabled" | "external-running" | "failed" | "timeout";
   message: string;
   owned: boolean;
 };
@@ -58,7 +60,7 @@ export function parseOverlayEvent(text: string): OverlayEvent | null {
   if (m?.type === "ready" && typeof m.version === "string") return { type: "ready", version: m.version };
   if (m?.type === "comfy-status"
     && typeof m.state === "string"
-    && ["not-configured", "path-missing", "remote", "starting", "ready", "already-running", "managed-running", "restart-required", "autostart-disabled", "failed", "timeout"].includes(m.state)
+    && ["not-configured", "path-missing", "remote", "starting", "ready", "already-running", "managed-running", "restart-required", "autostart-disabled", "external-running", "failed", "timeout"].includes(m.state)
     && typeof m.message === "string"
     && typeof m.owned === "boolean") {
     return { type: "comfy-status", state: m.state, message: m.message, owned: m.owned };

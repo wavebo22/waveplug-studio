@@ -89,7 +89,12 @@ pub enum Command {
         disable_browser: bool,
         #[serde(rename = "startIfMissing", default = "default_close_comfy")]
         start_if_missing: bool,
+        /// 重启: stop the ComfyUI this helper started and start it again (never an external one)
+        #[serde(default)]
+        restart: bool,
     },
+    /// Settings → 重启外置框架: start this exe again and quit, keeping the managed ComfyUI.
+    RestartHelper,
 }
 
 fn default_close_comfy() -> bool {
@@ -205,6 +210,11 @@ mod tests {
             }
             other => panic!("{other:?}"),
         }
+        assert!(matches!(parse(r#"{"type":"restart-helper"}"#), Some(Command::RestartHelper)));
+        assert!(matches!(
+            parse(r#"{"type":"manage-comfy","path":"","base":"http://127.0.0.1:8188","restart":true}"#),
+            Some(Command::ManageComfy { restart: true, .. })
+        ));
         assert!(matches!(
             parse(r#"{"type":"hover-frame","rect":null}"#),
             Some(Command::HoverFrame { rect: None, clip: None })
@@ -219,9 +229,11 @@ mod tests {
                 restart_if_needed,
                 disable_browser,
                 start_if_missing,
+                restart,
             }) => {
                 assert!(disable_browser);
                 assert!(start_if_missing);
+                assert!(!restart, "restart defaults to off");
                 assert_eq!(path, "J:\\ComfyUI\\run.bat");
                 assert_eq!(base, "http://127.0.0.1:8188");
                 assert!(!close_with_photoshop);

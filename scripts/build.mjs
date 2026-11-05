@@ -1,6 +1,6 @@
 // Builds the UXP plugin into dist/plugin and the browser preview into dist/preview.
 import { build, context } from "esbuild";
-import { cpSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { cpSync, existsSync, mkdirSync, readdirSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
 
 const watch = process.argv.includes("--watch");
 const BUILT_AT = new Date().toISOString().slice(5, 16).replace("T", " ");
@@ -39,9 +39,25 @@ cpSync("dev/loader.js", "dist/dev/loader.js");
 
 // The native helper is launched by UXP through launchProcess permission.
 // Keep a copy beside each manifest so release plugins can resolve it with getPluginFolder().
+// A copy that is running can't be overwritten: rename it out of the way first (it restarts into
+// the new file by itself and removes the renamed one, native/overlay/src/life.rs).
+const putHelper = to => {
+  const from = "dist/waveplug-overlay.exe";
+  if (existsSync(to)) {
+    const a = statSync(from), b = statSync(to);
+    if (a.size === b.size && a.mtimeMs <= b.mtimeMs) return;
+    renameSync(to, to.replace(/\.exe$/, `.old-${Date.now()}.exe`));
+  }
+  cpSync(from, to);
+};
 if (existsSync("dist/waveplug-overlay.exe")) {
-  cpSync("dist/waveplug-overlay.exe", "dist/plugin/waveplug-overlay.exe");
-  cpSync("dist/waveplug-overlay.exe", "dist/dev/waveplug-overlay.exe");
+  for (const to of ["dist/plugin/waveplug-overlay.exe", "dist/dev/waveplug-overlay.exe"]) {
+    try { putHelper(to); } catch (e) { console.warn(`helper not copied to ${to}: ${e.message}`); }
+  }
+}
+// renamed copies no longer running (a running one can't be removed: it goes next time)
+for (const dir of ["dist", "dist/plugin", "dist/dev"]) {
+  for (const f of readdirSync(dir)) if (/^waveplug-overlay\.old-.*\.exe$/i.test(f)) { try { rmSync(`${dir}/${f}`); } catch { /* still running */ } }
 }
 
 const targets = [

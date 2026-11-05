@@ -59,6 +59,7 @@ fn on_command(c: Command) {
         restart_if_needed,
         disable_browser,
         start_if_missing,
+        restart,
     } = &c
     {
         crate::comfy::manage(
@@ -68,7 +69,13 @@ fn on_command(c: Command) {
             *restart_if_needed,
             *disable_browser,
             *start_if_missing,
+            *restart,
         );
+        return;
+    }
+    if let Command::RestartHelper = c {
+        // off the server thread: the restart waits for the new copy before quitting
+        std::thread::spawn(|| crate::life::restart("requested by the plugin"));
         return;
     }
     // the hover frame is its own window: nothing for the UI thread to draw
@@ -108,6 +115,7 @@ fn on_disconnect() {
 
 pub fn run() {
     crate::log::init();
+    crate::life::init();
     let list = surfaces();
     let first = list
         .first()
@@ -136,7 +144,20 @@ pub fn run() {
             theme::install(&cc.egui_ctx);
             let _ = CTX.set(cc.egui_ctx.clone());
             // a second copy finds the port taken: quit
-            if server::start(on_command, on_disconnect).is_err() {
+            // a restarting previous copy still holds the port for a moment
+            let mut bound = server::start(on_command, on_disconnect);
+            let mut tries = if crate::life::replacing() { 60 } else { 0 };
+            while bound.is_err() && tries > 0 {
+                std::thread::sleep(Duration::from_millis(250));
+                bound = server::start(on_command, on_disconnect);
+                tries -= 1;
+            }
+            if bound.is_err() {
+                crate::log::line("port in use: another helper is running; quitting");
+                // a ComfyUI taken over from the previous copy must outlive this one
+                if crate::life::replacing() {
+                    crate::comfy::handover();
+                }
                 cc.egui_ctx.send_viewport_cmd(ViewportCommand::Close);
             }
             #[cfg(windows)]
@@ -208,6 +229,7 @@ impl Host {
             match c {
                 Command::ManageComfy { .. } => {} // handled on the server thread, never enters the UI queue
                 Command::HoverFrame { .. } => {} // frame.rs, on its own thread
+                Command::RestartHelper => {}     // life.rs, on its own thread
                 Command::Hello => {
                     self.revs.clear();
                     for surface in &mut self.surfaces {

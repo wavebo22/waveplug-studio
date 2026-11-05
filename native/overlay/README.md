@@ -6,7 +6,7 @@ UXP 插件面板里的东西画不出面板边界。这个 Windows 小程序和�
 
 ## 怎么用
 
-1. **编译**（Windows 主机）：装好 Rust（<https://rustup.rs>，按提示装 Visual Studio C++ 生成工具），双击 `build.cmd`。它先跑测试，再编译，结束正在运行的旧版本，复制到 `dist\waveplug-overlay.exe` 并启动新版本。
+1. **编译**（Windows 主机）：装好 Rust（<https://rustup.rs>，按提示装 Visual Studio C++ 生成工具），双击 `build.cmd`。它先跑测试，再编译，把新的 exe 放进 `dist`、`dist\plugin`、`dist\dev`（正在运行的旧 exe 先改名为 `waveplug-overlay.old-*.exe`，不结束它）。正在运行的外置框架几秒内会自动换成新版本，它启动的 ComfyUI 不会被关闭。
 2. **插件**：在 PS 开发版面板点 ⟳。日志 `reports/uxp_runtime.log` 里出现 `overlay connected` / `overlay ready 0.2.0` 就连上了。
 3. 在 PS 里画一个选区：画布右下角出现外置生成面板；取消选区就消失。
 

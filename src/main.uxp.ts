@@ -74,23 +74,21 @@ const services: Services = {
     catch (e) { return (e as Error).message; }
   },
   async launchOverlay() {
+    // The exe itself, never a .cmd: a GUI program shows no terminal, and nothing else has to stay
+    // in step with it. (Until 11-06 the dev build started dist\waveplug-overlay-dev.cmd, which
+    // the hover POC rollback removed, so the helper silently stopped starting with Photoshop.)
+    // Dev: build.cmd's dist\waveplug-overlay.exe (its log goes to reports\). Release: the copy
+    // packed beside the manifest. Both paths stay the same across updates; the files are swapped
+    // in place (see native/overlay/src/life.rs), so Photoshop's launch permission keeps applying.
+    let path = "";
     try {
-      // The dev loader reads JS from F:\\waveplug\\studio\\dist\\plugin; its helper is
-      // built beside dist/. Release packages carry the helper beside the UXP manifest.
-      let path: string;
-      if (DEV) {
-        path = "F:\\waveplug\\studio\\dist\\waveplug-overlay-dev.cmd";
-      } else {
-        const folder = await fs.getPluginFolder();
-        const helper = await folder.getEntry("waveplug-overlay.exe");
-        path = helper.nativePath;
-      }
-      const r = await uxp.shell.openPath(
-        path,
-        "启动 WavePlug 本机浮动面板及 ComfyUI 连接管理器。外置面板不显示命令行窗口。",
-      );
-      return r ? String(r) : null;
-    } catch (e) { return (e as Error).message; }
+      if (DEV) path = "F:\\waveplug\\studio\\dist\\waveplug-overlay.exe";
+      else path = (await (await fs.getPluginFolder()).getEntry("waveplug-overlay.exe")).nativePath;
+    } catch (e) { return "插件文件夹里没有 waveplug-overlay.exe：" + (e as Error).message; }
+    try {
+      const r = await uxp.shell.openPath(path, "启动 WavePlug 外置框架（外置面板和 ComfyUI 进程管理，不显示命令行窗口）。");
+      return r ? `${String(r)}（${path}）` : null;
+    } catch (e) { return `${(e as Error).message}（${path}）`; }
   },
   async pickJson() {
     const f = await fs.getFileForOpening({ types: ["json"] });

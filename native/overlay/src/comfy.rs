@@ -1,6 +1,11 @@
 // Owns only the ComfyUI process tree started by this WavePlug helper.
 // A Windows Job Object gives the helper deterministic cleanup when Photoshop exits or the
 // helper is terminated. Existing ComfyUI instances are detected and never taken over.
+//
+// When the helper restarts itself (its exe was updated, or the plugin asked), the ComfyUI it
+// started is handed to the new copy instead of being killed: the job is named, its details go to
+// %LOCALAPPDATA%\WavePlug\comfy_managed.json, and the new copy opens the job by name while the
+// old one still holds it (a job's name goes away with its last handle). See life.rs.
 use std::path::Path;
 use std::sync::Mutex;
 use std::thread;
@@ -24,8 +29,8 @@ mod platform {
     use windows_sys::Win32::System::Console::{AttachConsole, FreeConsole, GetConsoleWindow};
     use windows_sys::Win32::System::JobObjects::{
         AssignProcessToJobObject, CreateJobObjectW, JobObjectExtendedLimitInformation,
-        SetInformationJobObject, TerminateJobObject, JOBOBJECT_EXTENDED_LIMIT_INFORMATION,
-        JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
+        OpenJobObjectW, SetInformationJobObject, TerminateJobObject,
+        JOBOBJECT_EXTENDED_LIMIT_INFORMATION, JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
     };
     use windows_sys::Win32::System::Threading::{
         OpenProcess, WaitForSingleObject, CREATE_NEW_CONSOLE, CREATE_NO_WINDOW,
@@ -34,6 +39,7 @@ mod platform {
     use windows_sys::Win32::UI::WindowsAndMessaging::ShowWindow;
 
     const SYNCHRONIZE: u32 = 0x0010_0000;
+    const JOB_OBJECT_ALL_ACCESS: u32 = 0x001F_001F;
     #[cfg(test)]
     const WAIT_OBJECT_0: u32 = 0;
     const WAIT_TIMEOUT: u32 = 258;
@@ -44,6 +50,8 @@ mod platform {
         pid: u32,
         process: isize,
         job: isize,
+        /// the job's kernel name, so a restarted helper can take it over
+        job_name: String,
         close_with_photoshop: bool,
         hidden_terminal: bool,
     }
@@ -68,6 +76,7 @@ mod platform {
     }
 
     fn close_managed(item: Managed, reason: &str) {
+        forget();
         // KILL_ON_JOB_CLOSE is set only when the user opted into Photoshop-linked lifetime.
         // With it cleared, closing our handle deliberately leaves ComfyUI running.
         unsafe {
@@ -82,6 +91,110 @@ mod platform {
             "ComfyUI manager released pid={} close_with_photoshop={} reason={reason}",
             item.pid, item.close_with_photoshop
         ));
+    }
+
+    fn state_path() -> Option<std::path::PathBuf> {
+        let dir = std::path::PathBuf::from(std::env::var_os("LOCALAPPDATA")?).join("WavePlug");
+        let _ = std::fs::create_dir_all(&dir);
+        Some(dir.join("comfy_managed.json"))
+    }
+
+    /// Writes down the managed instance for a restarted helper to take over.
+    fn remember(item: &Managed) {
+        let Some(p) = state_path() else { return };
+        let v = serde_json::json!({
+            "pid": item.pid, "jobName": item.job_name, "base": item.base, "path": item.path,
+            "closeWithPhotoshop": item.close_with_photoshop, "hiddenTerminal": item.hidden_terminal,
+        });
+        let tmp = p.with_extension("json.new");
+        if std::fs::write(&tmp, v.to_string()).is_ok() {
+            let _ = std::fs::rename(&tmp, &p);
+        }
+    }
+
+    fn forget() {
+        if let Some(p) = state_path() {
+            let _ = std::fs::remove_file(p);
+        }
+    }
+
+    /// The managed instance is this one from now on (and is written down).
+    fn put(item: Managed) {
+        remember(&item);
+        if let Ok(mut slot) = MANAGED.lock() {
+            *slot = Some(item);
+        }
+    }
+
+    /// The helper is about to restart: keep ComfyUI alive through the switch (kill-on-close off,
+    /// the new copy turns it back on) and leave its details for the new copy. Handles stay open
+    /// until this process exits, so the job's name is still there when the new copy opens it.
+    pub fn handover() {
+        let item = MANAGED.lock().ok().and_then(|mut slot| slot.take());
+        let Some(item) = item else {
+            forget();
+            return;
+        };
+        if !process_alive(item.process) {
+            close_managed(item, "process exited before helper restart");
+            return;
+        }
+        let _ = set_job_lifetime(item.job, false);
+        remember(&item);
+        crate::log::line(format!(
+            "ComfyUI pid={} handed over to the restarted helper (job {})",
+            item.pid, item.job_name
+        ));
+        // deliberately leaked: closed when this process exits, after the new copy took the job
+        std::mem::forget(item);
+    }
+
+    /// At startup: take over the ComfyUI a previous copy of the helper started, if it still runs.
+    pub fn adopt() {
+        let Some(p) = state_path() else { return };
+        let Ok(text) = std::fs::read_to_string(&p) else { return };
+        let Ok(v) = serde_json::from_str::<serde_json::Value>(&text) else {
+            forget();
+            return;
+        };
+        let pid = v["pid"].as_u64().unwrap_or(0) as u32;
+        let job_name = v["jobName"].as_str().unwrap_or("").to_string();
+        let close_with_photoshop = v["closeWithPhotoshop"].as_bool().unwrap_or(true);
+        let wide: Vec<u16> = job_name.encode_utf16().chain(Some(0)).collect();
+        let job = if job_name.is_empty() {
+            std::ptr::null_mut()
+        } else {
+            unsafe { OpenJobObjectW(JOB_OBJECT_ALL_ACCESS, 0, wide.as_ptr()) }
+        };
+        let access = PROCESS_TERMINATE | PROCESS_QUERY_LIMITED_INFORMATION | SYNCHRONIZE;
+        let process = if pid == 0 { std::ptr::null_mut() } else { unsafe { OpenProcess(access, 0, pid) } };
+        if job.is_null() || process.is_null() || !process_alive(process as isize) {
+            unsafe {
+                if !job.is_null() {
+                    CloseHandle(job);
+                }
+                if !process.is_null() {
+                    CloseHandle(process);
+                }
+            }
+            crate::log::line(format!("ComfyUI handover not taken: pid={pid} job={job_name}"));
+            forget();
+            return;
+        }
+        let _ = set_job_lifetime(job as isize, close_with_photoshop);
+        crate::log::line(format!(
+            "ComfyUI pid={pid} taken over from the previous helper close_with_photoshop={close_with_photoshop}"
+        ));
+        put(Managed {
+            base: v["base"].as_str().unwrap_or("").to_string(),
+            path: v["path"].as_str().unwrap_or("").to_string(),
+            pid,
+            process: process as isize,
+            job: job as isize,
+            job_name,
+            close_with_photoshop,
+            hidden_terminal: v["hiddenTerminal"].as_bool().unwrap_or(close_with_photoshop),
+        });
     }
 
     fn set_job_lifetime(job: isize, close_with_photoshop: bool) -> Result<(), String> {
@@ -300,7 +413,16 @@ mod platform {
         }
         let mut cmd = command_for(path, disable_browser)?;
 
-        let job = unsafe { CreateJobObjectW(null(), null()) };
+        let job_name = format!(
+            "Local\\WavePlugComfyUI-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_millis())
+                .unwrap_or(0)
+        );
+        let job_wide: Vec<u16> = job_name.encode_utf16().chain(Some(0)).collect();
+        let job = unsafe { CreateJobObjectW(null(), job_wide.as_ptr()) };
         if job.is_null() {
             return Err(format!(
                 "无法创建 ComfyUI 进程组（Windows 错误 {}）",
@@ -376,11 +498,13 @@ mod platform {
             pid,
             process: process as isize,
             job: job_id,
+            job_name,
             close_with_photoshop,
             hidden_terminal: hidden,
         })
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn manage_inner(
         path: String,
         base: String,
@@ -388,11 +512,43 @@ mod platform {
         restart_if_needed: bool,
         disable_browser: bool,
         start_if_missing: bool,
+        restart: bool,
     ) {
         let reconcile = RECONCILE.lock().ok();
         // Reconcile an instance previously started by this helper before probing for external
         // instances. This is what makes reconnects and repeated ⟳ idempotent.
         let previous = MANAGED.lock().ok().and_then(|mut slot| slot.take());
+        // 重启 (the settings button): stop the instance this helper started, then start as usual
+        let start_if_missing = start_if_missing || restart;
+        let previous = match previous {
+            Some(item) if restart && process_alive(item.process) => {
+                if probe(&item.base) && !queue_idle(&item.base) {
+                    status("restart-required", "ComfyUI 正在生成任务，为免中断暂不重启；任务结束后再点「重启」。", true);
+                    put(item);
+                    return;
+                }
+                status("starting", "正在重启 ComfyUI……", true);
+                let old = item.base.clone();
+                unsafe {
+                    TerminateJobObject(item.job as _, 0);
+                }
+                close_managed(item, "restart requested");
+                let deadline = Instant::now() + Duration::from_secs(12);
+                while probe(&old) && Instant::now() < deadline {
+                    thread::sleep(Duration::from_millis(250));
+                }
+                None
+            }
+            None if restart && probe(&base) => {
+                status(
+                    "external-running",
+                    "这个 ComfyUI 不是 WavePlug 启动的，无法从这里重启；请在它自己的终端里关闭后点「启动」。",
+                    false,
+                );
+                return;
+            }
+            other => other,
+        };
         if let Some(mut item) = previous {
             if process_alive(item.process) && item.base == base {
                 let needs_console_change = item.hidden_terminal != close_with_photoshop;
@@ -429,9 +585,7 @@ mod platform {
                         next.base = base.clone();
                         let process = next.process;
                         let pid = next.pid;
-                        if let Ok(mut slot) = MANAGED.lock() {
-                            *slot = Some(next);
-                        }
+                        put(next);
                         drop(reconcile);
                         let deadline = Instant::now() + Duration::from_secs(180);
                         while Instant::now() < deadline {
@@ -462,9 +616,7 @@ mod platform {
                     }
                     if let Err(e) = set_job_lifetime(item.job, false) {
                         status("failed", e, true);
-                        if let Ok(mut slot) = MANAGED.lock() {
-                            *slot = Some(item);
-                        }
+                        put(item);
                         return;
                     }
                     item.close_with_photoshop = false;
@@ -473,9 +625,7 @@ mod platform {
                         "ComfyUI 正在生成任务，暂不重启以免中断。已切换为不随 Photoshop 关闭；任务结束后再次点击「启动」即可让终端显示。",
                         true,
                     );
-                    if let Ok(mut slot) = MANAGED.lock() {
-                        *slot = Some(item);
-                    }
+                    put(item);
                     return;
                 }
 
@@ -483,9 +633,7 @@ mod platform {
                 if changed {
                     if let Err(e) = set_job_lifetime(item.job, close_with_photoshop) {
                         status("failed", e, true);
-                        if let Ok(mut slot) = MANAGED.lock() {
-                            *slot = Some(item);
-                        }
+                        put(item);
                         return;
                     }
                     item.close_with_photoshop = close_with_photoshop;
@@ -518,9 +666,7 @@ mod platform {
                     };
                     status("managed-running", message, true);
                 }
-                if let Ok(mut slot) = MANAGED.lock() {
-                    *slot = Some(item);
-                }
+                put(item);
                 return;
             }
             if process_alive(item.process) {
@@ -533,9 +679,7 @@ mod platform {
                     ),
                     true,
                 );
-                if let Ok(mut slot) = MANAGED.lock() {
-                    *slot = Some(item);
-                }
+                put(item);
                 return;
             }
             close_managed(item, "process exited");
@@ -622,9 +766,7 @@ mod platform {
         item.base = base.clone();
         let process = item.process;
         let pid = item.pid;
-        if let Ok(mut slot) = MANAGED.lock() {
-            *slot = Some(item);
-        }
+        put(item);
         drop(reconcile);
 
         let deadline = Instant::now() + Duration::from_secs(180);
@@ -653,6 +795,7 @@ mod platform {
         restart_if_needed: bool,
         disable_browser: bool,
         start_if_missing: bool,
+        restart: bool,
     ) {
         thread::spawn(move || {
             manage_inner(
@@ -662,6 +805,7 @@ mod platform {
                 restart_if_needed,
                 disable_browser,
                 start_if_missing,
+                restart,
             )
         });
     }
@@ -804,7 +948,7 @@ mod platform {
 }
 
 #[cfg(windows)]
-pub use platform::{manage, photoshop_closed};
+pub use platform::{adopt, handover, manage, photoshop_closed};
 
 #[cfg(not(windows))]
 pub fn manage(
@@ -814,6 +958,7 @@ pub fn manage(
     _restart_if_needed: bool,
     _disable_browser: bool,
     _start_if_missing: bool,
+    _restart: bool,
 ) {
     server::send(&Event::ComfyStatus {
         state: "remote".into(),
@@ -824,3 +969,9 @@ pub fn manage(
 
 #[cfg(not(windows))]
 pub fn photoshop_closed() {}
+
+#[cfg(not(windows))]
+pub fn handover() {}
+
+#[cfg(not(windows))]
+pub fn adopt() {}

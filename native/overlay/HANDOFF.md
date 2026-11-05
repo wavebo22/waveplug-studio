@@ -68,7 +68,14 @@ src/ui/app.ts  startOverlay()      生成页提供状态和     src/panel/genera
 | `{"type":"action","panel":"generate","action":{"kind":"set-mode","mode":"extract"}}` | 用户操作；`action` 的格式由介面自己定、自己检查 |
 | `{"type":"view-request","panel":"generate"}` | PS 窗口移动 / 改变大小，请插件重新算画布范围并再发 `show` |
 
-### 3.1 ComfyUI 与 Photoshop 生命周期（2026-11-05 新增）
+### 3.1 ComfyUI 与 Photoshop 生命周期（2026-11-05 新增，11-06 重做启动部分）
+
+**11-06 随 PS 启动失效的原因与改法**（源码，PS 待实测）：
+- 原因：开发版 `launchOverlay` 启动的是 `dist\waveplug-overlay-dev.cmd`，这个文件在悬停 POC 回滚时被删掉；`openPath` 的失败只写日志、界面不提示，且每次只试一次。日志里 11-05 22:44 之后 PS 重启了三次，外置框架一次都没连上。另外 `.cmd` 会弹终端，`build.cmd` 用 `taskkill` 更新会连带杀掉 ComfyUI。
+- 现在：直接启动 exe（开发版 `F:\waveplug\studio\dist\waveplug-overlay.exe`，发行版插件文件夹里的 exe），路径固定不变；失败时状态栏提示原因。设置「ComfyUI 连接 › 启动与关闭」：外置框架 / ComfyUI 的运行状态和「启动 / 重启」按钮，开关「随 Photoshop 启动外置框架」（`helperAutoStart`，默认开）、「随 Photoshop 启动 ComfyUI」（原「不随…」反向开关，字段不变）、「随 Photoshop 一同关闭 ComfyUI」、「启动时不自动打开网页」。
+- 更新不失效：exe 原地替换（改名 + 复制），helper 每 2 秒看一次自己 exe 的大小和时间，连续两次是同一个新文件就重启成新版（`src/life.rs`）。插件端在本会话连上过 helper 之后不再自动启动第二份，避免和正在重启的那份抢端口。
+- 重启不关 ComfyUI：受管 ComfyUI 的 Job Object 有名字（`Local\WavePlugComfyUI-…`），信息写在 `%LOCALAPPDATA%\WavePlug\comfy_managed.json`。旧 helper 先关掉 kill-on-close、写状态，带 `--replace` 启动新 exe，等新 exe 按名字打开 Job（命名对象在最后一个句柄关闭时就会消失，所以必须在旧进程退出前打开）并通过事件 `Local\WavePlugHelperHandover` 确认，再退出；新 helper 恢复 kill-on-close 设置，等端口空出后监听。没接上时 ComfyUI 继续运行，按「已有实例」连接。
+- 协议：`{"type":"restart-helper"}`；`manage-comfy` 增加 `restart`（只重启 WavePlug 启动的 ComfyUI；外部实例回 `external-running`，正在生成时回 `restart-required`）。
 
 - UXP：`src/app/overlay.ts` 在 WebSocket 未连接时只尝试一次 `svc.launchOverlay()`；插件首次请求 `shell.openPath` 需要系统授权。Manifest v5 已声明 `.exe` 的 `launchProcess` 权限，发行构建把 `waveplug-overlay.exe` 随 `dist/plugin` 打包。EXE 使用 Windows GUI 子系统，**不出现控制台窗口**。
 - ComfyUI：`src/ui/app.ts` 的「ComfyUI 连接」设置页有三个开关，由 `src/app/services.ts` 持久化：①「启动时不自动打开网页」默认开启（`comfyNoBrowser=true`，Rust 在 WavePlug 启动 ComfyUI 时向 BAT 的 `%*` 或 EXE 传 `--disable-auto-launch`，对已经运行的进程不重启）；②「不随 Photoshop 自动启动 ComfyUI」默认关闭（存储正向字段 `comfyAutoStartWithPhotoshop=true`，只阻止 ComfyUI 自动启动，外置框架 EXE 仍正常启动，手动点「启动」不受限制）；③「随 Photoshop 一同关闭 ComfyUI」默认开启（`comfyCloseWithPhotoshop=true`）。UXP 连上 EXE 后发送 `{"type":"manage-comfy","path":"…","base":"http://127.0.0.1:8188","closeWithPhotoshop":true,"restartIfNeeded":false,"disableBrowser":true,"startIfMissing":true}`；原生管理器发回 `{"type":"comfy-status","state":"not-configured|autostart-disabled|starting|ready|already-running|...","message":"…","owned":false}`。
@@ -157,7 +164,7 @@ src/ui/app.ts  startOverlay()      生成页提供状态和     src/panel/genera
 
 ## 9. 编译、测试、坑
 
-- **编译在用户的 Windows 主机上**：`build.cmd`（会先 `taskkill` 旧 exe，因为运行中的 exe 无法覆盖——之前因此一直在跑旧版）。
+- **编译在用户的 Windows 主机上**：`build.cmd`。运行中的 exe 不能覆盖但能改名：脚本把它改名为 `waveplug-overlay.old-*.exe` 再复制新版，**不再 `taskkill`**（旧做法会连带杀掉它管理的 ComfyUI）。运行中的 helper 发现自己的 exe 被换掉后自动重启成新版（`src/life.rs`）。`npm run build` 往 `dist/plugin`、`dist/dev` 复制时也用同样的改名方式，并清理不再运行的 `.old-*.exe`。
 - **Mac 上可以先检查**：这台 Mac 装了 Rust（`~/.cargo/bin`）和 Windows 目标：`cargo check --target x86_64-pc-windows-gnu`（只检查不链接）；`cargo test`；Mac 版能实际运行 Demo 和主程序（主程序在 Mac 上不隐藏）。
 - 插件端：`npx tsc --noEmit -p .`、`npm test`、`npm run build`。
 - windows-sys 0.59：`HWND` 等句柄是指针；Win32 常数在 `win.rs` 里写成数字，避开各版本的类型差异。

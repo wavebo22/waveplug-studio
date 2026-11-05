@@ -14,6 +14,7 @@
 mod host;
 mod comfy;
 mod frame;
+mod life;
 mod log;
 mod panel;
 mod protocol;

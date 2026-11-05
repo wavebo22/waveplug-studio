@@ -681,7 +681,7 @@ export function mountApp(root: HTMLElement, svc: Services) {
   }
 
   /** Reconcile existing ComfyUI even when auto-start is disabled; manual launch overrides it. */
-  function syncComfyManager(startIfMissing: boolean, restartIfNeeded = false) {
+  function syncComfyManager(startIfMissing: boolean, restartIfNeeded = false, restart = false) {
     overlay?.manageComfy({
       path: settings.comfyLaunch,
       base: settings.comfyUrl,
@@ -689,17 +689,16 @@ export function mountApp(root: HTMLElement, svc: Services) {
       restartIfNeeded,
       disableBrowser: settings.comfyNoBrowser !== false,
       startIfMissing,
+      restart,
     });
   }
 
   function startOverlay() {
-    overlay = connectOverlay(svc.launchOverlay
-      ? async () => {
-          const error = await svc.launchOverlay!();
-          if (error) setStatus("WavePlug 外置框架启动失败：" + error, "error");
-          return error;
-        }
-      : undefined);
+    overlay = connectOverlay({
+      launch: svc.launchOverlay,
+      autoLaunch: () => settings.helperAutoStart !== false,
+      onAutoLaunchFailed: error => setStatus("WavePlug 外置框架没有随 Photoshop 启动：" + error + "。可在「ComfyUI 连接」里点「启动」", "error"),
+    });
     svc.overlay = overlay;
     overlay.onConnected(() => {
       syncComfyManager(settings.comfyAutoStartWithPhotoshop !== false);
@@ -718,7 +717,7 @@ export function mountApp(root: HTMLElement, svc: Services) {
         conn = { state: "down", text: "未连接" };
         renderConn(); renderAction();
         setStatus(status.message, "info");
-      } else if (status.state === "restart-required") {
+      } else if (status.state === "restart-required" || status.state === "external-running") {
         void checkConn();
         setStatus(status.message, "info");
       } else {
@@ -869,15 +868,30 @@ export function mountApp(root: HTMLElement, svc: Services) {
   }
 
   let launching = false;
-  /** Ask the native helper to start ComfyUI under the selected lifetime/terminal policy. */
-  async function launchComfy(report: (kind: "ok" | "error" | "info", text: string) => void = (k, t) => setStatus(t, k)) {
+  /** Ask the native helper to start ComfyUI under the selected lifetime/terminal policy
+   *  (`restart`: the one it started is stopped first). Starts the helper first when needed. */
+  async function launchComfy(report: (kind: "ok" | "error" | "info", text: string) => void = (k, t) => setStatus(t, k), restart = false) {
     if (launching) return;
     if (!settings.comfyLaunch) { report("error", "请先在「ComfyUI 连接」中选择 ComfyUI 的启动文件"); openSettings(); return; }
-    if (!overlay?.connected) { report("error", "WavePlug 外置框架尚未连接，请稍后重试"); return; }
+    if (!overlay?.connected) {
+      report("info", "正在启动 WavePlug 外置框架…");
+      const error = await overlay?.launchHelper();
+      if (error !== null) { report("error", "外置框架没有启动：" + (error ?? "未知原因")); return; }
+    }
     launching = true;
     try {
-      log("info", "request managed ComfyUI start", settings.comfyLaunch, settings.comfyCloseWithPhotoshop);
-      syncComfyManager(true, true);
+      log("info", "request managed ComfyUI start", settings.comfyLaunch, settings.comfyCloseWithPhotoshop, restart ? "restart" : "");
+      syncComfyManager(true, true, restart);
+      // a restart first stops the old one: don't take it for the new one
+      if (restart) {
+        report("info", "正在停止当前的 ComfyUI…");
+        const t1 = Date.now();
+        while (Date.now() - t1 < 15_000) {
+          const up = await withTimeout(comfy.systemStats(), 1500, "连接").then(() => true, () => false);
+          if (!up) break;
+          await new Promise(r => setTimeout(r, 500));
+        }
+      }
       const t0 = Date.now();
       conn = { state: "checking", text: "启动中…" }; renderConn();
       while (Date.now() - t0 < 180_000) {
@@ -914,6 +928,44 @@ export function mountApp(root: HTMLElement, svc: Services) {
       if (error) show("error", error);
       else { show("ok", conn.text + " · 已连接"); setStatus("已连接 " + settings.comfyUrl, "ok"); setTimeout(() => sheet.remove(), 700); }
     };
+    // 启动与关闭: what runs now, with 启动 / 重启 for when starting with Photoshop didn't happen
+    const checkRow = (label: string, tip: string, checked: boolean, change: (on: boolean) => void) =>
+      h("label", { class: "check-row", title: tip },
+        h("input", { type: "checkbox", checked, onChange: (e: Event) => change((e.target as HTMLInputElement).checked) }),
+        h("span", null, label));
+    const helperState = h("span", { class: "grow small" });
+    const comfyState = h("span", { class: "grow small" });
+    let busy = false;
+    const lifeAction = (what: () => Promise<void>) => async () => {
+      if (busy) return;
+      busy = true; renderLife();
+      try { await what(); } finally { busy = false; renderLife(); }
+    };
+    const helperBtn = h("button", { class: "btn", title: "外置框架没在运行时启动它；在运行时重启它（换成磁盘上的最新版本，ComfyUI 不会被关闭）", onClick: lifeAction(async () => {
+      const restart = !!overlay?.connected;
+      show("info", restart ? "正在重启外置框架…" : "正在启动外置框架…");
+      const error = restart ? await overlay!.restartHelper() : await overlay?.launchHelper();
+      if (error === undefined) show("error", "这个环境不能启动外置框架");
+      else if (error) show("error", (restart ? "重启" : "启动") + "外置框架失败：" + error);
+      else show("ok", `外置框架已${restart ? "重启" : "启动"}（${overlay?.helperVersion ?? ""}）`);
+    }) }, "启动");
+    const comfyBtn = h("button", { class: "btn", title: "用上面的启动文件启动 ComfyUI；在运行时重启它（只能重启 WavePlug 启动的 ComfyUI）", onClick: lifeAction(async () => {
+      settings.comfyLaunch = launchPath.value.trim().replace(/^"|"$/g, ""); store.saveSettings(settings);
+      settings.comfyUrl = normalizeUrl(url.value); url.value = settings.comfyUrl; comfy = svc.comfy(settings.comfyUrl);
+      await launchComfy(show, conn.state === "ok");
+    }) }, "启动");
+    function renderLife() {
+      const up = !!overlay?.connected;
+      replace(helperState, "外置框架：" + (up ? `运行中 · ${overlay?.helperVersion ?? ""}` : "未运行"));
+      replace(helperBtn, up ? "重启" : "启动");
+      replace(comfyState, "ComfyUI：" + (conn.state === "ok" ? conn.text : conn.state === "checking" ? conn.text : "未连接"));
+      replace(comfyBtn, conn.state === "ok" ? "重启" : "启动");
+      helperBtn.classList.toggle("is-disabled", busy);
+      comfyBtn.classList.toggle("is-disabled", busy);
+    }
+    renderLife();
+    // the helper / ComfyUI may come or go while the page is open
+    const lifeTimer = setInterval(() => { if (!sheet.parentNode) clearInterval(lifeTimer); else renderLife(); }, 1000);
     const sheet = h("div", { class: "sheet" },
       h("div", { class: "sheet-head" }, h("span", { class: "sheet-title" }, "ComfyUI 连接"),
         h("button", { class: "icon-btn", onClick: () => sheet.remove() }, icon("close"))),
@@ -921,55 +973,40 @@ export function mountApp(root: HTMLElement, svc: Services) {
         h("div", { class: "group-label" }, "地址"), url,
         h("div", { class: "muted small" }, "可以只填 IP 和端口，例如 127.0.0.1:8188。插件只调用 ComfyUI 自带的接口，不需要安装节点或修改启动参数。"),
         result,
-        svc.launch ? h("div", { class: "group-label" }, "一键启动") : null,
+        svc.launch ? h("div", { class: "group-label" }, "启动与关闭") : null,
+        svc.launch ? h("div", { class: "row launch-row" }, helperState, helperBtn) : null,
+        svc.launch ? checkRow("随 Photoshop 启动外置框架", "Photoshop 启动时自动打开 WavePlug 外置框架（外置面板和 ComfyUI 进程管理，不显示命令行窗口）。外置框架总是随 Photoshop 退出。关闭后可用上面的「启动」手动打开。",
+          settings.helperAutoStart !== false, on => {
+            settings.helperAutoStart = on;
+            store.saveSettings(settings);
+            show("info", on ? "下次启动 Photoshop 时会自动打开外置框架。" : "外置框架不再随 Photoshop 启动；ComfyUI 的自动启动也要等外置框架打开后才会进行。");
+          }) : null,
         svc.launch ? h("div", { class: "row launch-row" }, launchPath,
           h("button", { class: "icon-btn", title: "选择启动文件（.bat / .cmd / .exe）", onClick: async () => {
             const p = await svc.pickLauncher?.();
             if (p) { launchPath.value = p; settings.comfyLaunch = p; store.saveSettings(settings); }
           } }, icon("folder"))) : null,
-        svc.launch ? h("div", { class: "muted small" }, "ComfyUI 未运行时可在这里或面板上一键启动。WavePlug 会自动管理本次启动的进程。") : null,
-        svc.launch ? h("label", { class: "check-row", title: "启动 ComfyUI 时传入 --disable-auto-launch，关闭自动打开浏览器的行为。" },
-          h("input", {
-            type: "checkbox",
-            checked: settings.comfyNoBrowser !== false,
-            onChange: (e: Event) => {
-              settings.comfyNoBrowser = (e.target as HTMLInputElement).checked;
-              store.saveSettings(settings);
-              show("info", settings.comfyNoBrowser
-                ? "下次启动 ComfyUI 时将不自动打开网页。"
-                : "已允许 ComfyUI 按其启动脚本设置打开网页，下次启动生效。");
-            },
-          }),
-          h("span", null, "启动时不自动打开网页")) : null,
-        svc.launch ? h("label", { class: "check-row", title: "仅禁止 ComfyUI 随 Photoshop 自动启动，WavePlug 浮动框架仍会启动，手动启动不受影响。" },
-          h("input", {
-            type: "checkbox",
-            checked: settings.comfyAutoStartWithPhotoshop === false,
-            onChange: (e: Event) => {
-              settings.comfyAutoStartWithPhotoshop = !(e.target as HTMLInputElement).checked;
-              store.saveSettings(settings);
-              syncComfyManager(false);
-              show("info", settings.comfyAutoStartWithPhotoshop
-                ? "已允许 ComfyUI 在下次进入 Photoshop 时自动启动。"
-                : "已禁止 ComfyUI 随 Photoshop 自动启动；浮动框架不受影响，可手动启动 ComfyUI。");
-            },
-          }),
-          h("span", null, "不随 Photoshop 自动启动 ComfyUI")) : null,
-        svc.launch ? h("label", { class: "check-row", title: "只管理 WavePlug 自己启动的 ComfyUI；用户原本已运行的实例不会被关闭。" },
-          h("input", {
-            type: "checkbox",
-            checked: settings.comfyCloseWithPhotoshop !== false,
-            onChange: (e: Event) => {
-              settings.comfyCloseWithPhotoshop = (e.target as HTMLInputElement).checked;
-              store.saveSettings(settings);
-              syncComfyManager(false, true);
-              show("info", settings.comfyCloseWithPhotoshop
-                ? "已开启：WavePlug 启动的 ComfyUI 随 Photoshop 关闭，终端将隐藏。"
-                : "已关闭：ComfyUI 将独立运行；若当前空闲，会安全重启以显示终端。");
-            },
-          }),
-          h("span", null, "随 Photoshop 一同关闭 ComfyUI（默认开启）")) : null,
-        svc.launch ? h("div", { class: "muted small" }, "关闭此项后，ComfyUI 会独立运行且保留终端；WavePlug 外置框架仍会随 Photoshop 退出。已由其他方式启动的 ComfyUI 不会被接管或关闭。") : null,
+        svc.launch ? h("div", { class: "row launch-row" }, comfyState, comfyBtn) : null,
+        svc.launch ? checkRow("随 Photoshop 启动 ComfyUI", "外置框架打开后，如果本机 ComfyUI 没有在运行，就用上面的启动文件把它启动起来。已经在运行的 ComfyUI 直接连接。",
+          settings.comfyAutoStartWithPhotoshop !== false, on => {
+            settings.comfyAutoStartWithPhotoshop = on;
+            store.saveSettings(settings);
+            syncComfyManager(false);
+            show("info", on ? "下次启动 Photoshop 时会自动启动 ComfyUI。" : "ComfyUI 不再随 Photoshop 启动，需要时点「启动」。");
+          }) : null,
+        svc.launch ? checkRow("随 Photoshop 一同关闭 ComfyUI", "只关闭 WavePlug 自己启动的 ComfyUI，用别的方式启动的不会被关闭。开启时 ComfyUI 不显示终端；关闭后 ComfyUI 独立运行并显示终端。外置框架更新、重启时不会关闭 ComfyUI。",
+          settings.comfyCloseWithPhotoshop !== false, on => {
+            settings.comfyCloseWithPhotoshop = on;
+            store.saveSettings(settings);
+            syncComfyManager(false, true);
+            show("info", on ? "已开启：WavePlug 启动的 ComfyUI 随 Photoshop 关闭，终端将隐藏。" : "已关闭：ComfyUI 将独立运行；若当前空闲，会安全重启以显示终端。");
+          }) : null,
+        svc.launch ? checkRow("启动时不自动打开网页", "启动 ComfyUI 时传入 --disable-auto-launch，关闭自动打开浏览器的行为。",
+          settings.comfyNoBrowser !== false, on => {
+            settings.comfyNoBrowser = on;
+            store.saveSettings(settings);
+            show("info", on ? "下次启动 ComfyUI 时将不自动打开网页。" : "已允许 ComfyUI 按其启动脚本设置打开网页，下次启动生效。");
+          }) : null,
         svc.debugSave ? h("div", { class: "group-label" }, "排查问题") : null,
         svc.debugSave && h("label", { class: "check-row", title: "每次生成时把发送的图片、返回的图片和提交的工作流保存到 F:\\waveplug\\studio\\reports\\debug_*。大图一张可达几十 MB，排查完请关闭" },
           h("input", { type: "checkbox", checked: settings.debugFiles, onChange: (e: Event) => { settings.debugFiles = (e.target as HTMLInputElement).checked; store.saveSettings(settings); } }),
@@ -982,12 +1019,6 @@ export function mountApp(root: HTMLElement, svc: Services) {
           replace(result, h("pre", { class: "diag" }, lines.join("\n")));
         } }, "诊断") : null,
         h("button", { class: "btn", onClick: () => sheet.remove() }, "关闭"),
-        svc.launch ? h("button", { class: "btn", title: "运行上面的启动文件，并等待 ComfyUI 就绪", onClick: async () => {
-          settings.comfyLaunch = launchPath.value.trim().replace(/^"|"$/g, ""); store.saveSettings(settings);
-          settings.comfyUrl = normalizeUrl(url.value); url.value = settings.comfyUrl; comfy = svc.comfy(settings.comfyUrl);
-          await launchComfy(show);
-          if (conn.state === "ok") setTimeout(() => sheet.remove(), 700);
-        } }, "启动") : null,
         h("button", { class: "btn primary", onClick: () => void connect() }, "保存并连接")));
     sheetHost.append(sheet);
     if (conn.state === "down" && status.kind === "error") show("error", status.text);

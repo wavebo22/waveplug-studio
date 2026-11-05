@@ -17,6 +17,7 @@
 | — | [`history/`](history/) | 历史资料：V1.4 设计交接、0.1.x 实机测试交接。**已过时，只作参考** | 需要追溯最初的设计意图时 |
 
 ## 当前状态一览（2026-11-04）
+- **11-06 外置框架和 ComfyUI 随 PS 启动 / 关闭重做（源码，PS 待实测）**：之前失效是因为开发版启动的 `waveplug-overlay-dev.cmd` 已被删除且失败无提示。现在直接启动 exe（不显示终端），设置页新增「启动与关闭」（开关 + 启动 / 重启按钮），exe 原地替换后 helper 自动重启成新版且不关闭 ComfyUI。tsc、npm 181/181、Rust Windows 目标检查无警告、Rust 20/20。详见 [`../native/overlay/HANDOFF.md`](../native/overlay/HANDOFF.md) 第 3.1 节。**需在 Windows 上运行新的 `build.cmd`**；第一次仍要手动关掉旧 0.4.0（它没有自动更新功能）。未提交 Git。
 - **11-06 WaveLayer 悬停边框（用户已在 PS 确认，效果与 PS 原版一致）**：替换旧的「悬停定位」。鼠标停在图层行上，外置 helper 在画布上画出该图层范围的细蓝框（点击穿透、不激活、不读像素、不选中图层）。tsc 通过，npm 181/181，Mac 上 `cargo check --target x86_64-pc-windows-gnu` 通过、`cargo test` 19/19（Windows 专属测试需在主机上跑）；UXP `npm run build` 完成。详见 [`LAYER_PANEL_HANDOFF.md`](LAYER_PANEL_HANDOFF.md) 第 5 节。
 - **11-04 WaveLayer 图标换成 PS 式实心单色（PS 实测确认，用户反馈看得懂）**：按用户提供的 PS 原版图层面板截图重画 26 个图标（`dom.ts` 的 `PS_GLYPHS`，实心、even-odd 单路径）：底栏链接改横向链条，蒙版链接改竖向链条（`psChainV`），智能对象改折角纸，剪贴箭头改向下，锁定透明像素改棋盘格（`psChecker`）。图层类型（组 / 文字 / 调整 / 形状）和状态图标（可编辑、独立、链接）去掉彩色，统一 `--c-text-2`；不可编辑、AI、共用分组色保留。未提交 Git。
 - **11-05 外置生成面板 / WaveLayer 参考图拖放（已部署，等待 Photoshop 现场验证）**：新增从 WaveLayer 普通图层行直接拖到外置生图面板参考图槽位；目标槽位悬停高亮，松开后替换该槽位，UXP 保存源图层 ID，生成时读取原图层像素。跨窗口 mouse-up / Escape 会回传完成动作，清理 WaveLayer 源拖动态。组、AI 结果组和子项拖拽不触发此功能，不改变原有图层排序 / Alt 复制 / 工作台 / 删除区。Rust 34 项、TypeScript 172 项测试通过，类型检查、UXP 构建和 Rust Release 构建通过。最终 helper 已同步到 dist、plugin、dev 三个入口，ComfyUI 已重新启动且 HTTP 8188 正常。**还需在 Photoshop 开发版点橙色 ⟳ 载入最新 UXP bundle，并在测试 PSD 上实测拖放**。详见 [`../native/overlay/HANDOFF.md`](../native/overlay/HANDOFF.md)。
