@@ -55,6 +55,7 @@ export function prepareRun(p: Profile, v: RunValues): Prepared {
     api[b.nodeId].inputs[b.input] = value;
   };
   for (const b of p.bindings) {
+    if (b.role === "reference" && (!Number.isInteger(b.slot) || b.slot! < 1 || b.slot! > MAX_REFERENCES)) continue;
     switch (b.role) {
       case "image": set(b, v.image!); break;
       case "mask":

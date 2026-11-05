@@ -42,6 +42,7 @@ setLogSink(async line => {
 log("info", "uxp", JSON.stringify(uxp.versions ?? {}), "host", JSON.stringify(uxp.host ?? {}));
 
 const host = new UxpHost();
+
 // lets the development loader detach this build's Photoshop listeners, document / window listeners
 // and timers before loading a new one
 const layerTree = new UxpLayerTree();
@@ -68,9 +69,28 @@ const services: Services = {
     return f ? f.nativePath : null;
   },
   async launch(path) {
-    // shows Photoshop's own confirmation the first time; returns "" on success
+    // Legacy manual launcher; process lifecycle is managed by the native helper.
     try { const r = await uxp.shell.openPath(path); return r ? String(r) : null; }
     catch (e) { return (e as Error).message; }
+  },
+  async launchOverlay() {
+    try {
+      // The dev loader reads JS from F:\\waveplug\\studio\\dist\\plugin; its helper is
+      // built beside dist/. Release packages carry the helper beside the UXP manifest.
+      let path: string;
+      if (DEV) {
+        path = "F:\\waveplug\\studio\\dist\\waveplug-overlay-dev.cmd";
+      } else {
+        const folder = await fs.getPluginFolder();
+        const helper = await folder.getEntry("waveplug-overlay.exe");
+        path = helper.nativePath;
+      }
+      const r = await uxp.shell.openPath(
+        path,
+        "启动 WavePlug 本机浮动面板及 ComfyUI 连接管理器。外置面板不显示命令行窗口。",
+      );
+      return r ? String(r) : null;
+    } catch (e) { return (e as Error).message; }
   },
   async pickJson() {
     const f = await fs.getFileForOpening({ types: ["json"] });
@@ -82,7 +102,12 @@ const services: Services = {
     const bytes = new Uint8Array(await f.read({ format: formats.binary }));
     // the panel shows a 128 px copy, not the whole file as base64; without one it shows the file type
     let url: string | undefined;
-    try { url = await host.imageFileThumbnail(f, 128); } catch (e) { log("warn", "reference thumbnail", f.name, e); }
+    try {
+      url = await host.imageFileThumbnail(f, 128);
+      log("info", "reference thumbnail ready", f.name, `source=${bytes.byteLength}`, `preview=${url.length}`);
+    } catch (e) {
+      log("warn", "reference thumbnail", f.name, e);
+    }
     return { name: f.name, bytes, url };
   },
   async saveImage(png, suggested) {

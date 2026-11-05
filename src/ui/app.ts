@@ -10,7 +10,7 @@ import { type Binding, type Profile, type TaskType, ROLE_LABEL, carryOver, inpai
 import { isBlendGraph, recognize } from "../core/workflow/recognize.ts";
 import { uiToApi } from "../core/workflow/uiToApi.ts";
 import { findLocalMaskLinks } from "../core/workflow/localMask.ts";
-import { MAX_REFERENCES, findReferenceSlots } from "../core/workflow/references.ts";
+import { MAX_REFERENCES, findReferenceSlots, planLayerReferenceDrop, type LayerReferenceCandidate } from "../core/workflow/references.ts";
 import { MAX_UPSCALE_EDGE, type RefSource, StashedResult, runInpaint } from "../app/generate.ts";
 import { type ProfileState, type Services, type Settings, store } from "../app/services.ts";
 import type { DocInfo, FillGroup, Pads, Variation } from "../ps/host.ts";
@@ -22,8 +22,10 @@ import { downscale, onWhite } from "../core/image/compose.ts";
 import { BLEND_PREFIX, EXPAND_PREFIX, EXTRACT_PREFIX, FILL_PREFIX, GENERATE_PREFIX, UPSCALE_PREFIX } from "../ps/host.ts";
 import { RATIOS, createExpandEditor } from "./expandEditor.ts";
 import { createToolsView } from "./tools.ts";
-import { connectOverlay } from "../app/overlay.ts";
-import { type OverlayEvent, docToScreen, overlayStep, selectionKey } from "../core/overlay/protocol.ts";
+import { type Overlay, connectOverlay } from "../app/overlay.ts";
+import type { PanelParam } from "../core/overlay/generatePanel.ts";
+import { attachGenerateSurface } from "./generateSurface.ts";
+import { attachVariantsSurface } from "./variantsSurface.ts";
 
 type Conn = { state: "checking" | "ok" | "down"; text: string };
 
@@ -35,6 +37,11 @@ function bytesToDataUrl(bytes: Uint8Array, mime: string): string {
 
 /** Prompt optimisers (an LLM rewriting the prompt) are slow and off unless the user turns them on. */
 const OPTIMIZER = /提示词优化|prompt\s*optimi[sz]/i;
+/** A bound number's slider range and whether it counts in whole steps (the panel and the external panel). */
+function paramRange(b: Binding, base: unknown): { int: boolean; lo: number; hi: number } {
+  const int = Number.isInteger(base) && !/strength|强度|cfg|denoise/i.test(b.label ?? b.input);
+  return { int, lo: b.min ?? 0, hi: b.max ?? (int ? Math.max(Number(base) * 2, 10) : Math.max(2, Number(base) * 2)) };
+}
 function defaultParam(b: Binding, base: unknown): number | boolean {
   return typeof base === "boolean" && OPTIMIZER.test(b.label ?? b.title ?? "") ? false : (base as number | boolean);
 }
@@ -87,10 +94,11 @@ export function mountApp(root: HTMLElement, svc: Services) {
   let doc: DocInfo | null = null, sel: Rect | null = null, group: FillGroup | null = null;
   // Variations follow the selected Photoshop AI layer.
   let lastGroupKey = "";
-  /** 选区浮动生成条 (native/overlay): only in Photoshop, only for the modes that work on a selection */
-  const OVERLAY_MODES: ReadonlySet<TaskType> = new Set<TaskType>(["inpaint", "blend", "extract", "txt2img"]);
-  let overlay: ReturnType<typeof connectOverlay> | null = null;
-  let lastSelKey: string | null = null;
+  /** 外置生成面板 (native/overlay): only in Photoshop; null while not set up */
+  let overlay: Overlay | null = null, genSurface: ReturnType<typeof attachGenerateSurface> | null = null;
+  let variantSurface: ReturnType<typeof attachVariantsSurface> | null = null;
+  /** the page's state may have changed: the external panel gets what differs (cheap when nothing did) */
+  const outSync = () => overlay?.queueSync();
   const near = (a: Rect, b: Rect) => a.left === b.left && a.top === b.top && a.right === b.right && a.bottom === b.bottom;
   const willAdd = () => {
     if (!group || group.kind !== mode || mode === "upscale") return false;
@@ -102,6 +110,7 @@ export function mountApp(root: HTMLElement, svc: Services) {
   // thumbnails keyed "docId:layerId" — rebuilt from Photoshop when missing
   const thumbs = new Map<string, string>();
   const refs: Record<number, RefSlot | undefined> = {};
+  let layerReferenceDropInProgress = false;
   let run: null | { stage: string; progress: number | null; detail: string; promptId?: string; signal: { aborted: boolean } } = null;
   let status: { text: string; kind: "info" | "ok" | "error" } = { text: "就绪", kind: "info" };
   let stash: Uint8Array | null = null;
@@ -286,6 +295,7 @@ export function mountApp(root: HTMLElement, svc: Services) {
   function setStatus(text: string, kind: "info" | "ok" | "error" = "info") { status = { text, kind }; renderStatus(); }
 
   function renderFav() {
+    outSync();
     favEl.hidden = mode === "upscale";
     const list = favorites[favKey()] ?? [], text = prompt.value.trim(), saved = !!text && list.includes(text);
     favStar.className = "ub fav-star" + (saved ? " on" : "") + (text ? "" : " is-disabled");
@@ -301,6 +311,7 @@ export function mountApp(root: HTMLElement, svc: Services) {
   }
 
   function renderStatus() {
+    outSync();
     replace(statusEl, h("span", { class: "dot " + status.kind }), h("span", { class: "status-text", title: status.text }, status.text),
       stash ? h("button", { class: "link", onClick: saveStash }, "保存未写入的结果") : null);
   }
@@ -347,6 +358,8 @@ export function mountApp(root: HTMLElement, svc: Services) {
     const active = variations.find(v => v.visible);
     replace(varPromptEl, active ? h("span", null, h("span", { class: "muted" }, `变体 ${active.number}：`), active.prompt || "（无提示词）") : null);
     void loadThumbs();
+    // Keep the independent native variant rail synced even while the generate panel is hidden.
+    variantSurface?.refresh();
   }
 
   let loadingThumbs = false;
@@ -409,32 +422,46 @@ export function mountApp(root: HTMLElement, svc: Services) {
     renderFav();
   }
 
-  /** Reference slots: the workflow's own reference loaders, or free encoder inputs (auto-wired). */
-  function refSlotNumbers(): number[] {
+  /** All slots the active workflow can actually accept, capped at eight. */
+  function refSlotCapacity(): number[] {
     const bound = profile?.bindings.filter(b => b.role === "reference").map(b => b.slot!) ?? [];
-    if (bound.length) return bound;
-    if (!profile?.options.refSlots) return [];
+    if (bound.length) return [...new Set(bound)].filter(s => Number.isInteger(s) && s >= 1 && s <= MAX_REFERENCES).sort((a, b) => a - b);
+    if (!profile?.options.refSlots?.nodes.length) return [];
     const max = Math.min(MAX_REFERENCES, ...profile.options.refSlots.nodes.map(n => n.inputs.length));
-    const used = Array.from({ length: max }, (_, i) => i + 1).filter(s => refs[s]);
-    // filled slots plus one empty "add" slot
-    return Array.from({ length: Math.min(max, used.length + 1) }, (_, i) => i + 1);
+    return Array.from({ length: Math.max(0, max) }, (_, i) => i + 1);
   }
 
+  /** Show filled slots plus one empty slot; retain gaps when a drag starts at a later slot. */
+  function refSlotNumbers(): number[] {
+    const capacity = refSlotCapacity();
+    if (!capacity.length) return [];
+    if (profile?.bindings.some(b => b.role === "reference" && Number.isInteger(b.slot) && b.slot! >= 1 && b.slot! <= MAX_REFERENCES)) return capacity;
+    let lastFilled = -1;
+    capacity.forEach((slot, index) => { if (refs[slot]) lastFilled = index; });
+    return capacity.slice(0, Math.min(capacity.length, lastFilled + 2));
+  }
+
+  /** references wired automatically (no 参考 bindings): the canvas is 图1, so reference n is 图(n+1) */
+  const autoRefs = () => !!profile && !profile.bindings.some(b => b.role === "reference" && Number.isInteger(b.slot) && b.slot! >= 1 && b.slot! <= MAX_REFERENCES);
+  const refTag = (slot: number) => autoRefs() ? `图${slot + 1}` : `参考 ${slot}`;
+
   function renderRefs() {
+    outSync();
     const slots = refSlotNumbers();
-    const auto = !!profile && !profile.bindings.some(b => b.role === "reference");
+    const auto = autoRefs();
+    const hasAutoReference = auto && slots.some(slot => !!refs[slot]);
     refsEl.hidden = !slots.length;
     replace(refsEl, ...slots.map(slot => {
       const r = refs[slot];
       // with auto-wired references the canvas is 图1, so reference n is 图(n+1)
-      const tag = auto ? `图${slot + 1}` : `参考 ${slot}`;
+      const tag = refTag(slot);
       return h("button", { class: "ref" + (r ? " set" : " add"), title: r ? `${tag}：${r.name}（点击更换或移除）` : `添加参考图（${tag}）：PS 图层、图片文件或剪贴板（Ctrl+V）`, onClick: (e: Event) => refMenu(slot, e.currentTarget as HTMLElement) },
         r?.thumb ? h("img", { src: r.thumb, onError: (e: Event) => { const el = e.currentTarget as HTMLElement; el.replaceWith(h("span", { class: "ref-ext" }, (/\.(\w+)$/.exec(r.name)?.[1] ?? "图片").toUpperCase())); } })
           : r ? icon("image", 16) : icon("plus", 14),
         h("span", { class: "ref-num" }, r ? tag : "参考图"),
         r ? h("button", { class: "ref-del", title: `移除${tag}`, onClick: (e: Event) => { e.stopPropagation(); removeRef(slot); } }, icon("close", 10)) : null);
-    }), refs[1] && auto ? h("div", { class: "ref-hint" }, "提示词里用「图2」指代参考图，例如：把选区里的杯子换成图2中的饮料")
-      : mode === "txt2img" && slots.length && !refs[1] ? h("div", { class: "ref-hint" }, "可选：放一张参考图，工作流会按它来生成") : null);
+    }), hasAutoReference ? h("div", { class: "ref-hint" }, "画布为图1，参考图依次为图2～图9；在提示词中按编号指代")
+      : mode === "txt2img" && slots.length && !hasAutoReference ? h("div", { class: "ref-hint" }, "可选：放一张参考图，工作流会按它来生成") : null);
   }
 
   /** 文生图: where the result goes and the aspect it should have. */
@@ -517,7 +544,11 @@ export function mountApp(root: HTMLElement, svc: Services) {
     return null;
   }
 
+  /** the generate button's text */
+  const actionLabel = () => willAdd() ? "生成更多变体" : mode === "outpaint" ? "扩图" : mode === "upscale" ? "放大" : mode === "blend" ? "融图" : mode === "extract" ? "抠图" : "生成";
+
   function renderAction() {
+    outSync();
     if (run) {
       genBtn.className = "generate running";
       replace(genBtn, icon("stop"), h("span", null, "取消"));
@@ -531,13 +562,14 @@ export function mountApp(root: HTMLElement, svc: Services) {
     genBtn.className = "generate";
     genBtn.disabled = !!why;
     genBtn.title = why ?? "";
-    replace(genBtn, icon("spark"), h("span", null, willAdd() ? "生成更多变体" : mode === "outpaint" ? "扩图" : mode === "upscale" ? "放大" : mode === "blend" ? "融图" : mode === "extract" ? "抠图" : "生成"));
+    replace(genBtn, icon("spark"), h("span", null, actionLabel()));
     progEl.hidden = !why;
     replace(progEl, why ? h("div", { class: "stage muted" }, why,
       conn.state === "down" && svc.launch ? h("button", { class: "link", onClick: () => void launchComfy() }, settings.comfyLaunch ? "  一键启动" : "  设置启动文件") : null) : null);
   }
 
   function renderAdvanced() {
+    outSync();
     const open = settings.advancedOpen;
     replace(advHead, icon("sliders"), h("span", { class: "grow" }, "高级参数"), h("span", { class: "chev" + (open ? " open" : "") }, icon("chevron")));
     advBody.hidden = !open;
@@ -555,8 +587,7 @@ export function mountApp(root: HTMLElement, svc: Services) {
         rows.push(h("label", { class: "param check-row" }, h("input", { type: "checkbox", checked: !!val, onChange: (e: Event) => { ps.params[k] = (e.target as HTMLInputElement).checked; save(); } }), label));
         continue;
       }
-      const isInt = Number.isInteger(base) && !/strength|强度|cfg|denoise/i.test(b.label ?? b.input);
-      const lo = b.min ?? (isInt ? 0 : 0), hi = b.max ?? (isInt ? Math.max(Number(base) * 2, 10) : Math.max(2, Number(base) * 2));
+      const { int: isInt, lo, hi } = paramRange(b, base);
       const num = h("input", { class: "num", type: "number", value: String(val), step: isInt ? "1" : "0.01" }) as HTMLInputElement;
       const range = h("input", { type: "range", min: String(lo), max: String(hi), step: isInt ? "1" : "0.01", value: String(val) }) as HTMLInputElement;
       const set = (v: number) => { if (!Number.isFinite(v)) return; ps.params[k] = v; num.value = String(v); range.value = String(v); save(); };
@@ -618,34 +649,146 @@ export function mountApp(root: HTMLElement, svc: Services) {
     if (switchTo) setMode(switchTo);
     void loadDocThumb();
     renderHistory(); renderSelection(); renderAction();
-    syncOverlay();
+    genSurface?.refresh();
     if (again) { again = false; void refresh(); }
   }
 
-  /** A new selection pops the floating bar up next to the pointer; no selection puts it away. */
-  function syncOverlay() {
-    const key = selectionKey(doc?.id ?? null, sel);
-    const step = overlayStep(lastSelKey, key);
-    lastSelKey = key;
-    if (!overlay || !step) return;
-    if (step === "hide" || run || !OVERLAY_MODES.has(mode) || !doc || !sel) { overlay.send({ type: "hide" }); return; }
-    const link = overlay, d = doc, s = sel;
-    // the selection on screen, from Photoshop's view: the bar sits a fixed distance under it
-    void (svc.host.canvasView?.(d.id) ?? Promise.resolve(null)).catch(() => null).then(view => {
-      if (selectionKey(d.id, s) !== lastSelKey) return; // a newer selection already
-      const anchor = view ? docToScreen(s, view) : undefined;
-      log("info", "overlay show", JSON.stringify({ sel: s, view, anchor }));
-      link.send({ type: "show", prompt: prompt.value, count: normalizeVariationCount(countInput.value), anchor });
+  /** 高级参数 as the external panel lists them (same order and rules as renderAdvanced) */
+  function panelParams(): PanelParam[] {
+    if (!profile || !pstate) return [];
+    const p = profile, ps = pstate, out: PanelParam[] = [];
+    for (const b of p.bindings.filter(x => x.role === "param")) {
+      const key = b.nodeId + "." + b.input, base = p.api[b.nodeId]?.inputs[b.input];
+      const val = key in ps.params ? ps.params[key] : defaultParam(b, base);
+      const label = b.label ?? b.input;
+      if (typeof base === "boolean") { out.push({ kind: "toggle", key, label, value: !!val, tip: "" }); continue; }
+      const { int, lo, hi } = paramRange(b, base);
+      out.push({ kind: "number", key, label, value: Number(val), base: Number(base), min: lo, max: hi, int });
+    }
+    if (p.bindings.some(b => b.role === "seed")) out.push({ kind: "seed", random: ps.seedMode === "random", value: ps.seed });
+    if (p.options.localMask?.links.length) out.push({ kind: "toggle", key: "localMask", label: "只重绘选区内", value: p.options.localMask.enabled, tip: "把遮罩接到工作流，让模型只在选区内生成" });
+    if (modeOf(p) === "blend" || modeOf(p) === "extract") out.push({ kind: "toggle", key: "keepDetail", label: "保留原图细节", value: ps.keepDetail !== false, tip: "纹理和文字等细节用原图" });
+    out.push({ kind: "toggle", key: "fullRun", label: "每次完整运行（不使用 ComfyUI 缓存，较慢）", value: !!ps.fullRun, tip: "" });
+    return out;
+  }
+
+  /** a parameter changed from the external panel: save it and redraw 高级参数 here too */
+  function setParam(change: (p: Profile, ps: ProfileState) => void) {
+    if (!profile || !pstate) return;
+    change(profile, pstate);
+    store.saveState(profile.id, pstate);
+    renderAdvanced();
+  }
+
+  /** Reconcile existing ComfyUI even when auto-start is disabled; manual launch overrides it. */
+  function syncComfyManager(startIfMissing: boolean, restartIfNeeded = false) {
+    overlay?.manageComfy({
+      path: settings.comfyLaunch,
+      base: settings.comfyUrl,
+      closeWithPhotoshop: settings.comfyCloseWithPhotoshop !== false,
+      restartIfNeeded,
+      disableBrowser: settings.comfyNoBrowser !== false,
+      startIfMissing,
     });
   }
 
-  /** 生成 in the floating bar: the same as typing the prompt here and pressing 生成. */
-  function onOverlay(e: OverlayEvent) {
-    if (e.type !== "generate" || run || !OVERLAY_MODES.has(mode)) return;
-    setPromptText(e.prompt);
-    countInput.value = String(e.count);
-    saveCount(e.count);
-    void generate();
+  function startOverlay() {
+    overlay = connectOverlay(svc.launchOverlay
+      ? async () => {
+          const error = await svc.launchOverlay!();
+          if (error) setStatus("WavePlug 外置框架启动失败：" + error, "error");
+          return error;
+        }
+      : undefined);
+    svc.overlay = overlay;
+    overlay.onConnected(() => {
+      syncComfyManager(settings.comfyAutoStartWithPhotoshop !== false);
+    });
+    overlay.onComfyStatus(status => {
+      if (status.state === "starting") {
+        conn = { state: "checking", text: "ComfyUI 启动中…" };
+        renderConn();
+        setStatus(status.message, "info");
+      } else if (status.state === "not-configured" || status.state === "path-missing"
+        || status.state === "failed" || status.state === "timeout") {
+        conn = { state: "down", text: "未连接" };
+        renderConn(); renderAction();
+        setStatus(status.message, "error");
+      } else if (status.state === "autostart-disabled") {
+        conn = { state: "down", text: "未连接" };
+        renderConn(); renderAction();
+        setStatus(status.message, "info");
+      } else if (status.state === "restart-required") {
+        void checkConn();
+        setStatus(status.message, "info");
+      } else {
+        // Existing local instance, newly started instance, or a remote endpoint: let the
+        // normal Comfy client make the final connection check and populate its version.
+        void checkConn();
+      }
+    });
+    genSurface = attachGenerateSurface(overlay, {
+      sections: () => ({
+        mode,
+        prompt: prompt.value,
+        hint: promptHint.textContent ?? "",
+        favorites: [...(favorites[favKey()] ?? [])],
+        refs: refSlotNumbers().map(slot => ({
+          slot,
+          tag: refs[slot] ? refTag(slot) : null,
+          name: refs[slot]?.name ?? null,
+          thumb: refs[slot]?.thumb ?? null,
+        })),
+        count: normalizeVariationCount(countInput.value),
+        action: actionLabel(),
+        blocked: run ? null : blockedReason(),
+        params: panelParams(),
+        run: run ? { stage: run.stage + (run.detail ? " · " + run.detail : ""), progress: run.progress ?? 0 } : null,
+        status: { tone: status.kind, text: status.text },
+      }),
+      where: () => ({ docId: doc?.id ?? null, sel }),
+      canvasView: id => svc.host.canvasView?.(id) ?? Promise.resolve(null),
+      setMode: m => { if (MODES.some(([x]) => x === m) && m !== mode) setMode(m as TaskType); },
+      setPrompt: text => setPromptText(text),
+      setCount: n => { countInput.value = String(n); saveCount(n); renderAction(); },
+      setNumber: (key, value) => setParam((_, ps) => { ps.params[key] = value; }),
+      resetNumber: key => setParam((_, ps) => { delete ps.params[key]; }),
+      setToggle: (key, value) => {
+        if (key === "localMask") { if (profile?.options.localMask) { profile.options.localMask.enabled = value; store.saveProfiles(profiles); renderAdvanced(); } return; }
+        setParam((_, ps) => { if (key === "keepDetail") ps.keepDetail = value; else if (key === "fullRun") ps.fullRun = value; else ps.params[key] = value; });
+      },
+      setSeed: (random, value) => setParam((_, ps) => { ps.seedMode = random ? "random" : "fixed"; ps.seed = Math.max(0, Math.min(MAX_SEED, Math.floor(value))); }),
+      newSeed: () => setParam((_, ps) => { ps.seed = randomSeed(); ps.seedMode = "fixed"; }),
+      generate: () => { if (!run) void generate(); },
+      cancel: () => { if (run) void cancel(); },
+      // the same handlers as this page's ☆ 收藏 and 收藏夹 entries
+      toggleFavorite: () => favStar.click(),
+      pickFavorite: text => setPromptText(text),
+      removeFavorite: text => { favorites[favKey()] = (favorites[favKey()] ?? []).filter(x => x !== text); store.saveFavorites(favorites); renderFav(); },
+      addRef: (slot, source) => { void addReferenceFromSurface(slot, source); },
+      addLayerReference: (slot, docId, layerId, name) => { void addLayerReference(slot, docId, layerId, name); },
+      addLayerReferences: (slot, docId, layers, totalCount) => { void addLayerReferences(slot, docId, layers, totalCount); },
+      finishLayerDrag: () => document.dispatchEvent(new Event("waveplug:external-layer-drag-finished")),
+      removeRef: slot => removeRef(slot),
+    });
+    variantSurface = attachVariantsSurface(overlay, {
+      sections: () => group && variations.length
+        ? {
+            docId: group.docId, groupId: group.layerId, name: group.name,
+            items: variations.map(v => ({
+              layerId: v.layerId, number: v.number, visible: v.visible,
+              thumb: thumbs.get(`${group!.docId}:${v.layerId}`) || null,
+            })),
+          }
+        : null,
+      canvasView: id => svc.host.canvasView?.(id) ?? Promise.resolve(null),
+      showVariant: (layerId, groupId) => {
+        if (!group || group.layerId !== groupId || run) return;
+        const selected = variations.find(v => v.layerId === layerId);
+        if (selected && !selected.visible) void showVariation(selected);
+      },
+    });
+    variantSurface.refresh();
   }
 
   /** The expand editor shows the current canvas; reloaded when the document or its size changes. */
@@ -726,30 +869,30 @@ export function mountApp(root: HTMLElement, svc: Services) {
   }
 
   let launching = false;
-  /** Starts ComfyUI with the configured script and waits (up to 3 min) until it answers. */
+  /** Ask the native helper to start ComfyUI under the selected lifetime/terminal policy. */
   async function launchComfy(report: (kind: "ok" | "error" | "info", text: string) => void = (k, t) => setStatus(t, k)) {
-    if (!svc.launch || launching) return;
+    if (launching) return;
     if (!settings.comfyLaunch) { report("error", "请先在「ComfyUI 连接」中选择 ComfyUI 的启动文件"); openSettings(); return; }
+    if (!overlay?.connected) { report("error", "WavePlug 外置框架尚未连接，请稍后重试"); return; }
     launching = true;
     try {
-      log("info", "launch comfy", settings.comfyLaunch);
-      const err = await svc.launch(settings.comfyLaunch);
-      if (err) { report("error", "启动失败：" + err); return; }
+      log("info", "request managed ComfyUI start", settings.comfyLaunch, settings.comfyCloseWithPhotoshop);
+      syncComfyManager(true, true);
       const t0 = Date.now();
       conn = { state: "checking", text: "启动中…" }; renderConn();
       while (Date.now() - t0 < 180_000) {
         report("info", `正在启动 ComfyUI… ${Math.round((Date.now() - t0) / 1000)} 秒`);
-        await new Promise(r => setTimeout(r, 3000));
+        await new Promise(r => setTimeout(r, 2500));
         try {
-          const s = await withTimeout(comfy.systemStats(), 2500, "连接");
+          const s = await withTimeout(comfy.systemStats(), 2200, "连接");
           conn = { state: "ok", text: "ComfyUI " + (s.system?.comfyui_version ?? "") }; renderConn(); renderAction();
-          report("ok", "ComfyUI 已启动并连接");
-          setStatus("ComfyUI 已启动并连接", "ok");
+          report("ok", "ComfyUI 已就绪并连接");
+          setStatus("ComfyUI 已就绪并连接", "ok");
           return;
-        } catch { /* still starting */ }
+        } catch { /* helper is still starting the server */ }
       }
       conn = { state: "down", text: "未连接" }; renderConn(); renderAction();
-      report("error", "3 分钟内没有连上 ComfyUI，请看 ComfyUI 窗口里的报错");
+      report("error", "3 分钟内没有连上 ComfyUI，请检查启动脚本和 reports/comfy_runtime.log");
     } finally { launching = false; }
   }
 
@@ -765,6 +908,7 @@ export function mountApp(root: HTMLElement, svc: Services) {
       url.value = settings.comfyUrl;
       store.saveSettings(settings);
       comfy = svc.comfy(settings.comfyUrl);
+      syncComfyManager(settings.comfyAutoStartWithPhotoshop !== false);
       show("info", "正在连接 " + settings.comfyUrl + " …");
       const error = await checkConn();
       if (error) show("error", error);
@@ -783,7 +927,49 @@ export function mountApp(root: HTMLElement, svc: Services) {
             const p = await svc.pickLauncher?.();
             if (p) { launchPath.value = p; settings.comfyLaunch = p; store.saveSettings(settings); }
           } }, icon("folder"))) : null,
-        svc.launch ? h("div", { class: "muted small" }, "ComfyUI 未运行时可在这里或面板上一键启动，例如 run_nvidia_gpu.bat。第一次启动时 Photoshop 会询问是否允许。") : null,
+        svc.launch ? h("div", { class: "muted small" }, "ComfyUI 未运行时可在这里或面板上一键启动。WavePlug 会自动管理本次启动的进程。") : null,
+        svc.launch ? h("label", { class: "check-row", title: "启动 ComfyUI 时传入 --disable-auto-launch，关闭自动打开浏览器的行为。" },
+          h("input", {
+            type: "checkbox",
+            checked: settings.comfyNoBrowser !== false,
+            onChange: (e: Event) => {
+              settings.comfyNoBrowser = (e.target as HTMLInputElement).checked;
+              store.saveSettings(settings);
+              show("info", settings.comfyNoBrowser
+                ? "下次启动 ComfyUI 时将不自动打开网页。"
+                : "已允许 ComfyUI 按其启动脚本设置打开网页，下次启动生效。");
+            },
+          }),
+          h("span", null, "启动时不自动打开网页")) : null,
+        svc.launch ? h("label", { class: "check-row", title: "仅禁止 ComfyUI 随 Photoshop 自动启动，WavePlug 浮动框架仍会启动，手动启动不受影响。" },
+          h("input", {
+            type: "checkbox",
+            checked: settings.comfyAutoStartWithPhotoshop === false,
+            onChange: (e: Event) => {
+              settings.comfyAutoStartWithPhotoshop = !(e.target as HTMLInputElement).checked;
+              store.saveSettings(settings);
+              syncComfyManager(false);
+              show("info", settings.comfyAutoStartWithPhotoshop
+                ? "已允许 ComfyUI 在下次进入 Photoshop 时自动启动。"
+                : "已禁止 ComfyUI 随 Photoshop 自动启动；浮动框架不受影响，可手动启动 ComfyUI。");
+            },
+          }),
+          h("span", null, "不随 Photoshop 自动启动 ComfyUI")) : null,
+        svc.launch ? h("label", { class: "check-row", title: "只管理 WavePlug 自己启动的 ComfyUI；用户原本已运行的实例不会被关闭。" },
+          h("input", {
+            type: "checkbox",
+            checked: settings.comfyCloseWithPhotoshop !== false,
+            onChange: (e: Event) => {
+              settings.comfyCloseWithPhotoshop = (e.target as HTMLInputElement).checked;
+              store.saveSettings(settings);
+              syncComfyManager(false, true);
+              show("info", settings.comfyCloseWithPhotoshop
+                ? "已开启：WavePlug 启动的 ComfyUI 随 Photoshop 关闭，终端将隐藏。"
+                : "已关闭：ComfyUI 将独立运行；若当前空闲，会安全重启以显示终端。");
+            },
+          }),
+          h("span", null, "随 Photoshop 一同关闭 ComfyUI（默认开启）")) : null,
+        svc.launch ? h("div", { class: "muted small" }, "关闭此项后，ComfyUI 会独立运行且保留终端；WavePlug 外置框架仍会随 Photoshop 退出。已由其他方式启动的 ComfyUI 不会被接管或关闭。") : null,
         svc.debugSave ? h("div", { class: "group-label" }, "排查问题") : null,
         svc.debugSave && h("label", { class: "check-row", title: "每次生成时把发送的图片、返回的图片和提交的工作流保存到 F:\\waveplug\\studio\\reports\\debug_*。大图一张可达几十 MB，排查完请关闭" },
           h("input", { type: "checkbox", checked: settings.debugFiles, onChange: (e: Event) => { settings.debugFiles = (e.target as HTMLInputElement).checked; store.saveSettings(settings); } }),
@@ -1029,15 +1215,20 @@ export function mountApp(root: HTMLElement, svc: Services) {
   // ── references ──
   /** empties a slot; the later references move up one */
   function removeRef(slot: number) {
+    if (layerReferenceDropInProgress) { setStatus("正在批量添加参考图，请稍后再调整槽位", "info"); return; }
     for (let s2 = slot; s2 < MAX_REFERENCES; s2++) refs[s2] = refs[s2 + 1];
     refs[MAX_REFERENCES] = undefined;
     renderRefs();
   }
   /** Reference picker: clipboard, image file, or any layer of the document (with previews). */
   function refMenu(slot: number, _anchor?: HTMLElement) {
-    const auto = !!profile && !profile.bindings.some(b => b.role === "reference");
+    if (layerReferenceDropInProgress) { setStatus("正在批量添加参考图，请稍后再调整槽位", "info"); return; }
+    const auto = autoRefs();
     const tag = auto ? `图${slot + 1}` : `参考 ${slot}`;
-    const set = (r: RefSlot) => { refs[slot] = r; sheet.remove(); renderRefs(); };
+    const set = (r: RefSlot) => {
+      if (layerReferenceDropInProgress) { setStatus("正在批量添加参考图，请稍后再调整槽位", "info"); return; }
+      refs[slot] = r; sheet.remove(); renderRefs();
+    };
     const layers = doc ? svc.host.listLayers(doc.id).filter(l => l.kind !== "group" && !l.name.startsWith(FILL_PREFIX) && !l.name.startsWith(BLEND_PREFIX) && !l.name.startsWith(EXTRACT_PREFIX) && !l.name.startsWith(EXPAND_PREFIX) && !l.name.startsWith(GENERATE_PREFIX) && !l.name.startsWith(UPSCALE_PREFIX)) : [];
     const list = h("div", { class: "layer-list" }, ...layers.map(l => {
       const img = h("div", { class: "layer-thumb" }, icon("image", 14));
@@ -1068,8 +1259,151 @@ export function mountApp(root: HTMLElement, svc: Services) {
     void (async () => { for (const row of Array.from(list.children)) { if (!sheet.parentNode) break; await (row as any)._load?.(); } })();
   }
 
+  /** Adds a Photoshop layer as a reference. The source document and layer are revalidated at drop time. */
+  async function addLayerReference(slot: number, sourceDocId: number, layerId: number, _dragName = "") {
+    if (layerReferenceDropInProgress) { setStatus("正在批量添加参考图，请稍后再试", "info"); return; }
+    if (!refSlotNumbers().includes(slot)) {
+      setStatus("当前工作流没有这个参考图插槽", "error");
+      return;
+    }
+    if (run) {
+      setStatus("生成过程中不能替换参考图", "info");
+      return;
+    }
+    if (!svc.host.docExists(sourceDocId)) {
+      setStatus("来源 PSD 已关闭，无法读取这个图层", "error");
+      return;
+    }
+    const layer = svc.host.listLayers(sourceDocId).find(l => l.id === layerId);
+    if (!layer || (_dragName && layer.name !== _dragName) || layer.kind === "group"
+      || [FILL_PREFIX, BLEND_PREFIX, EXTRACT_PREFIX, EXPAND_PREFIX, GENERATE_PREFIX, UPSCALE_PREFIX].some(prefix => layer.name.startsWith(prefix))) {
+      setStatus("图层已变化或不是普通图层，无法拖入参考图", "error");
+      return;
+    }
+    try {
+      const thumb = await svc.host.layerThumbnail(sourceDocId, layerId, 128);
+      if (layerReferenceDropInProgress) { setStatus("正在批量添加参考图，请稍后再试", "info"); return; }
+      refs[slot] = { kind: "layer", docId: sourceDocId, layerId, name: layer.name, thumb };
+      renderRefs();
+      log("info", "reference layer dropped", JSON.stringify({ slot, docId: sourceDocId, layerId, name: layer.name }));
+      setStatus(`已将图层「${layer.name}」放入参考图 ${slot}`, "ok");
+    } catch (e) {
+      log("warn", "reference layer drop failed", sourceDocId, layerId, e);
+      setStatus("读取拖入图层失败：" + (e as Error).message, "error");
+    }
+  }
+
+  /** Adds a multi-selection from one WaveLayer drop, filling empty slots in layer order. */
+  async function addLayerReferences(startSlot: number, sourceDocId: number, candidates: LayerReferenceCandidate[], totalCount: number) {
+    if (layerReferenceDropInProgress) { setStatus("正在批量添加参考图，请稍后再拖入", "info"); return; }
+    const capacity = refSlotCapacity();
+    if (!capacity.includes(startSlot)) {
+      setStatus("当前工作流没有这个参考图插槽", "error");
+      return;
+    }
+    if (run) {
+      setStatus("生成过程中不能添加参考图", "info");
+      return;
+    }
+    if (!svc.host.docExists(sourceDocId)) {
+      setStatus("来源 PSD 已关闭，无法读取这些图层", "error");
+      return;
+    }
+    layerReferenceDropInProgress = true;
+    try {
+    const current = svc.host.listLayers(sourceDocId);
+    const byId = new Map(current.map(layer => [layer.id, layer]));
+    const unique = [...new Map(candidates.map(layer => [layer.layerId, layer])).values()];
+    const valid = unique.filter(candidate => {
+      const layer = byId.get(candidate.layerId);
+      return !!layer && layer.name === candidate.name && layer.kind !== "group"
+        && ![FILL_PREFIX, BLEND_PREFIX, EXTRACT_PREFIX, EXPAND_PREFIX, GENERATE_PREFIX, UPSCALE_PREFIX].some(prefix => layer.name.startsWith(prefix));
+    });
+    const plan = planLayerReferenceDrop(
+      startSlot,
+      valid,
+      Math.max(totalCount, candidates.length),
+      capacity,
+      capacity.filter(slot => !!refs[slot]),
+    );
+    if (!plan.assignments.length) {
+      setStatus(`从参考图 ${startSlot} 开始没有空槽位；已有参考图不会被覆盖`, "error");
+      return;
+    }
+
+    let added = 0;
+    for (const item of plan.assignments) {
+      const layer = byId.get(item.layer.layerId);
+      if (!layer) continue;
+      try {
+        const thumb = await svc.host.layerThumbnail(sourceDocId, layer.id, 128);
+        refs[item.slot] = { kind: "layer", docId: sourceDocId, layerId: layer.id, name: layer.name, thumb };
+        added++;
+        log("info", "reference layer batch dropped", JSON.stringify({ slot: item.slot, docId: sourceDocId, layerId: layer.id, name: layer.name }));
+      } catch (e) {
+        log("warn", "reference layer batch item failed", item.slot, sourceDocId, layer.id, e);
+      }
+    }
+    renderRefs();
+    const notPlaced = Math.max(0, Math.max(totalCount, candidates.length) - added);
+    if (!added) setStatus("读取拖入图层失败，没有添加参考图", "error");
+    else if (notPlaced) setStatus(`已放入 ${added} 张参考图；${notPlaced} 张未放入（最多 6 张或空位不足）`, "info");
+    else setStatus(`已将 ${added} 个图层依次放入参考图`, "ok");
+    } finally {
+      layerReferenceDropInProgress = false;
+    }
+  }
+
+  /** The native surface uses the same Photoshop/file/clipboard sources as the UXP picker. */
+  async function addReferenceFromSurface(slot: number, source: "layer" | "file" | "clipboard") {
+    if (layerReferenceDropInProgress) { setStatus("正在批量添加参考图，请稍后再试", "info"); return; }
+    if (!refSlotNumbers().includes(slot)) {
+      setStatus("当前工作流没有这个参考图插槽", "error");
+      return;
+    }
+    if (source === "clipboard") {
+      await pasteReference(slot);
+      return;
+    }
+    if (source === "file") {
+      try {
+        const file = await svc.pickImage();
+        if (!file) return;
+        if (layerReferenceDropInProgress) { setStatus("正在批量添加参考图，请稍后再调整槽位", "info"); return; }
+        refs[slot] = { kind: "file", name: file.name, bytes: file.bytes, thumb: file.url };
+        renderRefs();
+        setStatus(`已添加参考图：${file.name}`, "ok");
+      } catch (e) {
+        log("warn", "overlay reference file", e);
+        setStatus("选择参考图失败：" + (e as Error).message, "error");
+      }
+      return;
+    }
+    if (!doc) {
+      setStatus("请先打开 Photoshop 文档并选中要用作参考的图层", "error");
+      return;
+    }
+    const layer = svc.host.activeLayer(doc.id);
+    if (!layer || layer.kind === "group"
+      || [FILL_PREFIX, BLEND_PREFIX, EXTRACT_PREFIX, EXPAND_PREFIX, GENERATE_PREFIX, UPSCALE_PREFIX].some(prefix => layer.name.startsWith(prefix))) {
+      setStatus("请先在 Photoshop 图层面板选中一个普通图层", "error");
+      return;
+    }
+    try {
+      const thumb = await svc.host.layerThumbnail(doc.id, layer.id, 128);
+      if (layerReferenceDropInProgress) { setStatus("正在批量添加参考图，请稍后再试", "info"); return; }
+      refs[slot] = { kind: "layer", docId: doc.id, layerId: layer.id, name: layer.name, thumb };
+      renderRefs();
+      setStatus(`已添加当前图层为参考图：${layer.name}`, "ok");
+    } catch (e) {
+      log("warn", "overlay reference layer", layer.id, e);
+      setStatus("读取当前图层失败：" + (e as Error).message, "error");
+    }
+  }
+
   /** Clipboard → reference slot (button in the picker, or Ctrl+V on the panel). */
   async function pasteReference(slot?: number) {
+    if (layerReferenceDropInProgress) { setStatus("正在批量添加参考图，请稍后再粘贴", "info"); return; }
     const slots = refSlotNumbers();
     if (!slots.length) { setStatus("当前工作流不支持参考图", "error"); return; }
     const target = slot ?? (slots.find(s => !refs[s]) ?? slots[slots.length - 1]);
@@ -1082,9 +1416,10 @@ export function mountApp(root: HTMLElement, svc: Services) {
       // the slot shows a 128 px copy, not the uploaded picture as base64
       const k = Math.min(1, 128 / Math.max(px.width, px.height));
       const small = downscale(flat, Math.max(1, Math.round(px.width * k)), Math.max(1, Math.round(px.height * k)));
+      if (layerReferenceDropInProgress) { setStatus("正在批量添加参考图，请稍后再粘贴", "info"); return; }
       refs[target] = { kind: "file", name: "剪贴板.png", bytes, thumb: bytesToDataUrl(encodePng(small), "image/png") };
       renderRefs();
-      const auto = !!profile && !profile.bindings.some(b => b.role === "reference");
+      const auto = autoRefs();
       setStatus(`已从剪贴板添加参考图（${auto ? "图" + (target + 1) : "参考 " + target}）`, "ok");
     } catch (e) { log("warn", "paste reference", e); setStatus("读取剪贴板失败：" + (e as Error).message, "error"); }
   }
@@ -1184,7 +1519,6 @@ export function mountApp(root: HTMLElement, svc: Services) {
     const written = { group: null as FillGroup | null };
     stash = null;
     renderAll();
-    overlay?.send({ type: "hide" });
     try {
       const res = await runInpaint(svc.host, comfy, {
         profile: p, prompt: again ? again.prompt : cleanPrompt(prompt.value), seed: ps.seedMode === "fixed" ? ps.seed : null, params: effectiveParams(p, ps),
@@ -1304,7 +1638,7 @@ export function mountApp(root: HTMLElement, svc: Services) {
   log("info", "start", svc.version, svc.host.kind, settings.comfyUrl);
   renderAll();
   svc.host.onChange(() => { void refresh(); if (toolsMode()) void toolsView.refresh(); });
-  if (svc.host.kind === "uxp") overlay = connectOverlay(onOverlay);
+  if (svc.host.kind === "uxp") startOverlay();
   void refresh();
   if (toolsMode()) void toolsView.refresh();
   void checkConn();

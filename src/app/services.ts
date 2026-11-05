@@ -3,6 +3,7 @@
 import type { Comfy } from "../core/comfy/client.ts";
 import type { Profile, TaskType } from "../core/workflow/profile.ts";
 import type { LayerTools, LayerTree, PsHost } from "../ps/host.ts";
+import type { Overlay } from "./overlay.ts";
 
 export interface PickedImage { name: string; bytes: Uint8Array; url?: string }
 
@@ -10,6 +11,8 @@ export interface Services {
   host: PsHost;
   tools: LayerTools;
   layers: LayerTree;
+  /** Shared native helper connection, created by the Studio panel and used by WaveLayer drag/drop. */
+  overlay?: Overlay;
   /** Created on demand from the configured address. */
   comfy(base: string): Comfy;
   pickJson(): Promise<{ name: string; text: string } | null>;
@@ -21,8 +24,10 @@ export interface Services {
   debugSave?(name: string, png: Uint8Array): void;
   /** Lets the user pick the ComfyUI start script/exe; returns its native path. */
   pickLauncher?(): Promise<string | null>;
-  /** Starts the ComfyUI script/exe; returns an error message or null. */
+  /** Starts the ComfyUI script/exe; returns an error message or null (legacy manual launch). */
   launch?(path: string): Promise<string | null>;
+  /** Ensures the native overlay helper is running; the helper then manages ComfyUI itself. */
+  launchOverlay?(): Promise<string | null>;
   /** present only in the development build: reloads the code from disk */
   devReload?(): void;
   version: string;
@@ -36,6 +41,12 @@ export interface Settings {
   debugFiles: boolean;
   /** ComfyUI start script / executable for one-click start (e.g. run_nvidia_gpu.bat) */
   comfyLaunch: string;
+  /** Close only a ComfyUI instance launched by WavePlug when Photoshop exits; default true. */
+  comfyCloseWithPhotoshop: boolean;
+  /** Do not open a browser when the native helper starts ComfyUI; default true. */
+  comfyNoBrowser: boolean;
+  /** Whether Photoshop startup also launches ComfyUI; default true (helper still starts). */
+  comfyAutoStartWithPhotoshop: boolean;
   /** 生成 (the AI modes) or 工具 */
   view?: "generate" | "tools";
   /** panel mode and the workflow last used in each mode */
@@ -66,7 +77,7 @@ function write(k: string, v: unknown) {
 }
 
 export const store = {
-  settings: (): Settings => ({ comfyUrl: "http://127.0.0.1:8188", activeProfile: null, advancedOpen: false, debugFiles: false, comfyLaunch: "", ...read<Partial<Settings>>(KEY.settings, {}) }),
+  settings: (): Settings => ({ comfyUrl: "http://127.0.0.1:8188", activeProfile: null, advancedOpen: false, debugFiles: false, comfyLaunch: "", comfyCloseWithPhotoshop: true, comfyNoBrowser: true, comfyAutoStartWithPhotoshop: true, ...read<Partial<Settings>>(KEY.settings, {}) }),
   saveSettings: (s: Settings) => write(KEY.settings, s),
   profiles: (): Profile[] => read<Profile[]>(KEY.profiles, []),
   saveProfiles: (p: Profile[]) => write(KEY.profiles, p),

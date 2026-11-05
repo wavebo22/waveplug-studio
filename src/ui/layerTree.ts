@@ -8,11 +8,16 @@
 import { log } from "../app/log.ts";
 import { resultText } from "../core/layers/smart.ts";
 import { ThumbCache, thumbRetryDelay } from "../core/layers/thumbs.ts";
+import { routeLayerDragRelease } from "../core/layers/drag.ts";
+import { MAX_REFERENCES } from "../core/workflow/references.ts";
 import { workbenchPlacementAnchor } from "../core/layers/workbench.ts";
 import { clampThumbPercent, legacyThumbPercent, thumbnailMetrics, THUMB_PERCENT_KEY } from "../core/layers/topControls.ts";
 import { MULTI_EFFECTS } from "../core/layers/effects.ts";
 import { type AdvancedFilter, type Filter, type LayerAction, type LayerKind, type LockKey, type MoveStep, type Row, type SmartAction, type TreeLayer, type Where, BLEND_MODES, ancestors, isCompactRow, queryActive, clickSelect, contentUsers, canDropToDelete, canDropMaskOnto, copyPlan, dropPlan, previewMoveTree, dropZone, filterCounts, isVariantLayer, layerMenu, smartQuickMenu, nextLayerAfterDelete, layerTags, linkPeers, lockPlan, packChips, lockedByGroup, sharedColors, selectionAfterLocalClear, visibleRows } from "../core/layers/tree.ts";
-import { type LayerTools, type LayerTree, type RunOptions, type TargetPart, ADJUSTMENTS } from "../ps/host.ts";
+import { type LayerTools, type LayerTree, type RunOptions, type TargetPart, ADJUSTMENTS, FILL_PREFIX, BLEND_PREFIX, EXTRACT_PREFIX, EXPAND_PREFIX, GENERATE_PREFIX, UPSCALE_PREFIX } from "../ps/host.ts";
+import type { Overlay } from "../app/overlay.ts";
+import type { CanvasView } from "../core/overlay/protocol.ts";
+import { frameKey, frameOnScreen, layerFrame } from "../core/overlay/hoverFrame.ts";
 import { every, h, icon, isShown, listen, replace, setShown } from "./dom.ts";
 import { type PopItem, createPopup } from "./popupMenu.ts";
 import { onSmartTarget } from "./smartTarget.ts";
@@ -69,9 +74,8 @@ const thumbPx = () => thumbSize.thumb * 2;
 const THUMB_BATCH = 6;
 /** layers whose pixels make a useful thumbnail (groups, text and adjustments get their mark, like Photoshop) */
 let thumbsOn = thumbPercent > 0;
-/** resting on a row selects its layer in Photoshop for the moment, so the canvas marks where it is */
-// off unless turned on: each hover selects in Photoshop, which can stall it (see LAYER_PANEL_HANDOFF §5)
-let peekOn = (() => { try { return localStorage.getItem("wp.layers.peek") === "on"; } catch { return false; } })();
+/** 悬停边框 (on unless turned off): resting on a row frames its layer on the canvas, drawn by the overlay helper */
+let frameOn = (() => { try { return localStorage.getItem("wp.layers.hoverFrame") !== "off"; } catch { return true; } })();
 /** layers drawn with a picture (an empty layer's is blank, like Photoshop's); hasThumb: one to read */
 const hasPicture = (l: TreeLayer) => thumbsOn && (l.kind === "pixel" || l.kind === "smartObject" || l.kind === "shape" || l.kind === "fill" || l.kind === "background");
 const hasThumb = (l: TreeLayer) => hasPicture(l) && l.width > 0 && l.height > 0;
@@ -83,8 +87,10 @@ const CHIP_DOUBLE = 450;
 const DOUBLE_CLICK = 600;
 /** width of a variation chip (picture and number) in a variant layer's row */
 const VCHIP_W = 78;
-/** how long the mouse rests on a row before its layer is marked on the canvas */
-const PEEK_DELAY = 60;
+/** how long the mouse rests on a row before its layer is framed on the canvas (a quick sweep frames nothing) */
+const FRAME_DELAY = 40;
+/** the canvas view (zoom, scroll) is read again after this long while the pointer stays on the list */
+const FRAME_VIEW_MS = 1000;
 /** A thumbnail: always a small picture (at most 48 px, never more than 4 : 1), the layer's content
  *  or a mask's whole canvas — see core/layers/thumbs.ts thumbArea / frameThumb */
 const thumbImg = (src: string) => h("div", { class: "lt-pic", style: `background-image: url("${src}")` });
@@ -119,7 +125,7 @@ interface RowEl { index: number; el: HTMLElement; eye: HTMLElement; twisty: HTML
 
 /** The list fills the height it is given (the whole WavePlug 图层 panel); `tools` adds the 智能对象
  *  tools to the right-click menu. */
-export function createLayerTreeView(tree: LayerTree, status: Status, tools?: LayerTools) {
+export function createLayerTreeView(tree: LayerTree, status: Status, tools?: LayerTools, overlay?: Overlay, canvasView?: (docId: number) => Promise<CanvasView | null>) {
   let docId: number | null = null, layers: TreeLayer[] = [], users = new Map<string, number>(), canvas = { width: 0, height: 0 };
   /** the layers by id (kept with `layers`): lookups in drawing and dragging, which run for every row */
   let byId = new Map<number, TreeLayer>();
@@ -270,33 +276,51 @@ export function createLayerTreeView(tree: LayerTree, status: Status, tools?: Lay
   };
   const selectedLayers = () => layers.filter(l => selected.has(l.id));
 
-  // 悬停定位: resting on a row selects its layer in Photoshop (no history step), so the canvas marks
-  // it (变换控件 of the move tool, or 图层边缘); leaving the list or pressing a row puts the list's
-  // selection back. Meanwhile the list keeps showing its own selection (`peekHold`).
-  let peek: number | null = null, peekHold = false, peekTimer: ReturnType<typeof setTimeout> | null = null;
-  let peekWork: Promise<void> = Promise.resolve();
-  const peekQueue = (fn: () => Promise<void>) => (peekWork = peekWork.then(fn).catch(e => log("warn", "layer peek", e)));
-  const peekAt = (id: number) => {
-    if (peekTimer) { clearTimeout(peekTimer); peekTimer = null; }
-    if (!peekOn || drag || docId === null || id === peek) return;
-    peekTimer = setTimeout(() => {
-      peekTimer = null;
-      const d = docId;
-      if (d === null || drag || (peek === null && selected.size === 1 && selected.has(id))) return;
-      peek = id; peekHold = true;
-      // a row passed over before Photoshop got to it is skipped
-      void peekQueue(async () => { if (peek === id) await tree.select(d, [id]); });
-    }, PEEK_DELAY);
+  // 悬停边框：停在图层行上时，外置 helper 在画布上画出这个图层的范围（PS 里不选中、不读像素、不进历史记录）。
+  // The bounds come from the list's own read; the canvas view is one property read, reused while the
+  // pointer stays on the list. Only the newest hovered row counts, so a fast sweep queues nothing.
+  let frameId: number | null = null, frameTimer: ReturnType<typeof setTimeout> | null = null, frameSent = "";
+  let frameView: { docId: number; view: CanvasView; at: number } | null = null;
+  let viewReading: { docId: number; job: Promise<CanvasView | null> } | null = null;
+  const sendFrame = (f: ReturnType<typeof frameOnScreen>) => {
+    const k = frameKey(f);
+    if (k === frameSent) return;
+    frameSent = k;
+    overlay?.hoverFrame(f);
   };
-  /** ends the preview; `restore`: put the list's selection back in Photoshop (else the caller selects) */
-  const endPeek = (restore = true): Promise<void> => {
-    if (peekTimer) { clearTimeout(peekTimer); peekTimer = null; }
-    if (peek === null) return peekWork;
-    peek = null;
-    const d = docId, ids = layers.filter(l => selected.has(l.id)).map(l => l.id);
-    if (!restore || d === null) { peekHold = false; return peekWork; }
-    return peekQueue(() => tree.select(d, ids)).then(() => { if (peek === null && peekHold) { peekHold = false; void refresh(); } });
+  /** takes the frame away at once (nothing waits for a read in flight) */
+  const hideFrame = () => {
+    if (frameTimer) { clearTimeout(frameTimer); frameTimer = null; }
+    frameId = null;
+    sendFrame(null);
   };
+  const viewOf = async (d: number): Promise<CanvasView | null> => {
+    if (frameView?.docId === d && Date.now() - frameView.at < FRAME_VIEW_MS) return frameView.view;
+    if (viewReading?.docId !== d) {
+      const job = canvasView!(d).catch(e => { log("warn", "hover frame view", e); return null; });
+      viewReading = { docId: d, job };
+      void job.finally(() => { if (viewReading?.job === job) viewReading = null; });
+    }
+    const v = await viewReading.job;
+    if (v) frameView = { docId: d, view: v, at: Date.now() };
+    return v;
+  };
+  const drawFrame = async (id: number) => {
+    const d = docId, l = byId.get(id), area = l ? layerFrame(l) : null;
+    if (d === null || !area) { sendFrame(null); return; }
+    const v = await viewOf(d);
+    // the pointer moved on (or a drag began) while the view was read: that row draws its own
+    if (frameId !== id || docId !== d || drag) return;
+    sendFrame(v ? frameOnScreen(area, v) : null);
+  };
+  const frameAt = (id: number) => {
+    if (!frameOn || !canvasView || !overlay?.connected || drag || docId === null || id === frameId) return;
+    frameId = id;
+    if (frameTimer) clearTimeout(frameTimer);
+    frameTimer = setTimeout(() => { frameTimer = null; if (frameId === id) void drawFrame(id); }, FRAME_DELAY);
+  };
+  // the helper hides the frame itself when the connection goes
+  overlay?.onDisconnected(() => { frameSent = ""; frameId = null; });
 
   const countEl = h("span", { class: "muted small" });
   /** 属性: what the selected layer is, in small type under the title */
@@ -377,15 +401,15 @@ export function createLayerTreeView(tree: LayerTree, status: Status, tools?: Lay
     setShown(thumbPopup, open);
     if (open) { thumbValue.value = thumbPercent + "%"; thumbSlider.value = thumbPercent; }
   });
-  const peekBtn = h("button", { class: "lt-head-btn", title: "悬停定位：鼠标停在一行上，就在 PS 里临时选中这个图层，画布上会框出它（需要移动工具勾选「显示变换控件」，或打开「视图 › 显示 › 图层边缘」）；移开后恢复原来的选中" }, "悬停定位");
-  const renderPeekBtn = () => peekBtn.classList.toggle("off", !peekOn);
-  peekBtn.addEventListener("click", () => {
-    peekOn = !peekOn;
-    try { localStorage.setItem("wp.layers.peek", peekOn ? "on" : "off"); } catch { /* not kept */ }
-    renderPeekBtn();
-    if (!peekOn) void endPeek();
+  const frameBtn = h("button", { class: "lt-head-btn", title: "悬停边框：鼠标停在一行上，画布上用细蓝框标出这个图层的范围；不改变选中的图层。需要外置 helper 在运行" }, "悬停边框");
+  const renderFrameBtn = () => frameBtn.classList.toggle("off", !frameOn);
+  frameBtn.addEventListener("click", () => {
+    frameOn = !frameOn;
+    try { localStorage.setItem("wp.layers.hoverFrame", frameOn ? "on" : "off"); } catch { /* not kept */ }
+    renderFrameBtn();
+    if (!frameOn) hideFrame();
   });
-  renderPeekBtn();
+  renderFrameBtn();
   // Expand/collapse actions sit in the search row, right of the search box (11-04 top redesign).
   const folderExpandIcon = h("span", { class: "lt-action-icon" }, ic("folderOpen", 14));
   const fxExpandIcon = h("span", { class: "lt-action-icon lt-fx-action" }, h("span", {}, "fx"), icon("chevron", 9));
@@ -547,7 +571,7 @@ export function createLayerTreeView(tree: LayerTree, status: Status, tools?: Lay
   const sbar = h("div", { class: "lt-sbar" }, sthumb);
   const empty = h("div", { class: "lt-empty muted" });
   list.append(inner, empty, sbar);
-  list.addEventListener("mouseleave", () => { void endPeek(); hoverEl?.classList.remove("hover"); hoverEl = null; });
+  list.addEventListener("mouseleave", () => { hideFrame(); frameView = null; hoverEl?.classList.remove("hover"); hoverEl = null; });
   const pool: RowEl[] = [];
 
   function makeRow(): RowEl {
@@ -593,7 +617,7 @@ export function createLayerTreeView(tree: LayerTree, status: Status, tools?: Lay
     // the row, which can swallow the second click event) and from the native dblclick on that part,
     // whichever comes first.
     el.addEventListener("mousedown", e => {
-      void endPeek();
+      hideFrame();
       // Ctrl+click on the thumbnail / type icon: the layer's pixels as the selection, like Photoshop
       // (+Shift add, +Alt subtract, +Shift+Alt intersect); the layer selection stays as it is
       const pressed = e as MouseEvent;
@@ -627,7 +651,7 @@ export function createLayerTreeView(tree: LayerTree, status: Status, tools?: Lay
       else if (r.sub.kind === "filters") startDrag(r.id, m, { what: { kind: "filters", layerId: r.id }, row: r.index });
       else if (r.sub.kind === "effects") startDrag(r.id, m, { what: { kind: "effects", layerId: r.id }, row: r.index });
     });
-    el.addEventListener("mouseover", () => peekAt(r.id));
+    el.addEventListener("mouseover", () => frameAt(r.id));
     el.addEventListener("contextmenu", e => e.preventDefault());
     el.addEventListener("click", e => {
       if (suppressClick) return;
@@ -1316,8 +1340,6 @@ export function createLayerTreeView(tree: LayerTree, status: Status, tools?: Lay
     // Ignore intermediate selections and layer states during a batch delete. The delete command
     // itself requests a fresh read after Photoshop commits its history step.
     if (deleting || orderPreview) return;
-    // while a row is previewed only the selection changes, and that is ours: read once it ends
-    if (peekHold) return;
     if (reading) { again = true; return; }
     reading = true;
     try {
@@ -1336,7 +1358,7 @@ export function createLayerTreeView(tree: LayerTree, status: Status, tools?: Lay
           if (localClear) {
             if (localClear.docId !== r.docId || !selectionAfterLocalClear(r.selected, localClear.hostIds).keepClear) localClear = null;
           }
-          if (r.docId !== docId) { firstRow = 0; anchor = null; }
+          if (r.docId !== docId) { firstRow = 0; anchor = null; hideFrame(); }
           else {
             // a layer whose size changed was edited (transform, crop …), whatever the events said
             const old = new Map(layers.map(l => [l.id, l]));
@@ -1346,12 +1368,14 @@ export function createLayerTreeView(tree: LayerTree, status: Status, tools?: Lay
             // masks show the whole canvas: a new canvas size redraws the thumbnails
             if (r.width !== canvas.width || r.height !== canvas.height) thumbs().invalidate("all");
           }
-          if ((!peekHold && !stale) || r.docId !== docId) selected = localClear ? new Set() : new Set(r.selected);
-          else if (stale && !peekHold) again = selecting === 0;
+          if (!stale || r.docId !== docId) selected = localClear ? new Set() : new Set(r.selected);
+          else if (stale) again = selecting === 0;
           docId = r.docId; layers = r.layers; byId = new Map(layers.map(l => [l.id, l])); users = contentUsers(layers); colors = sharedColors(layers, users); canvas = { width: r.width, height: r.height };
         }
         const now = [...selected].sort().join(",");
         if (now !== before && now !== ownSelect && selected.size) reveal(); else render();
+        // a hovered layer that moved or changed size: its frame follows (the view is already read)
+        if (frameId !== null) { if (docId === null || !byId.has(frameId)) hideFrame(); else void drawFrame(frameId); }
         if (now === ownSelect) ownSelect = null;
       } while (again);
     } finally { reading = false; }
@@ -1366,8 +1390,6 @@ export function createLayerTreeView(tree: LayerTree, status: Status, tools?: Lay
     selecting++;
     render();
     const job = selectTail.then(async () => {
-      if (gen !== selectGen || doc !== docId || deleting) return;
-      await endPeek(false);
       if (gen !== selectGen || doc !== docId || deleting) return;
       await tree.select(doc, wanted);
     });
@@ -1490,9 +1512,6 @@ export function createLayerTreeView(tree: LayerTree, status: Status, tools?: Lay
     try {
       // A quick succession of Ctrl/Shift clicks can leave selection modals in flight.
       await selectTail;
-      // Delete targets explicit layer IDs, so a hover-preview restoration is unnecessary and
-      // may fail if the old previewed layer has already disappeared.
-      await endPeek(action !== "delete");
       if (artboardIds.length) {
         const boardName = byId.get(artboardIds[0])?.name ?? "画板";
         status(`正在删除画板「${boardName}」… Photoshop 可能需要较长时间处理其内容`, "busy");
@@ -1570,7 +1589,8 @@ export function createLayerTreeView(tree: LayerTree, status: Status, tools?: Lay
     | { kind: "mask" | "vmask" | "filterMask"; layerId: number }
     | { kind: "variant"; layerId: number; variantId: number };
   let drag: {
-    ids: number[]; y0: number; view0: number; fix: number; view: number; active: boolean; probed: boolean;
+    ids: number[]; sourceId: number; sourceDocId: number; referenceDragStarted: boolean;
+    y0: number; view0: number; fix: number; view: number; active: boolean; probed: boolean;
     target: { id: number; where: Where; plan: MoveStep[] } | null;
     /** dragging a smart filter / all of them / one effect / the whole style instead of layers; where a
      *  filter would go (`toPos` as moved, `insertAt` as copied), the layer the rest would go onto, and
@@ -1632,18 +1652,20 @@ export function createLayerTreeView(tree: LayerTree, status: Status, tools?: Lay
 
   // Cached overlay content, size and panel bounds: mousemove should never rebuild DOM
   // or force a synchronous layout read at 60+ events/second.
-  let ghostContent = "";
-  let ghostSize = { width: 160, height: 26 };
+  let ghostContent = "", ghostThumbUrl: string | null = null;
+  let ghostSize = { width: 180, height: 36 };
   let ghostPanel: { left: number; top: number; width: number; height: number } | null = null;
   function startDrag(id: number, e: MouseEvent, sub?: { what: SubDrag; row: number }) {
     if (e.button !== 0 || docId === null || deleting || orderPreview) return;
     ghostContent = "";
+    ghostThumbUrl = null;
     ghostPanel = null;
     dragPlanCache = null;
     // the selection when the grabbed layer is part of it, in list order; else just that layer
     const ids = sub ? [] : selected.has(id) ? layers.filter(l => selected.has(l.id)).map(l => l.id) : [id];
     const idx = sub ? sub.row : Math.max(0, rows.findIndex(r => r.layer.id === id));
-    drag = { ids, y0: e.clientY, view0: yOf(idx) + heightOf(rows[idx]) / 2, fix: 0, view: 0, active: false, probed: false,
+    drag = { ids, sourceId: id, sourceDocId: docId, referenceDragStarted: false,
+      y0: e.clientY, view0: yOf(idx) + heightOf(rows[idx]) / 2, fix: 0, view: 0, active: false, probed: false,
       target: null, sub: sub?.what ?? null, ftarget: null, ltarget: null, alt: e.altKey,
       x0: e.clientX, px: sub && "x" in sub.what ? sub.what.x : 0,
       hover: null, overTool: null, hoverTimer: null, scroller: null,
@@ -1704,11 +1726,23 @@ export function createLayerTreeView(tree: LayerTree, status: Status, tools?: Lay
     trackDrop();
     drawGhost();
   }
+  function pointerOutsidePanel() {
+    if (!drag?.referenceDragStarted) return false;
+    if (!ghostPanel) {
+      const rect = el.getBoundingClientRect();
+      ghostPanel = { left: rect.left, top: rect.top, width: rect.width, height: rect.height };
+    }
+    return drag.pointerX < ghostPanel.left || drag.pointerY < ghostPanel.top
+      || drag.pointerX >= ghostPanel.left + ghostPanel.width
+      || drag.pointerY >= ghostPanel.top + ghostPanel.height;
+  }
   function drawGhost() {
     const d = drag;
     if (!d?.active) { setShown(ghost, false); return; }
     const s = d.sub, tool = d.overLeftDelete ? "delete" : dropTools.find(b => b.el === d.overTool)?.action ?? null;
     const nameOf = (id: number | null) => layers.find(x => x.id === id)?.name ?? "";
+    const cachedThumb = !s ? thumbs().get(d.sourceId) : undefined;
+    const previewUrl = typeof cachedThumb === "string" ? cachedThumb : null;
     const what = !s ? (d.ids.length > 1 ? `${d.ids.length} 个图层` : nameOf(d.ids[0]))
       : s.kind === "filter" || s.kind === "effect" ? s.name
       : s.kind === "filters" ? `全部智能滤镜（${layers.find(x => x.id === s.layerId)?.filters.length ?? 0}）`
@@ -1741,14 +1775,21 @@ export function createLayerTreeView(tree: LayerTree, status: Status, tools?: Lay
       cls = d.target ? (d.alt ? " copy" : "") : " no";
     }
     const content = what + "\x1f" + act + "\x1f" + cls;
-    if (content !== ghostContent) {
-      replace(ghost, h("span", { class: "lt-ghost-what" }, what), act ? h("span", { class: "lt-ghost-act" }, act) : null);
-      ghost.className = "lt-ghost" + cls;
+    if (content !== ghostContent || previewUrl !== ghostThumbUrl) {
+      const thumb = previewUrl
+        ? h("img", { class: "lt-ghost-thumb", src: previewUrl, alt: "", draggable: "false" })
+        : h("span", { class: "lt-ghost-thumb empty" }, ic(s ? "move" : "image", 14));
+      replace(ghost, thumb, h("span", { class: "lt-ghost-body" },
+        h("span", { class: "lt-ghost-what" }, what),
+        act ? h("span", { class: "lt-ghost-act" }, act) : null));
+      ghost.className = "lt-ghost" + cls + (d.referenceDragStarted ? " external" : "");
       setShown(ghost, true);
       // Size changes only when the label/action changes, not on every mousemove.
-      ghostSize = { width: ghost.offsetWidth || 160, height: ghost.offsetHeight || 26 };
+      ghostSize = { width: ghost.offsetWidth || 180, height: ghost.offsetHeight || 36 };
       ghostContent = content;
+      ghostThumbUrl = previewUrl;
     }
+    setShown(ghost, true);
     // Its containing panel is stable during a drag. Opening the workbench resets
     // this cache. UXP does not consistently support 3D transforms, so use the proven
     // absolute position with NO layout reads after the first measurement.
@@ -1756,6 +1797,7 @@ export function createLayerTreeView(tree: LayerTree, status: Status, tools?: Lay
       const rect = el.getBoundingClientRect();
       ghostPanel = { left: rect.left, top: rect.top, width: rect.width, height: rect.height };
     }
+    if (d.referenceDragStarted && pointerOutsidePanel()) { setShown(ghost, false); return; }
     const x = Math.max(4, Math.min(d.pointerX - ghostPanel.left + 14, ghostPanel.width - ghostSize.width - 4));
     const y = Math.max(4, Math.min(d.pointerY - ghostPanel.top + 12, ghostPanel.height - ghostSize.height - 4));
     ghost.style.left = x + "px";
@@ -1763,6 +1805,13 @@ export function createLayerTreeView(tree: LayerTree, status: Status, tools?: Lay
   }
   function trackDrop() {
     if (!drag || !rows.length) return;
+    if (pointerOutsidePanel()) {
+      setShown(marker, false);
+      drag.target = null; drag.ftarget = null; drag.ltarget = null;
+      if (drag.hoverTimer) clearTimeout(drag.hoverTimer);
+      drag.hoverTimer = null; drag.hover = null;
+      return;
+    }
     if (drag.overTool || drag.overLeftDelete || drag.overWorkbench) {
       setShown(marker, false); drag.target = null; drag.ftarget = null; drag.ltarget = null;
       if (drag.hoverTimer) clearTimeout(drag.hoverTimer);
@@ -1806,7 +1855,7 @@ export function createLayerTreeView(tree: LayerTree, status: Status, tools?: Lay
   }
 
   /** -1 / 1 while the pointer is near (or past) the list's top / bottom edge */
-  const edgeDir = () => !drag || drag.overTool || drag.overLeftDelete || drag.overWorkbench ? 0
+  const edgeDir = () => !drag || drag.overTool || drag.overLeftDelete || drag.overWorkbench || pointerOutsidePanel() ? 0
     : drag.view < 22 ? -1 : drag.view > list.clientHeight - 22 ? 1 : 0;
 
   listen(document, "mousemove", e => {
@@ -1816,7 +1865,24 @@ export function createLayerTreeView(tree: LayerTree, status: Status, tools?: Lay
       // Horizontal movement must also start a drag: the delete rail is on the left edge.
       if (Math.abs(m.clientY - drag.y0) < 5 && Math.abs(m.clientX - drag.x0) < 5) return;
       drag.active = true;
-      if (!drag.sub) workbench.openForDrag();
+      if (!drag.sub) {
+        workbench.openForDrag();
+        const source = byId.get(drag.sourceId);
+        const excluded = [FILL_PREFIX, BLEND_PREFIX, EXTRACT_PREFIX, EXPAND_PREFIX, GENERATE_PREFIX, UPSCALE_PREFIX];
+        if (source && source.kind !== "group" && !excluded.some(prefix => source.name.startsWith(prefix))) {
+          const selectedIds = new Set(drag.ids);
+          const candidates = layers.filter(layer => selectedIds.has(layer.id)
+            && layer.kind !== "group" && !excluded.some(prefix => layer.name.startsWith(prefix)))
+            .map(layer => ({ layerId: layer.id, name: layer.name }));
+          if (candidates.length) {
+            const cachedThumb = thumbs().get(candidates[0].layerId);
+            drag.referenceDragStarted = overlay?.beginLayerDrag(
+              drag.sourceDocId, candidates.slice(0, MAX_REFERENCES), candidates.length,
+              typeof cachedThumb === "string" ? cachedThumb : undefined,
+            ) ?? false;
+          }
+        }
+      }
       ghostPanel = null; // opening the workbench may change panel geometry
       list.classList.add("dragging");
       setShown(hit, true);
@@ -1843,6 +1909,7 @@ export function createLayerTreeView(tree: LayerTree, status: Status, tools?: Lay
     const d = drag;
     drag = null;
     ghostContent = "";
+    ghostThumbUrl = null;
     ghostPanel = null;
     dragPlanCache = null;
     if (d?.hoverTimer) clearTimeout(d.hoverTimer);
@@ -1857,11 +1924,43 @@ export function createLayerTreeView(tree: LayerTree, status: Status, tools?: Lay
     if (d?.active) { suppressClick = true; setTimeout(() => { suppressClick = false; }, 0); draw(); }
     return d;
   }
+  overlay?.onDisconnected(() => {
+    if (!drag?.referenceDragStarted) return;
+    const d = endDrag();
+    workbench.finishDrag(false);
+    log("warn", "external layer drag aborted: helper disconnected", d?.sourceDocId, d?.sourceId);
+  });
+  // The native reference panel may receive the mouse-up after the pointer leaves this UXP panel.
+  // Its completion action is the cross-window equivalent of our normal document mouse-up handler.
+  listen(document, "waveplug:external-layer-drag-finished", () => {
+    if (!drag?.referenceDragStarted) return;
+    endDrag();
+    workbench.finishDrag(false);
+  });
   listen(document, "mouseup", e => {
     const release = e as MouseEvent;
-    const accepted = !!drag?.active && !drag.sub && workbench.isDropTarget(release.clientX, release.clientY);
+    const rect = el.getBoundingClientRect();
+    const releasedInsidePanel = release.clientX >= rect.left && release.clientX < rect.right
+      && release.clientY >= rect.top && release.clientY < rect.bottom;
+    const acceptedWorkbench = !!drag?.active && !drag.sub && workbench.isDropTarget(release.clientX, release.clientY);
+    const route = routeLayerDragRelease({
+      active: !!drag?.active,
+      referenceDragStarted: !!drag?.referenceDragStarted,
+      releasedInsidePanel,
+      acceptedWorkbench,
+    });
     const d = endDrag();
-    if (accepted && d && docId !== null) {
+    if (route === "external" || route === "outside") {
+      workbench.finishDrag(false);
+      if (route === "external") {
+        log("info", "external layer drag release delegated", JSON.stringify({
+          docId: d?.sourceDocId, layerId: d?.sourceId, x: release.clientX, y: release.clientY,
+          panel: [rect.left, rect.top, rect.right, rect.bottom],
+        }));
+      }
+      return;
+    }
+    if (route === "workbench" && d && docId !== null) {
       workbench.add(d.ids.map(layerId => {
         const layer = layers.find(l => l.id === layerId)!;
         return { docId: docId!, docKey, layerId, name: layer.name, kind: layer.kind };
@@ -1931,6 +2030,7 @@ export function createLayerTreeView(tree: LayerTree, status: Status, tools?: Lay
     if (!drag?.active) return;
     const key = (e as KeyboardEvent).key;
     if (key === "Escape") {
+      if (drag.referenceDragStarted) overlay?.cancelLayerDrag();
       endDrag();
       workbench.finishDrag(false);
     } else if (key === "Alt") {
@@ -1967,7 +2067,6 @@ export function createLayerTreeView(tree: LayerTree, status: Status, tools?: Lay
       if (projected) await new Promise<void>(resolve => setTimeout(resolve, 16));
       // An earlier Ctrl/Shift selection modal must finish before a drag creates clones.
       await selectTail;
-      await endPeek(false);
       if (copy) {
         status("正在复制 " + count + " 个图层…", "busy");
         await new Promise<void>(resolve => setTimeout(resolve, 30));
@@ -2385,7 +2484,7 @@ export function createLayerTreeView(tree: LayerTree, status: Status, tools?: Lay
     props, lockRow,
     list,
     workbench.el,
-    h("div", { class: "lt-foot" }, h("div", { class: "lt-foot-btns" }, peekBtn, workbench.toggleButton), bar));
+    h("div", { class: "lt-foot" }, h("div", { class: "lt-foot-btns" }, frameBtn, workbench.toggleButton), bar));
   render();
   return { el, refresh };
 }

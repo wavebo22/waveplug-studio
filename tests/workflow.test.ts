@@ -159,6 +159,31 @@ test("each variation gets its own reference loader node (no shared cached encodi
   assert.notDeepEqual(a["255"].inputs.image_02, b["255"].inputs.image_02);
 });
 
+test("参考图最多 8 张；多图层拖入从目标槽位开始填空位且不覆盖已有图", async () => {
+  const { MAX_REFERENCES, planLayerReferenceDrop } = await import("../src/core/workflow/references.ts");
+  assert.equal(MAX_REFERENCES, 8);
+  const layers = [1, 2, 3, 4, 5, 6, 7, 8].map(layerId => ({ layerId, name: `图层 ${layerId}` }));
+  const plan = planLayerReferenceDrop(2, layers, 8, [1, 2, 3, 4, 5, 6, 7, 8], [1, 3]);
+  assert.deepEqual(plan.assignments.map(x => [x.slot, x.layer.layerId]), [[2, 1], [4, 2], [5, 3], [6, 4], [7, 5], [8, 6]]);
+  assert.equal(plan.notPlaced, 2);
+});
+
+test("8 张参考图的空槽位不足时不覆盖已有内容", async () => {
+  const { planLayerReferenceDrop } = await import("../src/core/workflow/references.ts");
+  const layers = [1, 2, 3, 4].map(layerId => ({ layerId, name: `图层 ${layerId}` }));
+  const plan = planLayerReferenceDrop(6, layers, 4, [1, 2, 3, 4, 5, 6, 7, 8], [1, 2, 3, 4, 5, 6, 8]);
+  assert.deepEqual(plan.assignments.map(x => [x.slot, x.layer.layerId]), [[7, 1]]);
+  assert.equal(plan.notPlaced, 3);
+});
+
+test("参考图空位不足时只放入能容纳的图层，并统计未放入数量", async () => {
+  const { planLayerReferenceDrop } = await import("../src/core/workflow/references.ts");
+  const layers = [1, 2, 3, 4, 5, 6, 7, 8].map(layerId => ({ layerId, name: `图层 ${layerId}` }));
+  const plan = planLayerReferenceDrop(4, layers, 10, [1, 2, 3, 4, 5, 6, 7, 8], [1, 2, 3, 5, 6, 7, 8]);
+  assert.deepEqual(plan.assignments.map(x => [x.slot, x.layer.layerId]), [[4, 1]]);
+  assert.equal(plan.notPlaced, 9);
+});
+
 test("outpaint workflow: image + four pads recognised, pads injected as exact pixels", () => {
   const g = api("guhai_remove_inpaint_outpaint");
   const r = recognize(g);

@@ -60,6 +60,7 @@
   --h-s: 24px;    /* 紧凑控件：图层面板顶部（UXP 原生输入框、下拉框低于 24 会裁字） */
   --h-m: 26px;    /* 默认控件：输入框、下拉框、按钮 */
   --h-l: 30px;    /* 主操作按钮（生成） */
+  --h-drag: 36px; /* 图层拖拽虚影：缩略图 + 两行文字 */
 
   /* 图标：线性，描边 1.5 */
   --ic-s: 12px;
@@ -252,8 +253,8 @@ button, .ub { font: inherit; color: inherit; background: none; border: 0; paddin
 .stage.muted { color: var(--muted); }
 
 /* ── references ── */
-.refs { display: flex; margin-top: 8px; }
-.ref { position: relative; width: 44px; height: 44px; margin-right: 6px; border: 1px dashed var(--field-line); border-radius: var(--r); display: flex; align-items: center; justify-content: center; color: var(--faint); overflow: hidden; }
+.refs { display: flex; flex-wrap: wrap; margin-top: 8px; }
+.ref { position: relative; width: 44px; height: 44px; margin: 0 6px 6px 0; border: 1px dashed var(--field-line); border-radius: var(--r); display: flex; align-items: center; justify-content: center; color: var(--faint); overflow: hidden; }
 .ref.set { border-style: solid; }
 .ref img { width: 100%; height: 100%; object-fit: cover; }
 .ref-num { position: absolute; left: 3px; bottom: 1px; font-size: 10px; color: var(--muted); }
@@ -545,18 +546,23 @@ button, .ub { font: inherit; color: inherit; background: none; border: 0; paddin
 .lt-drop.vbar { right: auto; width: 3px; border-radius: 2px; }
 /* the chip being dragged, left faded where it was */
 .lt-chip.held { opacity: .4; border-style: dashed; border-color: var(--accent-hi); }
-/* the label beside the pointer while dragging: what, and what letting go here does (green move, amber
-   copy, red delete, gray not here) */
-.lt-ghost { position: absolute; left: 0; top: 0; z-index: 25; pointer-events: none; display: flex; align-items: center; max-width: 260px; height: 24px; padding: 0 8px; border-radius: 12px;
-  background: #262626; border: 2px solid var(--accent-hi); color: #f2f2f2; font-size: var(--fs-s); white-space: nowrap; overflow: hidden; }
-.lt-ghost-what { font-weight: 600; overflow: hidden; text-overflow: ellipsis; }
-.lt-ghost-act { margin-left: 8px; color: var(--accent-hi); flex: none; }
-.lt-ghost.copy { border-color: #f0b840; }
-.lt-ghost.copy .lt-ghost-act { color: #f0b840; }
-.lt-ghost.del { border-color: var(--err); }
-.lt-ghost.del .lt-ghost-act { color: var(--err); }
-.lt-ghost.no { border-color: #777; }
-.lt-ghost.no .lt-ghost-act { color: #aaa; }
+/* Photoshop-style drag preview: layer thumbnail, name and the current drop action. */
+.lt-ghost { position: absolute; left: 0; top: 0; z-index: 25; pointer-events: none; display: flex; align-items: center;
+  max-width: 260px; height: var(--h-drag); padding: var(--sp-1) var(--sp-3); border-radius: var(--r);
+  background: var(--c-bg); border: 1px solid var(--c-accent-hi); color: var(--c-text); font-size: var(--fs-s);
+  white-space: nowrap; overflow: hidden; opacity: .9; }
+.lt-ghost-thumb { flex: none; width: var(--h-m); height: var(--h-m); object-fit: contain; border-radius: var(--r-s);
+  background: var(--c-field); border: 1px solid var(--c-line-soft); }
+.lt-ghost-thumb.empty { display: flex; align-items: center; justify-content: center; color: var(--c-text-2); }
+.lt-ghost-body { display: flex; flex-direction: column; justify-content: center; min-width: 0; margin-left: var(--sp-2); overflow: hidden; }
+.lt-ghost-what { font-weight: var(--fw-strong); overflow: hidden; text-overflow: ellipsis; }
+.lt-ghost-act { margin-top: var(--sp-1); color: var(--c-accent-hi); flex: none; }
+.lt-ghost.copy { border-color: var(--c-warn); }
+.lt-ghost.copy .lt-ghost-act { color: var(--c-warn); }
+.lt-ghost.del { border-color: var(--c-err); }
+.lt-ghost.del .lt-ghost-act { color: var(--c-err); }
+.lt-ghost.no { border-color: var(--c-text-3); }
+.lt-ghost.no .lt-ghost-act { color: var(--c-text-2); }
 /* fx / 智能滤镜 icons open their rows: lit while open */
 .lt-fx.open, .lt-subcell.open { color: var(--accent-hi); }
 .lt-subcell { cursor: pointer; }

@@ -10,15 +10,16 @@
 | 2c | [`DELETE_AUDIT.md`](DELETE_AUDIT.md) | 图层删除全链路审计、源码修复及需实测的边界 | Delete / 垃圾桶 / 多选删除 |
 | 2d | WAVELAYER_DRAG_PERFORMANCE.md | WaveLayer 拖拽优化研究、实测指标、乐观排序实验 | 修改图层拖拽之前 |
 | 2e | [`UI_DESIGN_SYSTEM.md`](UI_DESIGN_SYSTEM.md) | UI 规范 v0 草案：token、组件规则、UXP 限制、现状审计、迁移步骤 | 写或改任何界面样式之前 |
-| 2f | [`../native/overlay/HANDOFF.md`](../native/overlay/HANDOFF.md) | 浮动生成条（`native/overlay`，Rust 写的 Windows 小程序）：架构、协议、选区→屏幕坐标换算、窗口行为、已知问题、下一步 | 碰 `native/overlay` 或插件的 overlay 代码之前 |
+| 2f | [`../native/overlay/HANDOFF.md`](../native/overlay/HANDOFF.md) | 外附介面（`native/overlay`，Rust 写的 Windows 小程序；目前是外置生成面板）：分层架构、协议、新增一个外附介面的步骤、PS 画布坐标、阶段进度 | 碰 `native/overlay` 或插件的 overlay 代码之前 |
 | 3 | [`DEVELOPMENT.md`](DEVELOPMENT.md) | 构建、打包、用 UPIA 安装、开发版、日志位置、已确认的 UXP 行为 | 要打包、安装或排查环境时 |
 | — | [`../README.md`](../README.md) | 面向用户的使用说明（1.0 时写的，部分功能没写进去） | 想知道用户看到什么时 |
 | — | [`../CHANGELOG.md`](../CHANGELOG.md) | 已发布版本的改动 | 发版时 |
 | — | [`history/`](history/) | 历史资料：V1.4 设计交接、0.1.x 实机测试交接。**已过时，只作参考** | 需要追溯最初的设计意图时 |
 
 ## 当前状态一览（2026-11-04）
+- **11-06 WaveLayer 悬停边框（用户已在 PS 确认，效果与 PS 原版一致）**：替换旧的「悬停定位」。鼠标停在图层行上，外置 helper 在画布上画出该图层范围的细蓝框（点击穿透、不激活、不读像素、不选中图层）。tsc 通过，npm 181/181，Mac 上 `cargo check --target x86_64-pc-windows-gnu` 通过、`cargo test` 19/19（Windows 专属测试需在主机上跑）；UXP `npm run build` 完成。详见 [`LAYER_PANEL_HANDOFF.md`](LAYER_PANEL_HANDOFF.md) 第 5 节。
 - **11-04 WaveLayer 图标换成 PS 式实心单色（PS 实测确认，用户反馈看得懂）**：按用户提供的 PS 原版图层面板截图重画 26 个图标（`dom.ts` 的 `PS_GLYPHS`，实心、even-odd 单路径）：底栏链接改横向链条，蒙版链接改竖向链条（`psChainV`），智能对象改折角纸，剪贴箭头改向下，锁定透明像素改棋盘格（`psChecker`）。图层类型（组 / 文字 / 调整 / 形状）和状态图标（可编辑、独立、链接）去掉彩色，统一 `--c-text-2`；不可编辑、AI、共用分组色保留。未提交 Git。
-- **11-04 选区浮动生成条原型（插件端已构建；Rust 小程序未编译）**：`native/overlay` 是 Rust 写的 Windows 小程序，画完选区在鼠标旁弹出「提示词 · 数量 · 生成」，在面板外显示；插件通过 `ws://127.0.0.1:47821` 连接（`src/app/overlay.ts`，没运行时每 3 秒静默重试，不影响原功能）。编译与使用见 [`../native/overlay/README.md`](../native/overlay/README.md)。未提交 Git。
+- **11-05 外置生成面板 / WaveLayer 参考图拖放（已部署，等待 Photoshop 现场验证）**：新增从 WaveLayer 普通图层行直接拖到外置生图面板参考图槽位；目标槽位悬停高亮，松开后替换该槽位，UXP 保存源图层 ID，生成时读取原图层像素。跨窗口 mouse-up / Escape 会回传完成动作，清理 WaveLayer 源拖动态。组、AI 结果组和子项拖拽不触发此功能，不改变原有图层排序 / Alt 复制 / 工作台 / 删除区。Rust 34 项、TypeScript 172 项测试通过，类型检查、UXP 构建和 Rust Release 构建通过。最终 helper 已同步到 dist、plugin、dev 三个入口，ComfyUI 已重新启动且 HTTP 8188 正常。**还需在 Photoshop 开发版点橙色 ⟳ 载入最新 UXP bundle，并在测试 PSD 上实测拖放**。详见 [`../native/overlay/HANDOFF.md`](../native/overlay/HANDOFF.md)。
 - **11-04 WaveLayer 顶部重排（PS 实测确认）**：按用户确认的效果图改为 PS 式三行——搜索 + 展开/折叠 + 漏斗/竖向筛选开关；混合模式 + 不透明度；锁定 + 填充（两个百分比框右对齐成一列）。缩略图按钮移到标题行，选中图层信息改为悬停提示。窄面板自动换行。详见 [`UI_DESIGN_SYSTEM.md`](UI_DESIGN_SYSTEM.md) 第 7 节。未提交 Git。
 - **11-04 WaveLayer 双击 PNG 智能对象先转 PSB 再打开（已构建，Photoshop 待实测）**：双击智能对象缩略图或智能对象标识、以及右键「编辑智能对象内容」均复用统一编辑入口。实时读取目标图层 smartObject.fileReference；仅 PNG（大小写不敏感）会先选中所点的**唯一**图层，执行已有的「转为可编辑」工具并确认成功、取得新 PSB 图层 ID 后才使用 placedLayerEditContents 打开；转换失败或结果 ID 异常则报明确错误，不打开原 PNG。PSB/PSD 及其他格式仍直接打开。新增 5 项纯流程测试 + 1 项 UXP 模拟调用顺序与错误处理测试；未在用户 PSD 实测、未提交 Git。
 

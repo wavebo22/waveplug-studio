@@ -1,28 +1,31 @@
-// WavePlug overlay: a small native window that pops up next to the pointer after a selection is
-// made in Photoshop — prompt box, count and 生成 — outside the UXP panel's bounds (UXP can't draw
-// there). The panel decides when to show / hide it and runs the generation itself; this program
-// only collects the prompt. See native/overlay/README.md.
+// WavePlug overlay: external surfaces (外附介面) — plugin UI shown outside the UXP panels, which
+// UXP can't draw past. See native/overlay/README.md and HANDOFF.md.
 //
-// Behaviour:
-// - shown without taking focus, so Photoshop keeps the keyboard until the prompt box is clicked;
-// - Enter or 生成 sends the prompt to the panel, hides the bar and gives the focus back to Photoshop;
-// - Esc or × hides it; it also hides when another program comes to the front or the panel disconnects;
-// - drag the bar by its empty edges to move it.
+// - Default: the host (host.rs) waits for the plugin on ws://127.0.0.1:47821 and shows the
+//   surface it asks for — today the external generate panel (外置生成面板) — while Photoshop's
+//   document has a selection.
+// - `--demo`: the generate panel with made-up data and no plugin, for checking the UI.
+//
+// Layers: protocol.rs / server.rs / host.rs / win.rs are shared by every surface;
+// panel/<surface>/ holds one surface (panel/mod.rs: the `Surface` trait it implements).
 
 #![cfg_attr(not(test), windows_subsystem = "windows")]
 
+mod host;
+mod comfy;
+mod frame;
+mod log;
+mod panel;
 mod protocol;
 mod server;
-
+mod shot;
 #[cfg(windows)]
-mod window;
+mod win;
 
-#[cfg(windows)]
 fn main() {
-    window::run();
-}
-
-#[cfg(not(windows))]
-fn main() {
-    eprintln!("waveplug-overlay only runs on Windows");
+    if std::env::args().any(|a| a == "--demo") {
+        panel::generate::demo::run();
+        return;
+    }
+    host::run();
 }

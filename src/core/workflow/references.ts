@@ -13,7 +13,43 @@ export interface ReferenceSlots {
   nodes: { nodeId: string; inputs: string[] }[];
 }
 
-export const MAX_REFERENCES = 2;
+export const MAX_REFERENCES = 8;
+
+export interface LayerReferenceCandidate {
+  layerId: number;
+  name: string;
+}
+
+export interface LayerReferenceAssignment {
+  slot: number;
+  layer: LayerReferenceCandidate;
+}
+
+/**
+ * Plan one cross-window drop without overwriting existing references.
+ * The slot under the pointer is the starting point; only empty supported slots at or after it
+ * are considered. totalCount may exceed layers.length when the drag payload is capped at eight.
+ */
+export function planLayerReferenceDrop(
+  startSlot: number,
+  layers: readonly LayerReferenceCandidate[],
+  totalCount: number,
+  capacity: readonly number[],
+  occupied: readonly number[],
+): { assignments: LayerReferenceAssignment[]; notPlaced: number } {
+  const used = new Set(occupied);
+  const empty = [...new Set(capacity)]
+    .filter(slot => Number.isInteger(slot) && slot >= startSlot && slot >= 1 && slot <= MAX_REFERENCES && !used.has(slot))
+    .sort((a, b) => a - b);
+  const assignments = layers.slice(0, empty.length).map((layer, index) => ({
+    slot: empty[index],
+    layer,
+  }));
+  return {
+    assignments,
+    notPlaced: Math.max(0, Math.max(totalCount, layers.length) - assignments.length),
+  };
+}
 
 export function findReferenceSlots(api: ApiGraph, info: ObjectInfo): ReferenceSlots | null {
   const nodes: ReferenceSlots["nodes"] = [];

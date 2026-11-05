@@ -1,6 +1,6 @@
 // Builds the UXP plugin into dist/plugin and the browser preview into dist/preview.
 import { build, context } from "esbuild";
-import { cpSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { cpSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 
 const watch = process.argv.includes("--watch");
 const BUILT_AT = new Date().toISOString().slice(5, 16).replace("T", " ");
@@ -36,6 +36,13 @@ const devManifest = {
 writeFileSync("dist/dev/manifest.json", JSON.stringify(devManifest, null, 2));
 cpSync("dev/index.html", "dist/dev/index.html");
 cpSync("dev/loader.js", "dist/dev/loader.js");
+
+// The native helper is launched by UXP through launchProcess permission.
+// Keep a copy beside each manifest so release plugins can resolve it with getPluginFolder().
+if (existsSync("dist/waveplug-overlay.exe")) {
+  cpSync("dist/waveplug-overlay.exe", "dist/plugin/waveplug-overlay.exe");
+  cpSync("dist/waveplug-overlay.exe", "dist/dev/waveplug-overlay.exe");
+}
 
 const targets = [
   { ...common, entryPoints: ["src/main.uxp.ts"], outfile: "dist/plugin/index.js" },

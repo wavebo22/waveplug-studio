@@ -1,13 +1,20 @@
 [package]
 name = "waveplug-overlay"
-version = "0.1.0"
+version = "0.4.0"
 edition = "2021"
-description = "WavePlug 选区浮动生成条：在 Photoshop 面板之外、鼠标旁边显示提示词 + 生成"
+description = "WavePlug 外附介面：在 Photoshop 面板之外显示插件界面（目前是外置生成面板）"
 
 [dependencies]
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 tungstenite = "0.24"
+# the external generate panel (外置生成面板): native UI, no browser engine
+eframe = { version = "0.31", default-features = false, features = ["glow", "default_fonts"] }
+# system fonts mapped, not read: only the glyphs drawn take memory
+memmap2 = "0.9"
+# Existing local crates: decode cached PNG/JPEG thumbnails for the native variant rail.
+data-encoding = "2.11"
+image = { version = "0.25", default-features = false, features = ["png", "jpeg"] }
 
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.59", features = [
@@ -15,6 +22,9 @@ windows-sys = { version = "0.59", features = [
   "Win32_Graphics_Gdi",
   "Win32_Graphics_Dwm",
   "Win32_System_LibraryLoader",
+  "Win32_System_JobObjects",
+  "Win32_System_Console",
+  "Win32_Security",
   "Win32_System_Threading",
   "Win32_UI_HiDpi",
   "Win32_UI_Input_KeyboardAndMouse",

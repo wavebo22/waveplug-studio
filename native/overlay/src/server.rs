@@ -1,7 +1,7 @@
 // WebSocket server on 127.0.0.1 for the WavePlug panel. One client at a time (the panel); a new
 // connection replaces the old one, as after the development loader's ⟳.
-// Runs on its own thread: commands go to the window thread through `on_command`, events come
-// back through the outbox.
+// Runs on its own thread: commands go to the host through `on_command` (`on_disconnect` when the
+// plugin goes away), events come back through the outbox. Knows nothing about any surface.
 
 use std::collections::VecDeque;
 use std::io::ErrorKind;
@@ -22,14 +22,14 @@ pub fn send(ev: &Event) {
 }
 
 /// Binds the port; Err means another copy is already running.
-pub fn start(on_command: fn(Command)) -> std::io::Result<()> {
+pub fn start(on_command: fn(Command), on_disconnect: fn()) -> std::io::Result<()> {
     let listener = TcpListener::bind(("127.0.0.1", protocol::PORT))?;
     listener.set_nonblocking(true)?;
-    thread::spawn(move || run(listener, on_command));
+    thread::spawn(move || run(listener, on_command, on_disconnect));
     Ok(())
 }
 
-fn run(listener: TcpListener, on_command: fn(Command)) {
+fn run(listener: TcpListener, on_command: fn(Command), on_disconnect: fn()) {
     let mut client: Option<WebSocket<TcpStream>> = None;
     loop {
         // a new panel connection replaces the old one
@@ -71,7 +71,7 @@ fn run(listener: TcpListener, on_command: fn(Command)) {
             }
             if !alive {
                 client = None;
-                on_command(Command::Hide);
+                on_disconnect();
             }
         }
         thread::sleep(Duration::from_millis(15));

@@ -194,8 +194,35 @@ export class UxpHost implements PsHost {
     const b = vi?.viewInfo?.activeView?.globalBounds, zoom = num(z?.zoom), ppi = num(res?.resolution) || 72;
     const h = num(c?.center?.horizontal), v = num(c?.center?.vertical);
     if (!b || ![zoom, h, v, b.left, b.top, b.right, b.bottom].every(Number.isFinite) || zoom <= 0) return null;
-    // `center` is in points (1/72 inch): back to document pixels
-    return { view: { left: b.left, top: b.top, right: b.right, bottom: b.bottom }, center: { x: h * ppi / 72, y: v * ppi / 72 }, zoom };
+
+    // Windows reports view bounds in physical screen pixels, but Action Manager's center
+    // is in logical display units. Convert with the scale factor of the monitor containing
+    // the Photoshop view center. Document PPI is not the Windows UI scale factor.
+    let centerScale = ppi / 72;
+    if (/win/i.test(navigator.platform)) {
+      try {
+        const displays = await ps().core.getDisplayConfiguration({ physicalResolution: true });
+        const cx = (b.left + b.right) / 2, cy = (b.top + b.bottom) / 2;
+        const display = displays.find((d: any) =>
+          cx >= d.globalBounds.left && cx < d.globalBounds.right
+          && cy >= d.globalBounds.top && cy < d.globalBounds.bottom);
+        const scale = Number(display?.scaleFactor);
+        if (!Number.isFinite(scale) || scale <= 0) {
+          log("warn", "canvas view display scale unavailable", JSON.stringify({ cx, cy, displays }));
+          return null;
+        }
+        centerScale = scale;
+      } catch (e) {
+        log("warn", "canvas view display configuration failed", e);
+        return null;
+      }
+    }
+
+    return {
+      view: { left: b.left, top: b.top, right: b.right, bottom: b.bottom },
+      center: { x: h * centerScale, y: v * centerScale },
+      zoom,
+    };
   }
 
   async selectionMask(docId: number, rect: Rect): Promise<Pixels> {

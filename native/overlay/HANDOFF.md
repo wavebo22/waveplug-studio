@@ -1,153 +1,166 @@
-# 浮动生成条（native/overlay）交接
+# 外附介面（native/overlay）交接
 
-> 2026-11-04。给接手 Rust 端设计的 AI。先读项目根（`studio/`）的 [`AGENTS.md`](../../AGENTS.md)（不提交、不切分支、中文回复、先看日志再改）。
-> 使用说明见同目录的 [`README.md`](README.md)；本文讲现状、设计和接下来要做的事。文中的路径都相对 `studio/`。
+> 2026-11-04。给接手的 AI。先读项目根（`studio/`）的 [`AGENTS.md`](../../AGENTS.md)（不提交、不切分支、先看日志再改）；**回复用户用繁体中文、少用英文词**。
+> 使用说明见同目录 [`README.md`](README.md)。文中路径都相对 `studio/`。
+> 用户要求（11-04）：这套系统要**可复用、可重现、易修改**，它是将来所有插件外附界面的雏形。
 
-## 1. 它是什么，为什么要它
+## 1. 是什么、现在在哪
 
-UXP 把每个插件面板画在一个独立的子窗口里，HTML 永远画不出面板边界（悬停提示、弹窗、拖拽预览都被关在面板里）。`native/overlay` 是一个 Rust 写的 Windows 小程序，和插件通过本机 WebSocket 通信，**在面板外**画东西。
+UXP 把每个插件面板画在独立的子窗口里，HTML 画不出面板边界。`native/overlay` 是 Rust 写的 Windows 小程序，和插件通过 `ws://127.0.0.1:47821` 通信，在面板外画**外附介面**（surface）。
 
-第一个功能：**选区浮动生成条**。在 PS 里建立选区后，选区正下方居中弹出（和 PS 自带的「上下文任务栏」同一位置）：
+第一个外附介面：**外置生成面板**（名称约定：「外置生成面板」；「工作台」只指 WaveLayer 图层面板里的「编辑工作台」）。Photoshop 文档有选区时出现在画布右下角，内容就是插件的生成页。
 
-```
-[ 提示词……………… ] [ 1 ] [ 生成 ] ×
-```
-
-用户已确认（11-04）：能弹出、位置可以。这是原型，用户要求接下来由你负责 Rust 端的设计。
-
-## 2. 现状
-
-| 项 | 状态 |
+| 阶段 | 状态 |
 |---|---|
-| Rust 程序 | 在用户的 Windows 主机上编译运行成功（`dist/waveplug-overlay.exe`，286 KB） |
-| 插件端 | 已构建；`npx tsc --noEmit -p .` 通过，`npm test` 165 项全过 |
-| 按选区坐标定位 | 已实现，**还没有日志证据**：`reports/uxp_runtime.log` 里还没有 `overlay show` 行（可能用户没在这版插件之后点 ⟳）。如果没有这行，生成条走的是第 4 节的「鼠标钩子」回退 |
-| Git | 全部未提交（`native/` 未跟踪）。只在用户要求时提交 |
+| 1 分析与方案 | 完成（见第 7 节的已定决策） |
+| 2 界面 Demo（`--demo`） | 完成，用户 11-04 在 Windows 上确认 |
+| 3 接入：逻辑附属窗口、双向通信、状态同步、选区显示 / 隐藏、模式和参数同步 | **Windows 上已实测主面板显示与画布快捷键**（2026-11-05 用户确认）；前后台与最小化联动修复已编译部署，仍须用户验证切换行为。Mac 上曾用假插件跑通端到端 |
+| 4 完整功能：生成 / 取消、收藏、参考图（含缩略图）、进度和错误、生成完成提示 | **代码已接通**：参考图支持当前图层 / 文件 / 剪贴板、真实缩略图、删除；数量框 X 重置和滚轮增减（2026-11-05） |
+| 5 稳定性测试 | 进行中：Rust / TypeScript 测试通过，等待 Photoshop 现场验证移动角标与参考图 |
 
-**接手第一件事**：请用户点 ⟳、画一个选区，然后在日志里找 `overlay show`，确认 `view` 不是 null、`anchor` 和屏幕上的实际位置一致（见第 4 节）。
+用户要求严格分阶段，每阶段确认后再进下一阶段。
 
-## 3. 架构
+**接手第一件事**：在 Windows 上编译新版 EXE 和 UXP，PS 的开发版面板点一次 ⟳ 载入新版脚本；此后不再需要用户手动双击启动 EXE，插件检测到 WebSocket 未连接时会通过 UXP 的 `shell.openPath` 启动外置框架（初次需用户授权）。核验 `reports/uxp_runtime.log` 的 `overlay connected`，以及 `reports/overlay_runtime.log` 中的 Photoshop 生命周期绑定；不得恢复旧的跨进程主窗口所有者绑定。
+
+## 2. 架构：共用层 + 每个介面自己的层
 
 ```
-PS 事件 ──► 插件 refresh() ──► syncOverlay()
-                                 │  读选区 + 画布视图，换算成屏幕坐标
-                                 ▼
-              ws://127.0.0.1:47821  {"type":"show", prompt, count, anchor}
-                                 ▼
-                       waveplug-overlay.exe（Win32 窗口）
-                                 │  用户输入、按生成
-                                 ▼
-              {"type":"generate", prompt, count} ──► onOverlay() ──► generate()
+插件（UXP）                                         小程序（Rust）
+src/core/overlay/protocol.ts   ⇄ 协议 ⇄             src/protocol.rs
+src/core/overlay/sections.ts   只发变化的区块
+src/core/overlay/hub.ts        介面登记、版本号、    src/server.rs   连线（不认识任何介面）
+                               重连重发、操作分发    src/host.rs     视窗、收状态、画当前介面、送操作
+src/app/overlay.ts             连线、重试、合并发送  src/win.rs      Windows：附属视窗、位置、跟随 PS
+                                                     src/panel/mod.rs  `Surface` 规格
+── 每个介面 ──
+src/core/overlay/generatePanel.ts  区块和操作的格式  src/panel/generate/mod.rs   套用区块、操作转 JSON
+src/ui/generateSurface.ts          何时显示、操作交给  src/panel/generate/state.rs 面板数据和操作
+                                   生成页的现有函数    src/panel/generate/view.rs  画面板
+src/ui/app.ts  startOverlay()      生成页提供状态和     src/panel/generate/demo.rs  假数据 Demo
+                                   改状态的入口
 ```
 
-- 小程序是 **WebSocket 服务端**，插件是客户端。插件连不上时每 3 秒静默重试，插件其他功能完全不受影响。
-- 生成本身**全部由插件做**：小程序只收集提示词和数量。
-- 只在 Photoshop 里连接（`svc.host.kind === "uxp"`），浏览器预览不连。
+原则：
+- **插件是唯一的大脑**：判断、生成、Photoshop 操作都在插件里；外附介面只画收到的状态、回报用户操作。
+- **状态分区块**（`sections`），每次只发变化了的区块（`changedSections`）；每个介面一个只增不减的版本号 `rev`，小程序丢弃旧版本；重连（`hello`）后全部重发并恢复显示。
+- **正在输入的不被覆盖**：提示词框 / 数量框有焦点时，插件发来的旧值不覆盖；提示词停止输入 300 ms 才发（`PROMPT_PAUSE`），其他操作发出前先把待发的提示词补上，保证顺序。
+- 插件端多次状态变化在 40 ms 内合并成一条（`SYNC_MS`）。
 
-### 文件
-
-| 文件 | 作用 |
-|---|---|
-| `native/overlay/Cargo.toml` | 依赖：`windows-sys 0.59`、`tungstenite 0.24`、`serde`。release 用 `opt-level = "z"`、LTO、strip |
-| `native/overlay/src/main.rs` | 入口，`windows_subsystem = "windows"`（无控制台）。非 Windows 只打印一句话 |
-| `native/overlay/src/protocol.rs` | 消息类型和端口，含单元测试 |
-| `native/overlay/src/server.rs` | WebSocket 服务线程：非阻塞读写，每 15 ms 一轮；新连接替换旧连接（开发版 ⟳ 会重连）；连接断开时向窗口发 Hide |
-| `native/overlay/src/window.rs` | 窗口、控件、绘制、定位、鼠标钩子、前台检测 |
-| `native/overlay/build.cmd` | 先 `cargo test` 再 `cargo build --release`；结束正在运行的旧 exe → 复制到 `dist/` → 启动新的 |
-| `src/core/overlay/protocol.ts` | 插件端消息类型、`selectionKey` / `overlayStep`（何时弹出 / 收起）、`docToScreen`（选区 → 屏幕坐标） |
-| `src/app/overlay.ts` | 插件端连接、重试；用 `onDispose` 保证开发版 ⟳ 时关掉旧连接 |
-| `src/ui/app.ts` | `syncOverlay()`（在 `refresh()` 末尾调用）和 `onOverlay()`（收到生成 → 写入提示词和数量 → `generate()`） |
-| `src/ps/host.ts` / `src/ps/uxpHost.ts` | 可选方法 `canvasView(docId)`，读 PS 的视图信息 |
-| `tests/overlay_protocol.test.ts` | 弹出 / 收起规则、消息解析、坐标换算（用 11-04 实测数据） |
-
-## 4. 协议
-
-一个 WebSocket 文本帧 = 一个 JSON 对象。**两边的定义要一起改**：`protocol.rs` ⇄ `protocol.ts`，端口 `47821` 两处都写死了。
+## 3. 协议（两边一起改：`src/protocol.rs` ⇄ `src/core/overlay/protocol.ts`）
 
 插件 → 小程序：
 
 | 消息 | 含义 |
 |---|---|
-| `{"type":"hello"}` | 刚连上 |
-| `{"type":"show","prompt":"…","count":1,"anchor":{left,top,right,bottom}}` | 有新选区。`anchor` 是选区在屏幕上的矩形（物理像素），可省略 |
-| `{"type":"hide"}` | 选区没了 / 面板开始生成 / 当前模式不需要选区 |
+| `{"type":"hello"}` | 刚连上；版本号从头算 |
+| `{"type":"show","panel":"generate","view":{left,top,right,bottom}}` | 显示介面，贴着 `view`（画布在屏幕上的范围，物理像素）摆放；`view` 可为 null |
+| `{"type":"hide","panel":"generate"}` | 隐藏 |
+| `{"type":"state","panel":"generate","rev":7,"sections":{…}}` | 介面状态（只含变化的区块） |
+| `{"type":"layer-drag-start","docId":60,"layerId":15,"name":"图层 3","thumb":"data:image/jpeg;base64,…"}` | WaveLayer 开始跨窗口拖图层；thumb 是可选的小缩略图，不是生图输入 |
+| `{"type":"layer-drag-cancel"}` | Escape 或源面板取消拖动 |
+| `{"type":"hover-frame","rect":{…},"clip":{…}}` | 悬停边框：在 `rect`（屏幕物理像素）外侧画细蓝框，裁到 `clip`（画布视图）；`rect:null` 隐藏。由 `src/frame.rs` 处理，不进 UI 线程 |
 
 小程序 → 插件：
 
 | 消息 | 含义 |
 |---|---|
-| `{"type":"ready","version":"0.1.0"}` | 握手后立即发 |
-| `{"type":"generate","prompt":"…","count":2}` | 按了生成或 Enter。插件端把数量限制在 1–4 |
+| `{"type":"ready","version":"0.2.0"}` | 握手后立即发 |
+| `{"type":"action","panel":"generate","action":{"kind":"set-mode","mode":"extract"}}` | 用户操作；`action` 的格式由介面自己定、自己检查 |
+| `{"type":"view-request","panel":"generate"}` | PS 窗口移动 / 改变大小，请插件重新算画布范围并再发 `show` |
 
-**何时弹出**（插件端 `overlayStep`）：选区标识（文档 id + 边界）变化且不为空 → show；变为空 → hide；没变 → 不动。面板刚打开时第一次读到的选区**不弹**。只在局部重绘 / 融图 / 抠图 / 文生图模式弹，扩图、放大不弹；正在生成时不弹。
+### 3.1 ComfyUI 与 Photoshop 生命周期（2026-11-05 新增）
 
-## 5. 定位：选区 → 屏幕坐标
+- UXP：`src/app/overlay.ts` 在 WebSocket 未连接时只尝试一次 `svc.launchOverlay()`；插件首次请求 `shell.openPath` 需要系统授权。Manifest v5 已声明 `.exe` 的 `launchProcess` 权限，发行构建把 `waveplug-overlay.exe` 随 `dist/plugin` 打包。EXE 使用 Windows GUI 子系统，**不出现控制台窗口**。
+- ComfyUI：`src/ui/app.ts` 的「ComfyUI 连接」设置页有三个开关，由 `src/app/services.ts` 持久化：①「启动时不自动打开网页」默认开启（`comfyNoBrowser=true`，Rust 在 WavePlug 启动 ComfyUI 时向 BAT 的 `%*` 或 EXE 传 `--disable-auto-launch`，对已经运行的进程不重启）；②「不随 Photoshop 自动启动 ComfyUI」默认关闭（存储正向字段 `comfyAutoStartWithPhotoshop=true`，只阻止 ComfyUI 自动启动，外置框架 EXE 仍正常启动，手动点「启动」不受限制）；③「随 Photoshop 一同关闭 ComfyUI」默认开启（`comfyCloseWithPhotoshop=true`）。UXP 连上 EXE 后发送 `{"type":"manage-comfy","path":"…","base":"http://127.0.0.1:8188","closeWithPhotoshop":true,"restartIfNeeded":false,"disableBrowser":true,"startIfMissing":true}`；原生管理器发回 `{"type":"comfy-status","state":"not-configured|autostart-disabled|starting|ready|already-running|...","message":"…","owned":false}`。
+- EXE：`src/comfy.rs` 用 Windows Job Object 管理**仅由 WavePlug 自己启动**的 ComfyUI 进程树；true 用无终端方式启动，并在 Photoshop 进程退出时结束；false 使用可见终端启动，并将 JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE 清零，Photoshop 退出时保留 ComfyUI。已经存在的外部实例只检测/连接，**绝不接管或结束**。
+- 切换 true→false 时：仅当本次受管 ComfyUI 的队列空闲，才安全重启以显示终端；仍在生成时先更新保留策略，暂不重启，下次手动启动/重试时生效。反向切换尽量原地隐藏终端。启动文件丢失、无配置、远程地址、端口占用都要给明确原因，不得重复启动 ComfyUI。
+- `src/win.rs` 使用 Photoshop **进程句柄**（不是窗口是否在前台）监控真正退出，届时无条件关闭外置框架；**不能因为用户切到其他程序或最小化 Photoshop 就终止 ComfyUI**。
+- 回归：Rust `cargo test --release --offline` 包含受管进程树终止/保留测试；UXP `npm run typecheck`、`npm test`。真实 ComfyUI 自动启动需在 PS 开发版 ⟳ 载入新脚本后现场验证。不得为测试直接关闭用户现有 Photoshop 文档或工作流。
 
-PS 不直接给画布的屏幕位置。11-04 用 PS MCP 在用户的 PS 里实测，文档上有这些属性（batchPlay `get`，`_target: [{_property}, {_ref:"document", _id}]`）：
+外置生成面板的区块（`GenerateSections`）：`mode`、`prompt`、`hint`、`favorites`、`refs`、`count`、`action`（按钮文字）、`blocked`（不能生成的原因）、`params`（高级参数：`number` / `toggle` / `seed`）、`run`（进度）、`status`。操作（`GenerateAction`）：`set-mode`、`set-prompt`、`set-count`、`set-number`、`reset-number`、`set-toggle`、`set-seed`、`new-seed`、`toggle-favorite`、`pick-favorite`、`remove-favorite`、`add-ref`、`drop-ref`、`remove-ref`、`finish-layer-drag`、`generate`、`cancel`。
 
-| 属性 | 实测值 | 含义 |
+## 4. 新增一个外附介面（步骤）
+
+以「图层工具面板」为例，名称 `layertools`：
+
+1. **插件，格式**：新建 `src/core/overlay/layerToolsPanel.ts`，写区块类型 `LayerToolsSections`（每个字段是一个区块，可 JSON 化）、操作类型和 `parseLayerToolsAction(raw)`（逐字段检查，不合格返回 null）。照 `generatePanel.ts`。
+2. **插件，接线**：新建 `src/ui/layerToolsSurface.ts`，`overlay.hub.register({ id: "layertools", sections, parseAction, onAction, onViewRequest })`；决定何时 `hub.show` / `hub.hide`；状态可能变化处调用 `overlay.queueSync()`。照 `generateSurface.ts`。
+3. **小程序，介面**：新建 `src/panel/layertools/`，实现 `Surface`（`panel/mod.rs`）：`id()` 返回同一个名称；`apply(sections)` 只更新收到的区块；`ui(ui)` 画画面并返回操作 JSON。界面元件和颜色用 `panel/theme.rs`（token 取自 `plugin/styles.css`）。照 `panel/generate/`。
+4. **小程序，登记**：在 `src/host.rs` 的 `surfaces()` 里加一行。
+5. **测试**：插件端照 `tests/overlay_protocol.test.ts` / `tests/overlay_hub.test.ts` 测格式；小程序端照 `panel/generate/mod.rs` 里的 `tests` 测套用区块和操作 JSON；用 `tools/fake_plugin.ts` 的写法做一个假插件跑端到端，加 `WAVEPLUG_HOST_SHOT` 截图核对。
+
+共用层（连线、版本号、重连、视窗、显示 / 隐藏、位置）不需要改。
+
+**目前的限制**：小程序只有一个视窗，同一时间只显示一个介面（`host.rs` 的 `current`）。要同时显示多个，在 `host.rs` 里为每个介面开一个 egui 视窗（eframe 的多视窗），`win.rs` 按介面名称找视窗。
+
+## 5. 外置生成面板的细节
+
+- **显示规则**（`generateSurface.ts` 的 `refresh`）：当前文档有选区就显示，否则隐藏；不看模式、工作流、生成状态。切换文档时重新取画布范围。`refresh` 在 `app.ts` 的 `refresh()` 末尾调用（PS 每次可能改变文档 / 选区时都会走到）。
+- **状态从哪来**（`app.ts` 的 `startOverlay`）：直接读生成页现有的变量和函数；按钮文字 `actionLabel()`、参考图标签 `refTag()`、参数范围 `paramRange()` 是从原有代码抽出来、两边共用的，改一处两边一起变。高级参数清单 `panelParams()` 和 `renderAdvanced()` 的顺序、规则一致，改其中一个要同步另一个。
+- **操作怎么执行**：调用生成页原有的函数（`setMode`、`setPromptText`、数量写回、参数设置、`generate`、`cancel`、☆ 收藏按钮本身的 `click()`）。参考图 `add-ref` / `remove-ref` 已接到 UXP 的 `addReferenceFromSurface` / `removeRef`：当前图层取 PS 当前选中普通图层，文件走 `svc.pickImage`，剪贴板走 `pasteReference`；原始文件字节留在 UXP，仅把 128 px PNG 缩略图 data URL 发给 Rust。Rust 按槽位缓存纹理，点击 × 删除后仍调用同一个 UXP 数组移除函数。
+- **同步点**：`renderAction`、`renderFav`、`renderRefs`、`renderAdvanced`、`renderStatus` 开头调用 `outSync()`。
+
+## 6. Windows 部分（`src/win.rs`）
+
+- **逻辑附属视窗（2026-11-05）**：主生成面板是独立顶层窗口，**禁止设置 `GWLP_HWNDPARENT` 指向 Photoshop**；实测跨进程真实 owner 会破坏 PS 画布快捷键。保留 `WS_EX_NOACTIVATE`（启动后 eframe 可能覆盖样式，`watch()` 会恢复），在 Photoshop 前台且主窗口未最小化时临时置顶；切换其他程序、最小化或关闭 Photoshop 时移到 `PARK` 屏幕外，返回后由 `PLACED` 缓存的坐标和尺寸还原。不是用 `ShowWindow` 真隐藏。初次从浏览器启动时通过枚举顶层视窗寻找后台 Photoshop；最小化期间不采用 UXP 的异常屏幕坐标。**不要恢复旧的跨进程拥有者绑定**。
+- **位置**：画布**左下角**（用户 11-04 要求），留 12 px（按显示器 DPI 缩放），加上用户拖动的偏移（`OFFSET`，拖动结束时 `drag_finished` 记下，程序运行期间有效），并限制在画布内；高度不超过画布高度。没有画布范围时退回 PS 视窗，再退回显示器工作区。
+- **移动**：只能用右下角角标（`host.rs` 的 `grip`）拖动。不要使用 `ViewportCommand::StartDrag`；当前窗口必须保持 `WS_EX_NOACTIVATE`，由 `win::move_by` 在拖动期间使用同步 `SetWindowPos(... SWP_NOACTIVATE)` 逐帧移动，松开时 `drag_finished` 将物理位移写入 `OFFSET`。角标命中区 20 px，视觉仍为三条短斜线。这样避免原生非客户区拖动与 no-activate 冲突，不影响 Photoshop 快捷键。
+- **键盘一直留在 PS**：面板视窗带 `WS_EX_NOACTIVATE`（点按钮不会启用视窗，像屏幕键盘、绘图软件的工具浮窗）。只有提示词框 / 数量框要打字时（`ctx.wants_keyboard_input()`，`host.rs` 的 `track_typing`）才去掉这个样式并拿键盘（`win::set_typing(true)`），不打字了立刻恢复并还给 PS。11-04 历史：第一版点过面板后 Alt 缩放失效；第二版「事后还键盘」后，画布上大部分移动快捷键仍失效，所以改成根本不拿键盘。
+- **日志**：`reports/overlay_runtime.log`（`log.rs`）：启动、show / hide 位置、typing 开关、键盘在谁手上（photoshop / overlay / other）每次变化都记一行；角标拖动记录 drag started / finished 坐标、delta 与累计 OFFSET。
+- **跟随 PS**：每 250 ms 看一次 PS 主视窗位置，变了就发 `view-request`，插件重新算画布再发 `show`。
+- **「隐藏」= 停在画面外**（`PARK`，-32000），不真的隐藏：11-04 第一版用 `ShowWindowAsync` 真隐藏 / 显示，但 egui 在第一次画面时会照它自己记的「隐藏」再藏一次，结果有时选区时不出现、取消选区时反而出现。现在视窗对 egui 来说一直是开着的，只是位置在画面外。启动时设为工具视窗（不在工作列、不在 Alt+Tab）。
+- 从伺服器线程直接移动视窗，用非同步呼叫（`SWP_ASYNCWINDOWPOS`）。视窗靠唯一标题 `WavePlug 外置生成面板`（`host::TITLE`）找到。
+
+- **完成提醒**（共用功能，不属于某个介面）：插件 `hub.toast(title, text, view)` → `{"type":"toast"}`；小程序用 egui 的第二个视窗（`host.rs` 的 `notice`，标题 `WavePlug 提示`）画黄色边框的提示，`win::place_toast` 放到画布右下角并设为 PS 的附属、不启用视窗；`ms` 到了或点一下就关。外置生成面板在 `generateSurface.ts` 里检测「运行中 → 结束且不是错误 / 取消」时发出。
+- **高度贴合内容**：`host.rs` 的 `fit` 量内容高度，`win::fit_height` 保持底边不动调整高度。
+- **数量控件（2026-11-05）**：数量框左侧的 × 是重置到 1 的按钮；鼠标悬停在数字输入框上滚轮，每格增减 1，范围固定 1–4；走原来的 `SetCount` 动作，UXP 保存并同步。
+- **参考图缩略图（2026-11-05）**：`GenerateSections.refs[].thumb` 为可选 PNG/JPEG data URL；`RefIn` 对旧消息兼容（thumb 缺省）。Rust 统一限制 URL 256 KB、解码后 192 KB、图片最大 512×512；缩略图拒绝与解码失败写入日志，纹理在同槽位且 URL 未变时复用。
+- **WaveLayer 图层拖入参考图与拖拽虚影（2026-11-06，初版 0.2.0）**：普通图层拖动超过阈值后，UXP 发送 `layer-drag-start`（docId / layerId / name / 可选缓存缩略图 data URL）。WaveLayer 面板内显示半透明缩略图、图层名和当前放置动作；鼠标进入原生外置面板后，Rust 在主 UI 帧中读取 Win32 全局光标，在面板内绘制同一张缩略图和「拖入参考图」提示，参考图槽位仍由原逻辑高亮。缩略图只用于拖拽预览；实际生图仍从 Photoshop 原图层读取像素，不使用缩略图作为输入。
+  - **释放路由**：mouseup 在 WaveLayer 面板外时交给原生 helper，不再进入 UXP 普通图层排序 / Alt 复制路径；在 WaveLayer 面板内释放仍保留普通排序和编辑工作台投放。面板隐藏时，helper 在鼠标释放 / Escape 后发送一次 `finish-layer-drag`；WebSocket 断线时 UXP 结束源拖动态。避免重复移动和拖动态残留。
+  - **虚影范围**：分别在 WaveLayer 面板和外置面板内部跟随鼠标；不创建全屏透明顶层窗口，避免影响 PS 点击、快捷键和焦点。
+  - **验证与部署（2026-11-06 重启切换）**：TypeScript 类型检查通过、npm 177/177、Rust 34/34、UXP Release 构建和 Rust Release 构建通过，`git diff --check` 通过。Helper 0.3.0 已部署到 `dist/waveplug-overlay.exe`、`dist/plugin/waveplug-overlay.exe`、`dist/dev/waveplug-overlay.exe`，pending 文件保留；四份 SHA-256 均为 `97C12488F65D0B07ED3CC98BB87CF3CA6E427FBA568252FF97820F5458200E51`。旧 0.2.0 备份：`dist/waveplug-overlay.pre-0.3.0-20261106-014837.exe`。新版 Helper PID 38768，由 Windows MCP 独立托管；WebSocket 47821 正常监听。Photoshop PID 12708 已退出，测试文档 `测试.psd` 在保存提示中选择「否」丢弃修改；Photoshop 重启为 PID 19332。UXP 开发加载器重新读取 `dist/plugin/index.js`，日志确认 `overlay connected`、`overlay ready 0.3.0`。ComfyUI 已按 `close_with_photoshop=true` 重启，启动器 PID 14424、Python PID 13380；`127.0.0.1:8188/system_stats` 返回 HTTP 200，版本 0.37.0，队列 0/0。
+  - **UXP 加载**：Photoshop 重启后开发加载器自动读取 `F:\waveplug\studio\dist\plugin` 最新 `index.js` 和 `styles.css`；无需再点橙色 `⟳`。本轮 bundle 构建后需在开发面板点橙色 `⟳`，加载八槽位逻辑。悬停定位仍维持旧功能默认关闭，新的交互尚未确定。
+  - **现场验收**：Photoshop 当前无打开文档（`photoshop_get_state`：0 documents），测试 PSD 已按用户要求不保存关闭，未触发真实生图。仍需打开专用 `WavePlug_TEST_` PSD 验证 2–8 层拖放、普通排序、Alt 复制、工作台、无效释放、Escape 和快速连续拖动。Helper 在其他应用前台时会按设计停靠；切回 Photoshop 前台后恢复。
+- **多图层批量参考图（2026-11-06，helper 协议 0.4.0）**：一次拖动多选普通图层时，UXP 按 WaveLayer 当前图层顺序收集有效图层 ID / 名称，最多发送 8 个候选；native preview 显示缩略图与「N 个图层 / 依次放入空槽位」。松开某个参考图槽位后，helper 发送 `drop-refs`，UXP 从该槽位起向后分配空槽位，逐个读取各图层 128 px 缩略图并保存 `{kind:"layer",docId,layerId}`；生图时仍从原 Photoshop 图层读取像素。已有参考图不覆盖，跳过已占用槽位；空位不足时部分放入，并提示未放入数量。拖入的组 / AI 结果组仍不作为参考图。
+  - **参考图上限（2026-11-06 扩展）**：`MAX_REFERENCES=8` / `MAX_REFERENCE_SLOTS=8`；自动识别的工作流最多使用 8 个可用 IMAGE 输入；显式 reference bindings 也只处理 1–8 槽。UXP 和 native 槽位布局均支持最多 8 张，均使用可换行布局。提示词编号：画布图1，参考图图2～图9。
+  - **协议兼容**：`layer-drag-start` 新格式为 `layers[] + totalCount + thumb`；Rust 仍接受旧版单层 `layerId + name`。旧 `drop-ref` 动作由 UXP 兼容层转为单项 `drop-refs`。
+  - **验证**：本轮结果见 `reports/LIVE_TEST_2026-11-06_refs8-hover-locator.md`。Helper 0.4.0 已构建待启用；当前运行的 0.3.0 不接受第 7、8 槽，需安全重启 Helper 后生效。UXP bundle 需刷新后生效。真实 2–8 层拖放仍待 `WavePlug_TEST_` 实机验收。
+
+- **悬停边框（2026-11-06，用户已在 PS 确认）**：`src/frame.rs`，独立线程上的纯 Win32 窗口（不用 egui、不逐帧重绘）。`WS_EX_LAYERED | WS_EX_TRANSPARENT | WS_EX_NOACTIVATE | WS_EX_TOOLWINDOW | WS_EX_TOPMOST`，再加 `WM_NCHITTEST → HTTRANSPARENT`、`WM_MOUSEACTIVATE → MA_NOACTIVATE`：鼠标、滚轮穿透到 PS，不激活、不拿键盘。窗口是一块纯色背景，用窗口区域（`SetWindowRgn`，外框减内框）只留四条边，并裁到画布视图，不会盖住 PS 的面板。线宽按显示器 DPI：100% 为 1 px，150% 为 2 px。服务器线程只 `PostMessageW`，最新的请求覆盖旧请求，不排队。插件断开时隐藏。11-06 POC 的独立透明窗口实测证明这类样式不改前台窗口、点击落到 PS（`reports/hover_passthrough_poc.log`，已备份）。
+
+## 7. 已定决策（11-04，和用户确认过）
+
+| 项 | 决定 |
+|---|---|
+| 界面技术 | Rust 原生，egui / eframe 0.31（glow）。**不用 WebView2**（用户不接受内存占用） |
+| 字体 | 系统微软雅黑（`msyh.ttc` / `msyhbd.ttc`），内存映射（`memmap2`）+ 借用，不拷贝。Mac 上实测约 35 MB（整份读入时 330 MB） |
+| 内容 | 照用户截图：4 个模式标签（局部重绘 / 融图 / 抠图 / 文生图）；扩图、放大暂不放（插件在这两个模式时面板没有标签亮起） |
+| 提示文字 | 放在提示词框内，开始输入即消失 |
+| 按钮文字 | 一律「开始」（`view.rs` 的 `START`），运行中「取消」 |
+| 高级参数 | 外置面板不显示（`SHOW_ADVANCED = false`），在插件面板里调；状态仍照常同步 |
+| 位置 | 画布左下角，只能用右下角角标拖动 |
+| 完成提醒 | 画布右下角黄色框，8 秒或点击关闭 |
+| 视窗层级 | **逻辑附属**：独立非激活主窗口，PS 前台时临时置顶、切换其他软件/最小化时停泊隐藏、返回后恢复位置；严禁恢复主面板跨进程 owner |
+| 生成完成 | 第四阶段：即使面板已隐藏，也在原位置弹提示，点一下定位结果 |
+| 原插件生成页 | 用户不再需要同时使用；插件面板仍需载入才能运行插件代码（面板收起时能否运行待实测） |
+
+## 8. 已确认的 Photoshop 事实（11-04 用 PS MCP 实测）
+
+| 文件属性（batchPlay `get`） | 实测 | 含义 |
 |---|---|---|
-| `zoom` | `{_unit:"percentUnit", _value:1}` | **1 = 100%**（虽然单位叫 percent，值是倍数） |
-| `center` | `horizontal 360.17、vertical 586`，单位 `distanceUnit` | 视图中心对应的文档点，单位是**点（1/72 英寸）**；× 分辨率 / 72 才是文档像素（这份 1080×1759 的文档换算后是 540, 879，即文档中心） |
-| `resolution` | — | 文档 ppi，用于上一行换算 |
-| `viewInfo.activeView.globalBounds` | `left 1008, top 139, right 3037, bottom 2087` | 画布视图在屏幕上的范围，看起来是**物理像素** |
+| `zoom` | `{_unit:"percentUnit", _value:1}` | 1 = 100%（值是倍数） |
+| `center` | `horizontal 360.17、vertical 586`（`distanceUnit`） | 视图中心对应的文件点，单位是**点**；× 分辨率 / 72 = 文件像素 |
+| `viewInfo.activeView.globalBounds` | `1008, 139, 3037, 2087` | 画布视图在屏幕上的范围（看起来是物理像素） |
 | `viewTransform` | 报错 | 这个 PS 版本没有 |
 
-换算（`docToScreen`）：
+读取：`uxpHost.ts` 的 `canvasView()`；文件坐标 → 屏幕：`protocol.ts` 的 `docToScreen()`（外置生成面板目前只用 `view`，将来需要贴着选区的介面可以用 `docToScreen`）。
 
-```
-屏幕 x = (视图 left + right) / 2 + (文档 x − center.x) × zoom
-屏幕 y = (视图 top + bottom) / 2 + (文档 y − center.y) × zoom
-```
+## 9. 编译、测试、坑
 
-小程序收到 `anchor` 后：放在选区下方 `GAP_SELECTION = 14`（96 DPI 下，按显示器 DPI 缩放）、水平居中；下方放不下放上方，都放不下放进选区底部；最后保证不超出显示器工作区。
-
-**回退**（插件读不到视图、或消息里没有 `anchor`）：
-1. 低级鼠标钩子（`WH_MOUSE_LL`）记录的**最近一次在 PS 上的左键拖动**扫过的范围，2.5 秒内有效（框选、套索时就是选区范围）。
-2. 再不行，放在鼠标右下方。
-
-**还没核实的假设**：`globalBounds` 和 Windows 都是物理像素；视图中心就是 globalBounds 的中心（标尺、滚动条是否算在里面不确定）。如果位置整体偏移一个固定量，先怀疑后者；如果偏移随缩放变大，怀疑 `zoom` 或 `center` 的单位。日志 `overlay show` 一行里有 `sel`、`view`、`anchor`，拿它和截图对比。
-
-## 6. 窗口行为（window.rs）
-
-- **纯 Win32**：一个 `WS_POPUP` + `WS_EX_TOPMOST | WS_EX_TOOLWINDOW` 窗口；提示词和数量是无边框的 `EDIT`，「生成」「×」是 owner-draw 按钮。选纯 Win32 是为了中文输入法可靠。外观在 `WM_PAINT` / `WM_CTLCOLOREDIT` / `WM_DRAWITEM` 里自己画。
-- **不抢焦点**：`SetWindowPos(..., SWP_NOACTIVATE)` 显示，PS 继续接收键盘；用户点进提示词框才激活窗口，激活时全选原有提示词。
-- **Enter / Esc**：在消息循环里拦截 `WM_KEYDOWN`。输入法组字时 Enter 是 `VK_PROCESSKEY`，所以确认中文词不会误触发生成。
-- **焦点还给 PS**：显示时记下前台窗口（PS），生成 / Esc / × 之后 `SetForegroundWindow` 还给它。
-- **自动收起**：
-  - 插件发 hide；
-  - 在 PS 上按下鼠标左键（鼠标钩子里判断：不在生成条范围内、前台是 PS）——画下一个选区时旧的立刻消失；
-  - 每 250 ms 检查前台窗口：既不是 PS 也不是本进程（输入法候选框属于本进程）就收起；
-  - 插件断开连接。
-- **拖动**：`WM_NCHITTEST` 把窗口自身空白处当作标题栏。
-- **DPI**：进程设为 Per-Monitor V2；按鼠标或选区所在显示器的 DPI 重建字体、重排控件；处理 `WM_DPICHANGED`。Windows 11 上用 DWM 圆角。
-- **颜色**取自插件 `plugin/styles.css` 的 token（`--c-bg` #323232、field #232323、line #5b5b5b、accent #3fb59f 等），布局常量在 `window.rs` 开头（96 DPI 下：提示词 220、数量 30、生成 56、× 20，内边距 8，控件高 24）。
-- **单实例**：端口被占用就直接退出。
-- **状态**：一个 `static mut STATE`，只在窗口线程访问；服务线程通过 `INBOX`（Mutex 队列）+ `PostMessageW(WM_APP+1)` 把命令交给窗口线程。
-
-## 7. 已知问题和坑
-
-- **build.cmd 复制失败曾被吞掉**：exe 正在运行时复制到 `dist/` 会失败，旧版脚本把错误重定向掉了，用户一直在跑旧版。现在脚本会先 `taskkill`。改 Rust 后让用户双击 `build.cmd`，再在 PS 里点 ⟳（插件端有改动时）。
-- **编译在用户的 Windows 主机上**，写代码的机器是 Mac（没有 Rust）。用户编译时已经修过一处类型：`DwmSetWindowAttribute` 的属性参数在 windows-sys 0.59 里是 `u32`。改代码时 Win32 常量都写成数字（`window.rs` 开头）就是为了躲开 windows-sys 各版本的类型差异。
-- **和 PS 自带的上下文任务栏位置重叠**，我们的在上层。用户说要完全和原版重叠，所以没有错开。
-- `static mut` + `st()` 每次返回 `&'static mut`，在重入时（比如 `SetWindowPos` 触发 `WM_DPICHANGED`）严格说是别名 UB，实际可用。重构时可以换成 `Cell` 字段或把状态放到窗口的 `GWLP_USERDATA` 里。
-- `keeps_bar` / `is_photoshop` 每次都 `OpenProcess` + 查进程名。250 ms 一次和按下鼠标时各一次，开销很小；如果加更多检查，可以缓存 PS 的进程 id。
-- 没有托盘图标：只能在任务管理器里结束进程。
-- UI 规范：[`docs/UI_DESIGN_SYSTEM.md`](../../docs/UI_DESIGN_SYSTEM.md)（字号最小 11px、控件高度 24 / 26、颜色只用 token）。生成条应该和面板保持同一套视觉。
-
-## 8. 接下来可以做的（按建议顺序）
-
-1. **核实按选区定位**（第 2 节）：日志里有 `overlay show`，并在不同缩放（50%、200%）、平移后、双显示器、Windows 缩放 150% / 200% 下各试一次。
-2. **托盘图标**：退出、开机自启、显示连接状态。
-3. **插件自动启动小程序**：manifest 已经声明了 `launchProcess`（`.exe`）；UXP 启动外部程序可能弹确认框，需要实测。启动失败要能退回「不运行也照常工作」。
-4. **生成中状态**：现在按生成后就收起。可以考虑显示进度、完成后在原位置给出变体切换（像 PS 生成式填充那样的上一张 / 下一张）。这需要扩展协议：插件 → 小程序发进度和变体数。
-5. **面板外的悬停提示**：用户最初的需求。插件发 `{"type":"tip","text":"…"}`，小程序在鼠标旁画一个不激活、鼠标可穿透（`WS_EX_TRANSPARENT | WS_EX_NOACTIVATE`）的提示框。
-6. **跨面板拖拽预览**：WaveLayer 拖到其他面板时，HTML 的跟随提示出不了源面板（见 `docs/WORKBENCH_DRAG_DEMO.md`）。可以由小程序画跟随鼠标的预览。
-7. 协议加版本号和简单的握手校验（现在只监听 127.0.0.1，没有鉴权）。
-
-## 9. 验证方法
-
-- Rust：`cargo test`（`build.cmd` 会先跑）。`protocol.rs` 有解析 / 编码测试；窗口逻辑只能在 Windows 上手动测。
-- 插件：`npx tsc --noEmit -p .`、`npm test`、`npm run build`。
-- 实机：用户双击 `build.cmd`，在 PS 开发版面板点 ⟳，日志出现 `overlay connected` / `overlay ready`，画选区后看 `overlay show`。
-- 不要改用户的正式 PSD；需要测试文档时用 `WavePlug_TEST_` 开头的文档。
+- **编译在用户的 Windows 主机上**：`build.cmd`（会先 `taskkill` 旧 exe，因为运行中的 exe 无法覆盖——之前因此一直在跑旧版）。
+- **Mac 上可以先检查**：这台 Mac 装了 Rust（`~/.cargo/bin`）和 Windows 目标：`cargo check --target x86_64-pc-windows-gnu`（只检查不链接）；`cargo test`；Mac 版能实际运行 Demo 和主程序（主程序在 Mac 上不隐藏）。
+- 插件端：`npx tsc --noEmit -p .`、`npm test`、`npm run build`。
+- windows-sys 0.59：`HWND` 等句柄是指针；Win32 常数在 `win.rs` 里写成数字，避开各版本的类型差异。
+- egui 跟随系统明暗主题：`theme::install` 里固定为暗色，否则 Mac 浅色模式下元件变白。
+- 旧的「选区浮动生成条」（`window.rs`，鼠标钩子 + 选区下方定位）在 git `9559c4d` 里，已被外置生成面板取代并删除。
+- 不要改用户的正式 PSD；测试用 `WavePlug_TEST_` 开头的文件。

@@ -233,7 +233,8 @@ export async function runInpaint(host: PsHost, comfy: Comfy, input: RunInput, ho
     if (k === 0) hooks.debug?.(`${stamp}_ref${slot}.${ext}`, bytes);
     return comfy.uploadImage(bytes, `wp_${stamp}_ref${slot}_v${k}.${ext}`);
   };
-  const refBindings = profile.bindings.filter(x => x.role === "reference");
+  const refBindings = profile.bindings.filter(x => x.role === "reference"
+    && Number.isInteger(x.slot) && x.slot! >= 1 && x.slot! <= MAX_REFERENCES);
   for (const b of refBindings) {
     const src = input.references[b.slot ?? 0];
     if (!src) throw new Error(`参考图 ${b.slot} 还没有选择素材`);
@@ -359,7 +360,8 @@ async function referenceUploader(host: PsHost, comfy: Comfy, input: RunInput, st
     if (k === 0) hooks.debug?.(`${stamp}_ref${slot}.${ext}`, bytes);
     return comfy.uploadImage(bytes, `wp_${stamp}_ref${slot}_v${k}.${ext}`);
   };
-  const bound = profile.bindings.filter(x => x.role === "reference").map(b => b.slot!);
+  const bound = profile.bindings.filter(x => x.role === "reference").map(b => b.slot!)
+    .filter(slot => Number.isInteger(slot) && slot >= 1 && slot <= MAX_REFERENCES).slice(0, MAX_REFERENCES);
   const slots = bound.length ? bound : profile.options.refSlots ? Array.from({ length: MAX_REFERENCES }, (_, i) => i + 1) : [];
   const forVariation = async (k: number) => {
     for (const slot of slots) {
