@@ -170,10 +170,16 @@ const isGroupLayer = (layer: any) => layer?.layers != null
 
 interface LayerAnchor { layer: any; place: "before" | "after" | "inside"; bottom: boolean }
 /** Below a group: BEFORE next sibling, or BEFORE group + sendToBack if last. */
+// PLACEAFTER is never used, below a plain layer either: user test 11-06, dropping a group on the
+// lower half of a row (after it) always failed — Photoshop put the group at the top of the parent —
+// while the upper half of the next row (before that one) always worked.
 function safeLayerAnchor(doc: any, relative: any, place: "before" | "after" | "inside"): LayerAnchor {
-  if (place !== "after" || !isGroupLayer(relative)) return { layer: relative, place, bottom: false };
+  if (place !== "after") return { layer: relative, place, bottom: false };
   const at = layerSlot(doc.layers, relative.id);
-  if (!at) throw new Error("找不到目标组的同级位置，已取消放置");
+  if (!at) {
+    if (isGroupLayer(relative)) throw new Error("找不到目标组的同级位置，已取消放置");
+    return { layer: relative, place, bottom: false };
+  }
   const next = at.siblings[at.index + 1];
   return next ? { layer: next, place: "before", bottom: false }
     : { layer: relative, place: "before", bottom: true };
@@ -253,6 +259,38 @@ async function repairLayerPlacement(doc: any, itemId: number, relativeId: number
   const started = Date.now();
   const rel = findLayer(doc.layers, relativeId), slot = layerSlot(doc.layers, relativeId);
   if (!rel || !slot) return false;
+  // Beside a plain layer the DOM placement is unambiguous: try it before AM index probing.
+  // A duplicated group can land above the target (real log: copy of D_Group after G_Hidden at
+  // itemIndex 0), and the index probes (±4) can't reach it: a group spans its children's slots too.
+  const item = findLayer(doc.layers, itemId);
+  if (item && !isGroupLayer(rel) && typeof item.move === "function") {
+    const P = ps().constants.ElementPlacement;
+    // "after" as "before the next plain sibling" (PLACEAFTER misplaces groups, see safeLayerAnchor)
+    const after = place === "after" ? slot.siblings[slot.index + 1] : null;
+    const viaNext = !!after && after.id !== itemId && !isGroupLayer(after);
+    try { await (viaNext ? item.move(after, P.PLACEBEFORE) : item.move(rel, place === "after" ? P.PLACEAFTER : P.PLACEBEFORE)); }
+    catch (e) { log("info", "layer placement DOM retry", itemId, e); }
+    if (placedAsRequested(doc, itemId, relativeId, place)) {
+      log("info", "layer placement recovered by DOM move", JSON.stringify({ itemId, relativeId, place, ms: Date.now() - started }));
+      return true;
+    }
+    // Real log (11-06 08:14): group 6 directly above G_Hidden, move(G_Hidden, PLACEAFTER) returned
+    // without moving it. The same order comes from moving the plain layer to the group's other
+    // side instead, never relative to the group itself (that can enter it): to the front / back
+    // of their parent, or beside the plain sibling past the group.
+    const at = layerSlot(doc.layers, itemId), relAt = layerSlot(doc.layers, relativeId);
+    if (at && relAt && at.parentId === relAt.parentId && at.index === relAt.index + (place === "after" ? -1 : 1)) {
+      const beyond = at.siblings[at.index + (place === "after" ? -1 : 1)];
+      try {
+        if (!beyond) await (place === "after" ? rel.bringToFront?.() : rel.sendToBack?.());
+        else if (!isGroupLayer(beyond)) await rel.move(beyond, place === "after" ? P.PLACEAFTER : P.PLACEBEFORE);
+      } catch (e) { log("info", "layer placement swap retry", itemId, relativeId, e); }
+      if (placedAsRequested(doc, itemId, relativeId, place)) {
+        log("info", "layer placement recovered by moving the target", JSON.stringify({ itemId, relativeId, place, ms: Date.now() - started }));
+        return true;
+      }
+    }
+  }
   const next = slot.siblings[slot.index + 1], prev = slot.siblings[slot.index - 1];
   let quickAttempts = 0;
   const probed = new Set<number>();
@@ -334,7 +372,14 @@ export class UxpLayerTree implements LayerTree {
   }
   async read() {
     const d = ps().app.activeDocument;
-    if (!d) return null;
+    if (!d) {
+      // Right after open / new, activeDocument can still be null while the document exists:
+      // a transient state, not "no document" (the panel then retries instead of going blank).
+      let open = 0;
+      try { open = Number(ps().app.documents?.length ?? 0); } catch { /* host busy */ }
+      if (open > 0) throw new Error("activeDocument not ready (" + open + " open)");
+      return null;
+    }
     const t0 = Date.now();
     const [bg, target] = await play([
       { _obj: "get", _target: [{ _property: "hasBackgroundLayer" }, docRef(d.id)] },
@@ -500,13 +545,12 @@ export class UxpLayerTree implements LayerTree {
           cloneOf.set(s.id, clone);
           ids.push(clone.id);
         } catch (e) {
-          // A failed move after an initial duplicate must not leave a stray copy behind.
-          if (clone && !ids.includes(clone.id)) {
-            try { await clone.delete(); }
-            catch (cleanup) {
-              log("error", "copy cleanup failed", clone.id, cleanup);
-              throw new Error("复制落点错误且清理副本失败，已停止操作，请检查图层并撤销");
-            }
+          // A clone exists but sits in the wrong place. Deleting it is not enough: the AM index
+          // probing can scatter a group clone's children (real log: four stray root layers left
+          // after clone.delete). Reject the history step so Photoshop rolls back every change.
+          if (clone) {
+            log("warn", "layer drag copy rollback", JSON.stringify(s), clone.id, e);
+            throw new Error(String(source.name) + "：" + ((e as Error)?.message ?? e) + "（已撤销本次复制，文档未改变）");
           }
           skipped.push(String(source.name) + "：" + ((e as Error)?.message ?? e));
           log("warn", "layer drag copy", JSON.stringify(s), e);

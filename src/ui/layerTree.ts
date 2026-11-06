@@ -14,6 +14,8 @@ import { workbenchPlacementAnchor } from "../core/layers/workbench.ts";
 import { clampThumbPercent, legacyThumbPercent, thumbnailMetrics, THUMB_PERCENT_KEY } from "../core/layers/topControls.ts";
 import { MULTI_EFFECTS } from "../core/layers/effects.ts";
 import { type AdvancedFilter, type Filter, type LayerAction, type LayerKind, type LockKey, type MoveStep, type Row, type SmartAction, type TreeLayer, type Where, BLEND_MODES, ancestors, isCompactRow, queryActive, clickSelect, contentUsers, canDropToDelete, canDropMaskOnto, copyPlan, dropPlan, previewMoveTree, dropZone, filterCounts, isVariantLayer, layerMenu, smartQuickMenu, nextLayerAfterDelete, layerTags, linkPeers, lockPlan, packChips, lockedByGroup, sharedColors, selectionAfterLocalClear, visibleRows } from "../core/layers/tree.ts";
+import { isDuplicateLayerDoubleAction, isLayerDoubleClick, type LayerClickPoint, type LayerDoubleAction } from "../core/layers/clicks.ts";
+import { matchesInlineRenameRow } from "../core/layers/rename.ts";
 import { type LayerTools, type LayerTree, type RunOptions, type TargetPart, ADJUSTMENTS, FILL_PREFIX, BLEND_PREFIX, EXTRACT_PREFIX, EXPAND_PREFIX, GENERATE_PREFIX, UPSCALE_PREFIX } from "../ps/host.ts";
 import type { Overlay } from "../app/overlay.ts";
 import type { CanvasView } from "../core/overlay/protocol.ts";
@@ -85,6 +87,11 @@ const OPEN_DELAY = 600;
 const CHIP_DOUBLE = 450;
 /** two presses on a row this close together are a double-click (图层样式) */
 const DOUBLE_CLICK = 600;
+/** Renaming is deliberate: a shorter interval and little pointer travel avoid accidental edits. */
+const RENAME_DOUBLE_CLICK = 400;
+const DOUBLE_CLICK_SLOP = 4;
+/** The custom press detector runs before the native dblclick event; ignore only that duplicate. */
+const DOUBLE_CLICK_DEDUPE = 180;
 /** width of a variation chip (picture and number) in a variant layer's row */
 const VCHIP_W = 78;
 /** how long the mouse rests on a row before its layer is framed on the canvas (a quick sweep frames nothing) */
@@ -143,7 +150,7 @@ export function createLayerTreeView(tree: LayerTree, status: Status, tools?: Lay
   /** layers whose effects / smart filters are shown (folded by default), per document */
   const openByDoc = new Map<number, Set<number>>();
   const openSubs = () => { const id = docId ?? -1; let s = openByDoc.get(id); if (!s) openByDoc.set(id, s = new Set()); return s; };
-  const thumbsByDoc = new Map<number, ThumbCache>();
+  const thumbsByDoc = new Map<number, ThumbCache>(), THUMB_DOCS = 4;
   const thumbs = () => { const id = docId ?? -1; let c = thumbsByDoc.get(id); if (!c) thumbsByDoc.set(id, c = new ThumbCache()); return c; };
   // Double-clicks act by where they land: the thumbnail opens 图层样式, the status icons open a
   // smart object's content; elsewhere they do nothing. A press on either part marks `downZone` before
@@ -232,6 +239,7 @@ export function createLayerTreeView(tree: LayerTree, status: Status, tools?: Lay
   listen(document, "mousedown", e => {
     const t = e.target as HTMLElement | null;
     panelActive = el.contains(t);
+    if (!t?.closest(".lt-row")) lastDown = null;
     if (panelActive && !typing(t)) { try { el.focus(); } catch { /* host without focus on sections */ } }
   }, true);
   /** the open document across sessions (custom colours are kept by it) */
@@ -253,12 +261,14 @@ export function createLayerTreeView(tree: LayerTree, status: Status, tools?: Lay
   let hoverEl: HTMLElement | null = null;
   let paint: { col: "eye"; to: boolean; start: number; orig: Map<number, boolean> } | null = null;
   /** the last left press on a row, and when a double-click last acted (the native dblclick may follow) */
-  let lastDown: { id: number; at: number; zone: Zone | null } | null = null, doubleAt = 0;
+  let lastDown: LayerClickPoint | null = null;
+  let lastDouble: LayerDoubleAction | null = null;
   const onDouble = (id: number, zone: Zone) => {
-    if (Date.now() - doubleAt < 800) return;
+    const now = Date.now(), action: LayerDoubleAction = { id, zone, at: now };
+    if (isDuplicateLayerDoubleAction(lastDouble, action, DOUBLE_CLICK_DEDUPE)) return;
     const l = layers.find(x => x.id === id);
     if (!l || (zone === "status" && l.kind !== "smartObject") || (zone === "variant" && !isVariantLayer(l))) return;
-    doubleAt = Date.now();
+    if (zone !== "name") lastDouble = action;
     // a variant layer's ✦ (on its picture) opens / closes its variations under it
     if (zone === "variant") { toggleGroup(id); return; }
     if (zone === "name") setTimeout(() => startRename(id), 0);
@@ -585,7 +595,6 @@ export function createLayerTreeView(tree: LayerTree, status: Status, tools?: Lay
     const r: RowEl = { index: 0, el, eye, twisty, name, body, key: "", id: 0, sub: null };
     // double-click on the name renames, as in Photoshop
     name.addEventListener("mousedown", () => { if (!r.sub) downZone = "name"; });
-    name.addEventListener("dblclick", () => { if (!r.sub) onDouble(r.id, "name"); });
     eye.addEventListener("click", e => {
       e.stopPropagation();
       const s = r.sub;
@@ -633,18 +642,20 @@ export function createLayerTreeView(tree: LayerTree, status: Status, tools?: Lay
       const m = e as MouseEvent, zone = downZone ?? (r.sub?.kind === "effects" || (!r.sub && layers.find(x => x.id === r.id)?.artboard) ? "thumb" : null);
       downZone = null;
       pressZone = zone;
-      if (m.button === 2) { openRowMenu(r.id); return; }
-      if (m.button !== 0) return;
+      if (m.button === 2) { lastDown = null; openRowMenu(r.id); return; }
+      if (m.button !== 0) { lastDown = null; return; }
       const now = Date.now();
-      if (zone && lastDown && lastDown.id === r.id && lastDown.zone === zone && now - lastDown.at < DOUBLE_CLICK && !m.ctrlKey && !m.metaKey && !m.shiftKey) {
+      const point: LayerClickPoint = { id: r.id, at: now, zone, x: m.clientX, y: m.clientY };
+      const doubleDelay = zone === "name" ? RENAME_DOUBLE_CLICK : DOUBLE_CLICK;
+      if (zone && !m.ctrlKey && !m.metaKey && !m.shiftKey && isLayerDoubleClick(lastDown, point, doubleDelay, DOUBLE_CLICK_SLOP)) {
         lastDown = null;
         drag = null;
         suppressClick = true;
-        setTimeout(() => { suppressClick = false; }, DOUBLE_CLICK);
+        setTimeout(() => { suppressClick = false; }, DOUBLE_CLICK_DEDUPE);
         onDouble(r.id, zone);
         return;
       }
-      lastDown = { id: r.id, at: now, zone };
+      lastDown = zone && !m.ctrlKey && !m.metaKey && !m.shiftKey ? point : null;
       // the 智能滤镜 / 效果 rows drag as in Photoshop: all the filters, or the whole style, onto another
       // layer (Alt copies) or the trash; their chips drag one by one (filterChips / effectChips)
       if (!r.sub) startDrag(r.id, m);
@@ -1084,10 +1095,26 @@ export function createLayerTreeView(tree: LayerTree, status: Status, tools?: Lay
     firstRow = Math.max(0, Math.min(firstRow, maxFirst()));
     const first = firstRow, count = fits() + 1;
     while (pool.length < count) pool.push(makeRow());
+
+    // The editor belongs to one specific pooled row. If scrolling, filtering or tree changes
+    // would recycle that row for another layer, finish the edit before any DOM reuse happens.
+    if (renaming !== null) {
+      const slot = renameRow ? pool.indexOf(renameRow) : -1;
+      const target = slot >= 0 && slot < count ? rows[first + slot] : undefined;
+      if (!target || !matchesInlineRenameRow(renaming, target.layer.id, !!target.filter)) endRename(layers.some(layer => layer.id === renaming));
+    }
+
     for (let i = 0; i < pool.length; i++) {
       const idx = first + i;
-      if (i < count && idx < rows.length) { safeFill(pool[i], rows[idx], idx); pool[i].el.classList.toggle("short", isShort(rows[idx])); frame(pool[i].el, idx); }
-      else setShown(pool[i].el, false);
+      if (i < count && idx < rows.length) {
+        const target = rows[idx], rowEl = pool[i];
+        const keepEditor = renameRow === rowEl
+          && matchesInlineRenameRow(renaming, target.layer.id, !!target.filter);
+        if (keepEditor) rowEl.index = idx;
+        else safeFill(rowEl, target, idx);
+        rowEl.el.classList.toggle("short", isShort(target));
+        frame(rowEl.el, idx);
+      } else setShown(pool[i].el, false);
     }
     inView = rows.slice(first, first + count).map(r => r.layer);
     // scrollbar: only when there's more than fits
@@ -1322,6 +1349,10 @@ export function createLayerTreeView(tree: LayerTree, status: Status, tools?: Lay
 
 
   let reading = false, again = false;
+  /** a refresh skipped while a delete / optimistic move held the list: run it when that ends */
+  let missed = false;
+  /** failed reads in a row, and the retry they scheduled (Photoshop busy, a document still opening) */
+  let readFailures = 0, readRetry: ReturnType<typeof setTimeout> | null = null;
   /** When Photoshop refuses to deselect (e.g. only Background is left), keep the panel blank
    *  until the host selection actually changes or the user picks a row. */
   let lastHostSelection: { docId: number; ids: number[] } | null = null;
@@ -1339,18 +1370,31 @@ export function createLayerTreeView(tree: LayerTree, status: Status, tools?: Lay
   async function refresh() {
     // Ignore intermediate selections and layer states during a batch delete. The delete command
     // itself requests a fresh read after Photoshop commits its history step.
-    if (deleting || orderPreview) return;
+    if (deleting || orderPreview) { missed = true; return; }
     if (reading) { again = true; return; }
     reading = true;
+    missed = false;
+    if (readRetry) { clearTimeout(readRetry); readRetry = null; }
     try {
       do {
         again = false;
         const gen = selectGen;
-        const r = await tree.read().catch(e => { log("warn", "layer tree read", e); return null; });
-        if (deleting || orderPreview) return; // a pre-move read must not overwrite the optimistic order
+        let failed = false;
+        const r = await tree.read().catch(e => { failed = true; log("warn", "layer tree read", readFailures + 1, e); return null; });
+        if (deleting || orderPreview) { missed = true; return; } // a pre-move read must not overwrite the optimistic order
+        if (failed) {
+          // A failed read is not "no document": keep the last list and ask again shortly
+          // (0.25 s, 0.5 s … at most 4 s). Blanking it here left 未打开文档 until the next event.
+          const delay = Math.min(4000, 250 * 2 ** Math.min(readFailures++, 4));
+          if (!again) readRetry = setTimeout(() => { readRetry = null; void refresh(); }, delay);
+          continue;
+        }
+        readFailures = 0;
         // the list chose layers while this was read: keep its selection and read again afterwards
         const stale = selecting > 0 || gen !== selectGen;
         const before = [...selected].sort().join(",");
+        // A layer ID may be reused by another open document; never carry an editor across documents.
+        if (renaming !== null && (!r || r.docId !== docId)) endRename(false);
         if (!r) { docId = null; layers = []; byId = new Map(); selected = new Set(); users = new Map(); localClear = null; lastHostSelection = null; }
         else {
           docKey = r.docKey;
@@ -1358,7 +1402,14 @@ export function createLayerTreeView(tree: LayerTree, status: Status, tools?: Lay
           if (localClear) {
             if (localClear.docId !== r.docId || !selectionAfterLocalClear(r.selected, localClear.hostIds).keepClear) localClear = null;
           }
-          if (r.docId !== docId) { firstRow = 0; anchor = null; hideFrame(); }
+          if (r.docId !== docId) {
+            firstRow = 0; anchor = null; hideFrame();
+            // thumbnails (data URLs) are kept for the last few documents only: most recent last
+            const c = thumbsByDoc.get(r.docId);
+            if (c) { thumbsByDoc.delete(r.docId); thumbsByDoc.set(r.docId, c); }
+            thumbsByDoc.delete(-1);
+            for (const k of thumbsByDoc.keys()) { if (thumbsByDoc.size <= THUMB_DOCS) break; if (k !== docId) thumbsByDoc.delete(k); }
+          }
           else {
             // a layer whose size changed was edited (transform, crop …), whatever the events said
             const old = new Map(layers.map(l => [l.id, l]));
@@ -1378,7 +1429,10 @@ export function createLayerTreeView(tree: LayerTree, status: Status, tools?: Lay
         if (frameId !== null) { if (docId === null || !byId.has(frameId)) hideFrame(); else void drawFrame(frameId); }
         if (now === ownSelect) ownSelect = null;
       } while (again);
-    } finally { reading = false; }
+    } finally {
+      reading = false;
+      if (missed && !deleting && !orderPreview) void refresh();
+    }
   }
 
   /** Commit the panel selection to Photoshop, including the empty selection. The generation
@@ -1564,7 +1618,7 @@ export function createLayerTreeView(tree: LayerTree, status: Status, tools?: Lay
       log("warn", "layer command", action, e);
       status("操作失败：" + ((e as Error).message ?? e), "error");
     } finally {
-      if (destructive) deleting = false;
+      if (destructive) { deleting = false; missed = false; }
       if (artboardIds.length && !deleteReported && !deleteHadError && docId === doc) {
         // An unexpected void result must not leave a permanent "deleting" message behind.
         status("画板删除操作已结束，请检查图层列表", "info");
@@ -1865,6 +1919,7 @@ export function createLayerTreeView(tree: LayerTree, status: Status, tools?: Lay
       // Horizontal movement must also start a drag: the delete rail is on the left edge.
       if (Math.abs(m.clientY - drag.y0) < 5 && Math.abs(m.clientX - drag.x0) < 5) return;
       drag.active = true;
+      lastDown = null;
       if (!drag.sub) {
         workbench.openForDrag();
         const source = byId.get(drag.sourceId);
@@ -2106,7 +2161,8 @@ export function createLayerTreeView(tree: LayerTree, status: Status, tools?: Lay
       }));
       // Photoshop's modal-done event provides the success refresh. On an error (including
       // before executeAsModal starts), force a read to undo the speculative visual order.
-      if (needsRestore) void refresh();
+      // events skipped during the native move (`missed`) are caught up the same way
+      if (needsRestore || missed) void refresh();
     }
   }
 
@@ -2198,36 +2254,60 @@ export function createLayerTreeView(tree: LayerTree, status: Status, tools?: Lay
     render();
   }
 
-  /** 重命名: an input over the row's name; Enter or leaving it renames, Esc cancels. */
-  const renameBox = h("input", { class: "lt-rename", type: "text" }) as HTMLInputElement;
+  /** 重命名: replace the name span with an inline input; Enter / blur saves, Esc cancels. */
+  const renameBox = h("input", { class: "lt-name lt-rename", type: "text", spellcheck: "false" }) as HTMLInputElement;
   setShown(renameBox, false);
-  inner.append(renameBox);
   let renaming: number | null = null;
+  let renameRow: RowEl | null = null;
   renameBox.addEventListener("mousedown", e => e.stopPropagation());
   renameBox.addEventListener("click", e => e.stopPropagation());
+  renameBox.addEventListener("dblclick", e => e.stopPropagation());
+
   function startRename(id: number) {
-    const idx = rows.findIndex(r => r.layer.id === id);
+    if (renaming !== null) {
+      if (renaming === id) return;
+      endRename(true);
+    }
     const l = layers.find(x => x.id === id);
-    if (idx < 0 || !l) return;
+    const row = pool.find(r => r.id === id && !r.sub && isShown(r.el) && r.body.contains(r.name));
+    if (!l || !row) return;
+
     renaming = id;
+    renameRow = row;
+    lastDown = null;
     renameBox.value = l.name;
-    renameBox.style.top = yOf(idx) + Math.max(0, (heightOf(rows[idx]) - 24) / 2) + "px";
-    renameBox.style.left = LEAD + l.depth * INDENT + 16 + "px";
+    renameBox.className = row.name.className + " lt-rename";
     setShown(renameBox, true);
+    // Replace the name node in place: the input inherits its exact flex slot and width.
+    row.name.replaceWith(renameBox);
     renameBox.focus();
     renameBox.select();
   }
+
   function endRename(save: boolean) {
     if (renaming === null) return;
     const id = renaming, name = renameBox.value.trim(), old = layers.find(x => x.id === id)?.name;
+    const row = renameRow;
     renaming = null;
+    renameRow = null;
+    if (row && renameBox.parentElement === row.body) {
+      if (save && name) replace(row.name, name);
+      renameBox.replaceWith(row.name);
+      row.key = "";
+    } else renameBox.remove();
     setShown(renameBox, false);
     if (save && name && name !== old) void run("rename", [id], name);
   }
+
   renameBox.addEventListener("keydown", e => {
-    const k = (e as KeyboardEvent).key;
-    if (k === "Enter") endRename(true);
-    else if (k === "Escape") endRename(false);
+    const key = (e as KeyboardEvent).key;
+    if (key === "Enter" && !(e as KeyboardEvent).isComposing) {
+      e.preventDefault();
+      endRename(true);
+    } else if (key === "Escape") {
+      e.preventDefault();
+      endRename(false);
+    }
     e.stopPropagation();
   });
   renameBox.addEventListener("blur", () => endRename(true));

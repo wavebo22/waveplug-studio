@@ -45,7 +45,7 @@ export interface Settings {
   comfyCloseWithPhotoshop: boolean;
   /** Do not open a browser when the native helper starts ComfyUI; default true. */
   comfyNoBrowser: boolean;
-  /** Whether Photoshop startup also launches ComfyUI; default true (needs the helper running). */
+  /** Whether Photoshop startup also launches ComfyUI; default false (needs the helper running). */
   comfyAutoStartWithPhotoshop: boolean;
   /** Whether the plugin starts the overlay helper (外置框架) when Photoshop starts; default true.
    *  The helper always quits with Photoshop. */
@@ -80,7 +80,7 @@ function write(k: string, v: unknown) {
 }
 
 export const store = {
-  settings: (): Settings => ({ comfyUrl: "http://127.0.0.1:8188", activeProfile: null, advancedOpen: false, debugFiles: false, comfyLaunch: "", comfyCloseWithPhotoshop: true, comfyNoBrowser: true, comfyAutoStartWithPhotoshop: true, helperAutoStart: true, ...read<Partial<Settings>>(KEY.settings, {}) }),
+  settings: (): Settings => ({ comfyUrl: "http://127.0.0.1:8188", activeProfile: null, advancedOpen: false, debugFiles: false, comfyLaunch: "", comfyCloseWithPhotoshop: true, comfyNoBrowser: true, comfyAutoStartWithPhotoshop: false, helperAutoStart: true, ...read<Partial<Settings>>(KEY.settings, {}) }),
   saveSettings: (s: Settings) => write(KEY.settings, s),
   profiles: (): Profile[] => read<Profile[]>(KEY.profiles, []),
   saveProfiles: (p: Profile[]) => write(KEY.profiles, p),

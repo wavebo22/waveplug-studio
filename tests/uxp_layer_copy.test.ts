@@ -7,6 +7,7 @@ test("UXP Alt 拖动: 副本相对前一个副本放置、整组保留变体、�
   let next = 100, undoStarts = 0, undoCommits = 0, undoRollbacks = 0;
   let unsafeAfterGroupCalls = 0, sendToBackCalls = 0, forceWrongCopy = false, forceWrongMove = false;
   let bugBeforeAdjacentGroup = false, throwBeforeAdjacentGroup = false, indexMoveCalls = 0, indexGetCalls = 0;
+  let refuseIndexMoves = false, cloneDeletes = 0, groupCopyLandsOnTop = false, groupMoveAfterNoop = false, groupAfterToTop = false;
   const place = { PLACEBEFORE: "before", PLACEAFTER: "after", PLACEINSIDE: "inside" } as const;
   let doc: any;
   const selected: number[] = [];
@@ -25,6 +26,13 @@ test("UXP Alt 拖动: 副本相对前一个副本放置、整组保留变体、�
     // Real user report: a PLACEBEFORE(next sibling group) was silently inserted
     // into that group, rather than BETWEEN two sibling groups.
     if (bugBeforeAdjacentGroup && at === "before" && Array.isArray(relative.layers)) at = "inside";
+    // User test 11-06: a group placed AFTER a plain layer lands at the top of the parent.
+    if (groupAfterToTop && at === "after" && item.layers && !relative.layers) {
+      const top = container(relative);
+      top.unshift(item);
+      setParents([item], relative.parent ?? null);
+      return;
+    }
     const parent = at === "inside" ? relative : relative.parent;
     const list = at === "inside" ? relative.layers : container(relative);
     if (!Array.isArray(list)) throw new Error("not a group");
@@ -44,10 +52,14 @@ test("UXP Alt 拖动: 副本相对前一个副本放置、整组保留变体、�
         throw new Error("native group-relative duplicate refused");
       const copy = duplicateTree(l, true);
       if (forceWrongCopy) insert(copy, ai, "inside");
+      // Real log (D_Group after G_Hidden): the group copy lands at the top of the root instead.
+      else if (groupCopyLandsOnTop && l.layers) { doc.layers.unshift(copy); setParents([copy], null); }
       else insert(copy, relative ?? l, placement ?? "before");
       return copy;
     };
     l.move = async (relative: any, placement: string) => {
+      // Real log (11-06 08:14): a group moved PLACEAFTER a plain layer stayed where it was.
+      if (groupMoveAfterNoop && l.layers && placement === "after") return;
       if (throwBeforeAdjacentGroup && placement === "before" && Array.isArray(relative?.layers))
         throw new Error("native group-relative move refused");
       const list = container(l);
@@ -56,7 +68,13 @@ test("UXP Alt 拖动: 副本相对前一个副本放置、整组保留变体、�
       list.splice(i, 1);
       insert(l, forceWrongMove ? ai : relative, forceWrongMove ? "inside" : placement);
     };
-    l.delete = async () => { const list = container(l); list.splice(list.indexOf(l), 1); };
+    l.delete = async () => { cloneDeletes++; const list = container(l); list.splice(list.indexOf(l), 1); };
+    l.bringToFront = async () => {
+      const list = container(l), idx = list.indexOf(l);
+      if (idx < 0) throw new Error("layer no longer exists");
+      list.splice(idx, 1);
+      list.unshift(l);
+    };
     l.sendToBack = async () => {
       sendToBackCalls++;
       const list = container(l), idx = list.indexOf(l);
@@ -138,6 +156,7 @@ test("UXP Alt 拖动: 副本相对前一个副本放置、整组保留变体、�
         return index === null ? { _obj: "error", message: "missing layer" } : { itemIndex: index };
       }
       if (d._obj === "move" && d.to?._index !== undefined) {
+        if (refuseIndexMoves) { indexMoveCalls++; return { _obj: "error", message: "refused" }; }
         return moveToAmIndex(Number(d._target?.[0]?._id), Number(d.to._index));
       }
       if (d._obj === "select") {
@@ -302,6 +321,64 @@ test("UXP Alt 拖动: 副本相对前一个副本放置、整组保留变体、�
     assert.deepEqual(repairedMove.skipped, []);
     assert.deepEqual(doc.layers.map((l: any) => l.id), [10, 1]);
     assert.equal(undoRollbacks, 0);
+
+    // A group copy placed above a plain target layer, with every AM index move refused: the DOM
+    // move beside the plain layer puts it right, without an error or a rollback.
+    doc.layers = [ai, A, group];
+    setParents(doc.layers);
+    const rollbacksBeforeTop = undoRollbacks;
+    groupCopyLandsOnTop = true; refuseIndexMoves = true;
+    const topCopy = await tree.copy(1, [{ id: 20, rel: 1, place: "after" }]);
+    groupCopyLandsOnTop = false; refuseIndexMoves = false;
+    assert.equal(topCopy.done, 1);
+    assert.deepEqual(topCopy.skipped, []);
+    assert.deepEqual(doc.layers.map((l: any) => l.id), [10, 1, topCopy.ids[0], 20]);
+    assert.equal(doc.layers[2].layers.length, group.layers.length);
+    assert.equal(undoRollbacks, rollbacksBeforeTop);
+
+    // The group directly above a plain layer refuses to move below it (real log 08:14, move and
+    // Alt copy alike): the plain layer is moved above the group instead, never into it.
+    doc.layers = [group, A, ai];
+    setParents(doc.layers);
+    groupMoveAfterNoop = true; refuseIndexMoves = true;
+    const swapMove = await tree.move(1, [{ id: 20, rel: 1, place: "after" }]);
+    assert.equal(swapMove.done, 1);
+    assert.deepEqual(swapMove.skipped, []);
+    assert.deepEqual(doc.layers.map((l: any) => l.id), [1, 20, 10]);
+    doc.layers = [A, group, ai];
+    setParents(doc.layers);
+    groupCopyLandsOnTop = true;
+    const swapCopy = await tree.copy(1, [{ id: 20, rel: 1, place: "after" }]);
+    groupCopyLandsOnTop = false; groupMoveAfterNoop = false; refuseIndexMoves = false;
+    assert.equal(swapCopy.done, 1);
+    assert.deepEqual(doc.layers.map((l: any) => l.id), [1, swapCopy.ids[0], 20, 10]);
+    assert.equal(doc.layers[1].layers.length, group.layers.length);
+    assert.equal(undoRollbacks, rollbacksBeforeTop);
+
+    // Dropped on the lower half of a plain row (after it), adjacent or not: only PLACEBEFORE on
+    // the next sibling is used, so the group never jumps to the top.
+    const B = attach({ id: 2, name: "正文", kind: "pixel" });
+    doc.layers = [group, A, B, ai];
+    setParents(doc.layers);
+    groupAfterToTop = true; refuseIndexMoves = true;
+    const belowB = await tree.move(1, [{ id: 20, rel: 2, place: "after" }]);
+    assert.equal(belowB.done, 1);
+    assert.deepEqual(doc.layers.map((l: any) => l.id), [1, 2, 20, 10]);
+    const copyBelowA = await tree.copy(1, [{ id: 20, rel: 1, place: "after" }]);
+    groupAfterToTop = false; refuseIndexMoves = false;
+    assert.equal(copyBelowA.done, 1);
+    assert.deepEqual(doc.layers.map((l: any) => l.id), [1, copyBelowA.ids[0], 2, 20, 10]);
+    assert.equal(undoRollbacks, rollbacksBeforeTop);
+
+    // Placement that cannot be repaired: the whole history step is rejected (Photoshop rolls back
+    // every clone and anything the index probing scattered), never a clone.delete that could
+    // leave a group's children behind as stray root layers.
+    const rollbacksBefore = undoRollbacks, deletesBefore = cloneDeletes;
+    forceWrongCopy = true; refuseIndexMoves = true;
+    await assert.rejects(tree.copy(1, [{ id: 1, rel: 10, place: "after" }]), /已撤销本次复制/);
+    forceWrongCopy = false; refuseIndexMoves = false;
+    assert.equal(undoRollbacks, rollbacksBefore + 1);
+    assert.equal(cloneDeletes, deletesBefore);
 
     // Document switch protection: copies must not be written into a different PSD.
     const beforeSwitch = undoStarts;

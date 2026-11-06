@@ -288,7 +288,7 @@ export function mountApp(root: HTMLElement, svc: Services) {
   compareBtn.addEventListener("mousedown", () => showOriginal(true));
   compareBtn.addEventListener("mouseup", () => showOriginal(false));
   compareBtn.addEventListener("mouseleave", () => { if (compareBtn.classList.contains("on")) showOriginal(false); });
-  genBtn.addEventListener("click", () => (run ? cancel() : generate()));
+  genBtn.addEventListener("click", () => { if (run) cancel(); else if (conn.state !== "ok") void launchComfy(); else void generate(); });
   advHead.addEventListener("click", () => { settings.advancedOpen = !settings.advancedOpen; store.saveSettings(settings); renderAdvanced(); });
 
   // ── rendering ──
@@ -558,11 +558,12 @@ export function mountApp(root: HTMLElement, svc: Services) {
       progEl.hidden = false;
       return;
     }
-    const why = blockedReason();
+    const needsComfy = conn.state !== "ok";
+    const why = needsComfy ? null : blockedReason();
     genBtn.className = "generate";
-    genBtn.disabled = !!why;
-    genBtn.title = why ?? "";
-    replace(genBtn, icon("spark"), h("span", null, actionLabel()));
+    genBtn.disabled = launching || !!why;
+    genBtn.title = needsComfy ? "启动并连接 ComfyUI" : (why ?? "");
+    replace(genBtn, icon(needsComfy ? "play" : "spark"), h("span", null, needsComfy ? "启动 ComfyUI" : actionLabel()));
     progEl.hidden = !why;
     replace(progEl, why ? h("div", { class: "stage muted" }, why,
       conn.state === "down" && svc.launch ? h("button", { class: "link", onClick: () => void launchComfy() }, settings.comfyLaunch ? "  一键启动" : "  设置启动文件") : null) : null);
@@ -879,6 +880,7 @@ export function mountApp(root: HTMLElement, svc: Services) {
       if (error !== null) { report("error", "外置框架没有启动：" + (error ?? "未知原因")); return; }
     }
     launching = true;
+    renderAction();
     try {
       log("info", "request managed ComfyUI start", settings.comfyLaunch, settings.comfyCloseWithPhotoshop, restart ? "restart" : "");
       syncComfyManager(true, true, restart);
@@ -907,7 +909,7 @@ export function mountApp(root: HTMLElement, svc: Services) {
       }
       conn = { state: "down", text: "未连接" }; renderConn(); renderAction();
       report("error", "3 分钟内没有连上 ComfyUI，请检查启动脚本和 reports/comfy_runtime.log");
-    } finally { launching = false; }
+    } finally { launching = false; renderAction(); }
   }
 
   function openSettings() {

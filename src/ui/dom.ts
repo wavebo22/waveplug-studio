@@ -15,6 +15,15 @@ export function h<K extends keyof HTMLElementTagNameMap>(tag: K, attrs: Attrs | 
     else if (k in el && typeof v !== "string") (el as any)[k] = v;
     else el.setAttribute(k, v === true ? "" : String(v));
   }
+  // UXP can retain a dark native fill on text-entry controls even when the stylesheet
+  // background rule is changed. Set the transparent surface inline after all attributes
+  // so every text/number/search field, including dynamically-created editors, inherits
+  // the panel row/surface beneath it. Keep checkbox and range controls native.
+  if (tag === "textarea" || (tag === "input" && !["checkbox", "radio", "range", "button", "submit", "reset", "file", "color", "image", "hidden"].includes(String(attrs?.type ?? "text").toLowerCase()))) {
+    (el as HTMLElement).style.backgroundColor = "transparent";
+    (el as HTMLElement).style.backgroundImage = "none";
+    (el as HTMLElement).style.boxShadow = "none";
+  }
   for (const c of children.flat()) if (c !== null && c !== undefined && c !== false) el.append(c);
   return el as HTMLElementTagNameMap[K];
 }
