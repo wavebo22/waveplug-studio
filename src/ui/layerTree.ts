@@ -5,23 +5,32 @@
 // thumbnails (queued in the background, cached per layer), so documents with thousands of layers
 // stay smooth.
 
-import { log } from "../app/log.ts";
+import { crumb, log } from "../app/log.ts";
 import { resultText } from "../core/layers/smart.ts";
 import { ThumbCache, thumbRetryDelay } from "../core/layers/thumbs.ts";
-import { routeLayerDragRelease } from "../core/layers/drag.ts";
+import { activateLayerDragLifecycle, cancelLayerDragLifecycle, createLayerDragLifecycle, releaseLayerDragLifecycle, routeLayerDragRelease, updateLayerDragLifecycle, type LayerDragLifecycle, type LayerDragRegion } from "../core/layers/drag.ts";
+import { addCalibrationSample, calibrationOffset, clampDropListY, edgeScrollRate, createClientCalibration, plausibleAxisOffset, resolveDragRegion, syntheticOffset, type ClientCalibration, type DragLayout, type DragRect } from "../core/layers/dragGeometry.ts";
 import { MAX_REFERENCES } from "../core/workflow/references.ts";
 import { workbenchPlacementAnchor } from "../core/layers/workbench.ts";
 import { clampThumbPercent, legacyThumbPercent, thumbnailMetrics, THUMB_PERCENT_KEY } from "../core/layers/topControls.ts";
 import { MULTI_EFFECTS } from "../core/layers/effects.ts";
-import { type AdvancedFilter, type Filter, type LayerAction, type LayerKind, type LockKey, type MoveStep, type Row, type SmartAction, type TreeLayer, type Where, BLEND_MODES, ancestors, isCompactRow, queryActive, clickSelect, contentUsers, canDropToDelete, canDropMaskOnto, copyPlan, dropPlan, previewMoveTree, dropZone, filterCounts, isVariantLayer, layerMenu, smartQuickMenu, nextLayerAfterDelete, layerTags, linkPeers, lockPlan, packChips, lockedByGroup, sharedColors, selectionAfterLocalClear, visibleRows } from "../core/layers/tree.ts";
+import { type AdvancedFilter, type Filter, type LayerAction, aiStrayMoves, isAiStray, type LayerKind, type LockKey, type MoveStep, type Row, type SmartAction, type TreeLayer, type Where, BLEND_MODES, ancestors, isCompactRow, queryActive, clickSelect, contentUsers, canDropToDelete, canDropMaskOnto, copyPlan, dropPlan, previewMoveTree, dropZone, filterCounts, isVariantLayer, layerMenu, nextLayerAfterDelete, layerTags, linkPeers, lockPlan, packChips, lockedByGroup, sharedColors, selectionAfterLocalClear, visibleRows } from "../core/layers/tree.ts";
 import { isDuplicateLayerDoubleAction, isLayerDoubleClick, type LayerClickPoint, type LayerDoubleAction } from "../core/layers/clicks.ts";
 import { matchesInlineRenameRow } from "../core/layers/rename.ts";
-import { type LayerTools, type LayerTree, type RunOptions, type TargetPart, ADJUSTMENTS, FILL_PREFIX, BLEND_PREFIX, EXTRACT_PREFIX, EXPAND_PREFIX, GENERATE_PREFIX, UPSCALE_PREFIX } from "../ps/host.ts";
+import { type LayerTools, type LayerTree, type PsHost, type RunOptions, type TargetPart, ADJUSTMENTS, FILL_PREFIX, BLEND_PREFIX, EXTRACT_PREFIX, EXPAND_PREFIX, GENERATE_PREFIX, UPSCALE_PREFIX } from "../ps/host.ts";
 import type { Overlay } from "../app/overlay.ts";
 import type { CanvasView } from "../core/overlay/protocol.ts";
+import { vectorFragment } from "../core/overlay/svgFragment.ts";
+import type { Rect } from "../core/image/region.ts";
+import { type ExternalDragSession, MAX_EXTERNAL_LAYERS, beginExternalExport, capExternalLayers, externalDragKey, externalDragResultText, layersToExport, createExternalDragSession, endExternalDrag, externalDragCandidates, externalDragOver, externalDragSessionId, finishExternalExport, helperCopiedExternalFiles, helperFinishedExternalDrag, recordExportedFile, shouldPrepareExternalDrag } from "../core/overlay/externalDrag.ts";
 import { frameKey, frameOnScreen, layerFrame } from "../core/overlay/hoverFrame.ts";
 import { every, h, icon, isShown, listen, replace, setShown } from "./dom.ts";
 import { type PopItem, createPopup } from "./popupMenu.ts";
+import { selectMenu, selectSet } from "../core/layers/selectSets.ts";
+import { contextMenu } from "../core/layers/contextMenu.ts";
+import { CONFIRM_ABOVE, pixelSettings } from "./tools.ts";
+import type { MenuNode } from "../core/overlay/protocol.ts";
+import { arrangeTarget, neighbourRow } from "../core/layers/tree.ts";
 import { onSmartTarget } from "./smartTarget.ts";
 import { createSlider } from "./slider.ts";
 import { createWorkbenchSection } from "./workbenchDemo.ts";
@@ -132,7 +141,7 @@ interface RowEl { index: number; el: HTMLElement; eye: HTMLElement; twisty: HTML
 
 /** The list fills the height it is given (the whole WavePlug 图层 panel); `tools` adds the 智能对象
  *  tools to the right-click menu. */
-export function createLayerTreeView(tree: LayerTree, status: Status, tools?: LayerTools, overlay?: Overlay, canvasView?: (docId: number) => Promise<CanvasView | null>) {
+export function createLayerTreeView(tree: LayerTree, status: Status, tools?: LayerTools, overlay?: Overlay, canvasView?: (docId: number) => Promise<CanvasView | null>, exportLayerPng?: PsHost["exportLayerPng"], docVersion?: PsHost["docVersion"], layerDragInfo?: PsHost["layerDragInfo"]) {
   let docId: number | null = null, layers: TreeLayer[] = [], users = new Map<string, number>(), canvas = { width: 0, height: 0 };
   /** the layers by id (kept with `layers`): lookups in drawing and dragging, which run for every row */
   let byId = new Map<number, TreeLayer>();
@@ -152,15 +161,15 @@ export function createLayerTreeView(tree: LayerTree, status: Status, tools?: Lay
   const openSubs = () => { const id = docId ?? -1; let s = openByDoc.get(id); if (!s) openByDoc.set(id, s = new Set()); return s; };
   const thumbsByDoc = new Map<number, ThumbCache>(), THUMB_DOCS = 4;
   const thumbs = () => { const id = docId ?? -1; let c = thumbsByDoc.get(id); if (!c) thumbsByDoc.set(id, c = new ThumbCache()); return c; };
-  // Double-clicks act by where they land: the thumbnail opens 图层样式, the status icons open a
-  // smart object's content; elsewhere they do nothing. A press on either part marks `downZone` before
-  // the row sees it.
-  type Zone = "thumb" | "status" | "name" | "variant";
+  // Double-clicks are deliberately separated: smart-object thumbnails/status icons open contents,
+  // names rename, and a layer's empty row area opens 图层样式. Ordinary thumbnails do nothing.
+  type Zone = "thumb" | "status" | "name" | "variant" | "blank" | "lock";
   let downZone: Zone | null = null;
   /** where on the row the last left / right press was (its click acts on that part) */
   let pressZone: Zone | null = null;
-  /** the mask shown alone / in red after an Alt+click on it */
-  let maskView: { id: number; overlay: boolean; filter?: boolean } | null = null;
+  /** the mask shown alone / in red after an Alt+click, including the editing target to restore */
+  type MaskView = { id: number; overlay: boolean; filter: boolean; previousPart: TargetPart };
+  let maskView: MaskView | null = null;
   /** a press on an eye (or a 可移动 / 可编辑 switch) switches it; dragging switches every row from the
    *  pressed one to the one under the pointer (rows a fast move skips included), and dragging back puts
    *  the rows left behind as they were. Sent to Photoshop as one call when the button comes up.
@@ -170,17 +179,36 @@ export function createLayerTreeView(tree: LayerTree, status: Status, tools?: Lay
   let focus: { id: number; part: TargetPart } | null = null;
   const partOf = (id: number): TargetPart => focus?.id === id ? focus.part : "layer";
   const framed = (l: TreeLayer): TargetPart | null => selected.has(l.id) ? partOf(l.id) : null;
+  const targetActionForPart = (part: TargetPart): LayerAction =>
+    part === "layer" ? "targetLayer" : part === "mask" ? "targetMask" : part === "vmask" ? "targetVectorMask" : "targetFilterMask";
+  /** Leave mask-only / red-overlay view and restore the editing target that was active before it. */
+  function exitMaskView(next?: () => void) {
+    const was = maskView;
+    if (!was) { next?.(); return; }
+    maskView = null;
+    localClear = null; selected = new Set([was.id]); anchor = was.id;
+    focus = { id: was.id, part: was.previousPart };
+    render();
+    const off = (was.overlay ? "off-overlay" : "off-alone") + (was.filter ? ":filter" : "");
+    void run("viewMask", [was.id], off)
+      .then(() => run(targetActionForPart(was.previousPart), [was.id]))
+      .then(() => { next?.(); });
+  }
   /** a click on a thumbnail: that part becomes the one painted on (the layer selected alone) */
   function targetPart(id: number, part: TargetPart) {
     if (deleting) return;
-    const same = selected.size === 1 && selected.has(id) && partOf(id) === part;
-    localClear = null;
-    selected = new Set([id]); anchor = id;
-    focus = { id, part };
-    for (const r of pool) if (r.id === id) r.key = "";
-    render();
-    if (same && part !== "layer") return;
-    void run(part === "layer" ? "targetLayer" : part === "mask" ? "targetMask" : part === "vmask" ? "targetVectorMask" : "targetFilterMask", [id]);
+    const apply = () => {
+      localClear = null;
+      selected = new Set([id]); anchor = id;
+      focus = { id, part };
+      for (const r of pool) if (r.id === id) r.key = "";
+      render();
+      // Re-issue even when the UI already shows this target: Photoshop may have switched
+      // channels while a mask was being viewed or by an external panel.
+      void run(targetActionForPart(part), [id]);
+    };
+    if (maskView) { exitMaskView(apply); return; }
+    apply();
   }
   /** Bottom trash click. Keyboard deletion is intentionally disabled in WaveLayer. */
   let deleting = false;
@@ -213,6 +241,10 @@ export function createLayerTreeView(tree: LayerTree, status: Status, tools?: Lay
   // After a Photoshop command UXP still reports the section as focused while Photoshop has the
   // keys (only the first Delete arrived): blur first, so focus() really asks for the keyboard again.
   const refocus = (why: string) => {
+    // Selecting a layer / mask thumbnail is an editing action: leave keyboard focus with Photoshop
+    // so brush, mask, transform and other native shortcuts continue to work.
+    if (focus && selected.has(focus.id)) return;
+    if (why === "loadSelection" || why === "toggleMask" || why === "toggleVectorMask") return;
     // Photoshop may reclaim UXP keyboard focus *after* the modal promise resolves. A synchronous
     // blur/focus is therefore racy. Retry on the next turns, but only while the pointer remains
     // over this panel and the user has not started typing or dragging.
@@ -240,7 +272,14 @@ export function createLayerTreeView(tree: LayerTree, status: Status, tools?: Lay
     const t = e.target as HTMLElement | null;
     panelActive = el.contains(t);
     if (!t?.closest(".lt-row")) lastDown = null;
-    if (panelActive && !typing(t)) { try { el.focus(); } catch { /* host without focus on sections */ } }
+    if (panelActive && !typing(t)) {
+      if (t?.closest(".lt-thumb")) {
+        // Thumbnail clicks choose the Photoshop editing target; do not keep the UXP panel focused.
+        try { (document.activeElement as HTMLElement | null)?.blur(); } catch { /* host without blur */ }
+      } else {
+        try { el.focus(); } catch { /* host without focus on sections */ }
+      }
+    }
   }, true);
   /** the open document across sessions (custom colours are kept by it) */
   let docKey = "";
@@ -269,13 +308,16 @@ export function createLayerTreeView(tree: LayerTree, status: Status, tools?: Lay
     const l = layers.find(x => x.id === id);
     if (!l || (zone === "status" && l.kind !== "smartObject") || (zone === "variant" && !isVariantLayer(l))) return;
     if (zone !== "name") lastDouble = action;
+    if (zone === "lock") { void run("unlock", [id]); return; }
     // a variant layer's ✦ (on its picture) opens / closes its variations under it
     if (zone === "variant") { toggleGroup(id); return; }
     if (zone === "name") setTimeout(() => startRename(id), 0);
+    else if (zone === "blank") void run("layerStyle", [id]);
     else if (zone === "thumb" && l.artboard) setTimeout(() => openColorMenu(id), 0);
     // Photoshop convention: double-click smart-object thumbnail or smart badge.
     // The host automatically converts PNG content to PSB before opening it.
-    else void run(zone === "thumb" && l.kind !== "smartObject" ? "layerStyle" : "editContents", [id]);
+    else if (zone === "status" || (zone === "thumb" && l.kind === "smartObject")) void run("editContents", [id]);
+    // A regular layer thumbnail intentionally has no double-click action.
   };
   /** marks presses on `el` as `zone` and takes the native double-click there */
   const zoneOf = (el: HTMLElement, id: number, zone: Zone) => {
@@ -594,15 +636,15 @@ export function createLayerTreeView(tree: LayerTree, status: Status, tools?: Lay
     const el = h("div", { class: "lt-row" }, stripe, eye, body);
     const r: RowEl = { index: 0, el, eye, twisty, name, body, key: "", id: 0, sub: null };
     // double-click on the name renames, as in Photoshop
-    name.addEventListener("mousedown", () => { if (!r.sub) downZone = "name"; });
+    name.addEventListener("mousedown", e => {
+      if (!r.sub && (e.target as HTMLElement).closest(".lt-name-text")) downZone = "name";
+    });
     eye.addEventListener("click", e => {
       e.stopPropagation();
       const s = r.sub;
       if (s?.line || s?.kind === "variants") return;
-      if (s?.kind === "effects") {
-        if (!s.index) void run("toggleEffects", [r.id], s.enabled ? "off" : "on");
-        else void run("toggleEffect", [r.id], JSON.stringify({ key: s.effect!.key, multi: s.effect!.multi, on: !s.enabled }));
-      } else if (s) void run("toggleFilter", [r.id], JSON.stringify({ index: s.index }));
+      if (s?.kind === "filters") void run("toggleFilter", [r.id], JSON.stringify({ index: s.index }));
+      else if (s) return;
       else if ((e as MouseEvent).altKey) void run("solo", [r.id]);
     });
     eye.addEventListener("mousedown", e => {
@@ -639,7 +681,10 @@ export function createLayerTreeView(tree: LayerTree, status: Status, tools?: Lay
         return;
       }
       // an artboard's row: a double-click anywhere but its name picks its frame colour
-      const m = e as MouseEvent, zone = downZone ?? (r.sub?.kind === "effects" || (!r.sub && layers.find(x => x.id === r.id)?.artboard) ? "thumb" : null);
+      const m = e as MouseEvent, layer = !r.sub ? layers.find(x => x.id === r.id) : undefined;
+      const target = m.target as HTMLElement | null;
+      const interactive = !!target?.closest(".lt-eye, .lt-twisty, .lt-clip, .lt-thumb, .lt-mlink, .lt-cells, .lt-toggle, .lt-fx, .lt-fx-master, .lt-subcell");
+      const zone = downZone ?? (layer?.artboard ? "thumb" : !r.sub && !interactive ? "blank" : null);
       downZone = null;
       pressZone = zone;
       if (m.button === 2) { lastDown = null; openRowMenu(r.id); return; }
@@ -658,9 +703,13 @@ export function createLayerTreeView(tree: LayerTree, status: Status, tools?: Lay
       lastDown = zone && !m.ctrlKey && !m.metaKey && !m.shiftKey ? point : null;
       // the 智能滤镜 / 效果 rows drag as in Photoshop: all the filters, or the whole style, onto another
       // layer (Alt copies) or the trash; their chips drag one by one (filterChips / effectChips)
-      if (!r.sub) startDrag(r.id, m);
-      else if (r.sub.kind === "filters") startDrag(r.id, m, { what: { kind: "filters", layerId: r.id }, row: r.index });
-      else if (r.sub.kind === "effects") startDrag(r.id, m, { what: { kind: "effects", layerId: r.id }, row: r.index });
+      if (!r.sub) {
+        if (zone !== "lock") startDrag(r.id, m);
+      } else if (r.sub.kind === "filters") {
+        startDrag(r.id, m, { what: { kind: "filters", layerId: r.id }, row: r.index });
+      } else if (r.sub.kind === "effects") {
+        startDrag(r.id, m, { what: { kind: "effects", layerId: r.id }, row: r.index });
+      }
     });
     el.addEventListener("mouseover", () => frameAt(r.id));
     el.addEventListener("contextmenu", e => e.preventDefault());
@@ -676,8 +725,8 @@ export function createLayerTreeView(tree: LayerTree, status: Status, tools?: Lay
     return r;
   }
 
-  /** The 效果 / 智能滤镜 row under a layer: an eye for all of them and each effect / filter a chip
-   *  (several lines when they don't fit; only the first has the eye and the mark). */
+  /** The 效果 / 智能滤镜 row under a layer: the left fx mark toggles all effects, the eye toggles all filters, and each chip toggles one item.
+   *  Several lines are used when chips do not fit; only the first line has the master control and mark. */
   function fillFilter(r: RowEl, row: Row, index: number) {
     const l = row.layer, f = row.filter!, sel = selected.has(l.id), fx = f.kind === "effects";
     const allOn = fx ? l.effectsOn : l.filtersOn;
@@ -692,21 +741,34 @@ export function createLayerTreeView(tree: LayerTree, status: Status, tools?: Lay
     setShown(r.el, true);
     if (key === r.key) return;
     r.key = key; r.id = l.id; r.sub = f;
-    r.el.className = "lt-row lt-filter-row" + (sel ? " on" : "") + (f.enabled ? "" : " off") + (moving ? " moving" : "") + (r.el === hoverEl ? " hover" : "");
+    r.el.className = "lt-row lt-filter-row" + (fx ? " lt-effects-row" : "") + (sel ? " on" : "") + (f.enabled ? "" : " off") + (moving ? " moving" : "") + (r.el === hoverEl ? " hover" : "");
     (r.el.firstChild as HTMLElement).className = "lt-stripe";
-    replace(r.eye, f.enabled && !more ? ic("eye", 14) : null);
-    r.eye.className = "lt-eye" + (more ? " none" : f.enabled ? "" : " hidden");
+    replace(r.eye, !fx && f.enabled && !more ? ic("eye", 14) : null);
+    r.eye.className = "lt-eye" + (more || fx ? " none" : f.enabled ? "" : " hidden");
     r.eye.style.backgroundColor = "";
-    r.eye.title = more ? "" : fx ? (f.enabled ? "隐藏全部效果" : "显示全部效果") : (f.enabled ? "隐藏全部智能滤镜" : "显示全部智能滤镜");
+    r.eye.title = more || fx ? "" : (f.enabled ? "隐藏全部智能滤镜" : "显示全部智能滤镜");
     replace(r.name, f.name);
     r.name.className = "lt-name";
     const places = f.chips ?? (fx ? l.effectList : l.filters).map((_, i) => i);
+    const fxMaster = fx && !more ? h("button", {
+      class: "lt-kind k-fx lt-fx-master" + (allOn ? "" : " off"), type: "button",
+      title: allOn ? "隐藏全部图层样式效果" : "显示全部图层样式效果",
+      "aria-label": allOn ? "隐藏全部图层样式效果" : "显示全部图层样式效果",
+    }, "fx") : null;
+    if (fxMaster) {
+      fxMaster.addEventListener("mousedown", e => e.stopPropagation());
+      fxMaster.addEventListener("click", e => {
+        e.stopPropagation();
+        if (!suppressClick) void run("toggleEffects", [l.id], allOn ? "off" : "on");
+      });
+    }
     replace(r.body, h("div", { class: "lt-indent" }, ...Array.from({ length: l.depth + 1 }, () => h("span", { class: "lt-guide" }))),
-      fx ? h("div", { class: "lt-mark" }, more ? null : h("span", { class: "lt-kind k-fx" }, "fx"))
+      fx ? h("div", { class: "lt-mark" }, fxMaster)
         : h("div", { class: "lt-mark has-thumb" }, more ? null : filterMaskCell(l)),
       fx ? effectChips(l, places, r, held) : filterChips(l, places, r, held));
-    r.el.title = fx ? `${l.name} 的图层样式（双击打开）。拖动这一行到别的图层上：移动整个样式（按住 Alt 复制，替换那个图层原有的样式）；拖到垃圾桶：清除`
-      : `${l.name} 的智能滤镜，从右往左依次应用（和 PS 里从下往上一样）。拖动这一行到别的智能对象上：移动全部（按住 Alt 复制）；拖到垃圾桶：全部清除`;
+    r.el.title = fx
+      ? l.name + " 的图层样式。单击左侧 fx 显示/隐藏全部效果；拖动这一行到别的图层上：移动整个样式（按住 Alt 复制，替换目标图层原有样式）；拖到垃圾桶：清除"
+      : l.name + " 的智能滤镜，从右往左依次应用（和 PS 里从下往上一样）。拖动这一行到别的智能对象上：移动全部（按住 Alt 复制）；拖到垃圾桶：全部清除";
   }
 
   /** Effect / filter chips need more than one line when they don't fit: the row becomes as many rows
@@ -848,7 +910,7 @@ export function createLayerTreeView(tree: LayerTree, status: Status, tools?: Lay
     const maskThumb = l.mask && thumbsOn ? thumbs().get(maskKey(l.id)) : undefined;
     const vmaskThumb = l.vmask && thumbsOn ? thumbs().get(vmaskKey(l.id)) : undefined;
     const key = [l.id, l.name, l.visible, l.locked, l.lockAll, l.lockPosition, l.lockPixels, l.lockTransparency, groupLocked.has(l.id), l.links.length, peers.has(l.id), sharedColor(l), l.mask, l.maskOn, l.clipped, l.clipBase, l.effects, l.effectsOn, l.depth, l.children, l.ai?.variations, l.smart?.contentId, l.smart?.linked, l.smart?.file, l.filters.length, l.filtersOn, l.effectList.map(e => +e.enabled).join(""), groupColor.get(l.id),
-      users.get(l.smart?.contentId ?? "") ?? 0, sel, open, row.context, moving, thumbs().version(l.id), thumbs().version(maskKey(l.id)), thumbs().version(vmaskKey(l.id)), l.vmask, l.vmaskOn, l.maskLinked, l.vmaskLinked, l.color, customOf(l.id), maskView?.id === l.id, hasPicture(l), framed(l), thumbW(l), openSubs().has(-l.id), shown, shown !== null ? thumbs().version(shown) : 0, l.ai?.shown].join("|");
+      users.get(l.smart?.contentId ?? "") ?? 0, sel, open, row.context, moving, thumbs().version(l.id), thumbs().version(maskKey(l.id)), thumbs().version(vmaskKey(l.id)), l.vmask, l.vmaskOn, l.maskLinked, l.vmaskLinked, l.color, customOf(l.id), maskView?.id === l.id, hasPicture(l), framed(l), thumbW(l), openSubs().has(-l.id), openSubs().has(l.id), shown, shown !== null ? thumbs().version(shown) : 0, l.ai?.shown].join("|");
     r.index = index;
     setShown(r.el, true);
     if (key === r.key) return;
@@ -869,7 +931,7 @@ export function createLayerTreeView(tree: LayerTree, status: Status, tools?: Lay
     const folds = !vl && l.kind === "group" && l.children > 0;
     replace(r.twisty, folds ? (open ? "▾" : "▸") : "");
     r.twisty.title = !folds ? "" : open ? "折叠" : "展开";
-    replace(r.name, l.name);
+    replace(r.name, h("span", { class: "lt-name-text" }, l.name));
     r.name.className = "lt-name" + (l.clipBase ? " clip-base" : "");
     const pictured = hasPicture(l) || shown !== null;
     const mark = pictured
@@ -882,9 +944,11 @@ export function createLayerTreeView(tree: LayerTree, status: Status, tools?: Lay
     // one guide line per level, continuing from row to row like Blender's outliner
     replace(r.body, h("div", { class: "lt-indent" }, ...Array.from({ length: l.depth }, () => h("span", { class: "lt-guide" }))), r.twisty,
       l.clipped ? h("div", { class: "lt-clip", title: "剪贴到下方图层（剪贴蒙版）" }, ic("clip", 13)) : null,
-      zoneOf(h("div", { class: "lt-mark" + (pictured ? " has-thumb" : ""), style: pictured ? `width: ${thumbW(l) + 2}px` : "", title: l.kind === "smartObject"
-          ? "双击：编辑智能对象内容（PNG 自动转换为可编辑 PSB）；Ctrl+单击：载入选区"
-          : "双击：图层样式；Ctrl+单击：载入选区（+Shift 添加，+Alt 减去）" }, mark), l.id, "thumb"),
+      zoneOf(h("div", { class: "lt-mark" + (pictured ? " has-thumb" : ""), style: pictured ? "width: " + (thumbW(l) + 2) + "px" : "", title: l.kind === "smartObject"
+          ? "双击缩略图：编辑智能对象内容（PNG 自动转换为可编辑 PSB）；Ctrl+单击：载入选区"
+          : l.artboard
+            ? "双击画板缩略图：设置画板颜色；Ctrl+单击：载入选区"
+            : "双击缩略图无操作；双击图层空白区域：打开图层样式；Ctrl+单击：载入选区（+Shift 添加，+Alt 减去）" }, mark), l.id, "thumb"),
       // as in Photoshop: picture ⛓ layer mask ⛓ vector mask, each chain its mask's link
       l.mask ? maskChain(l, false) : null,
       l.mask ? maskCell(l, maskThumb) : null,
@@ -892,7 +956,7 @@ export function createLayerTreeView(tree: LayerTree, status: Status, tools?: Lay
       l.vmask ? vmaskCell(l, vmaskThumb) : null,
       r.name,
       // the status icons this layer has, at the right in a fixed order and spacing (no empty places)
-      h("div", { class: "lt-cells" }, ...COLS.filter(c => cellUsed(l, c)).map(c => cell(l, c, color, peer))));
+      h("div", { class: "lt-cells" }, ...COLS.filter(c => cellUsed(l, c)).map(c => cell(l, c, peer))));
     r.el.title = l.name + (vl ? `（变体图层，${l.ai!.variations} 个变体：双击 ✦ 选择变体；PS 图层面板里是图层组）` : l.kind === "group" ? `（图层组，${l.children} 个图层）` : "") + (l.clipBase ? "（剪贴蒙版的基底图层）" : "");
   }
 
@@ -921,8 +985,10 @@ export function createLayerTreeView(tree: LayerTree, status: Status, tools?: Lay
       const m = e as MouseEvent;
       if (m.ctrlKey || m.metaKey) loadSelection(l.id, true, m);
       else if (m.altKey) viewMask(l.id, m.shiftKey);
-      else if (m.shiftKey) void run("toggleMask", [l.id], l.maskOn ? "off" : "on");
-      else targetPart(l.id, "mask");
+      else if (m.shiftKey) {
+        const toggle = () => void run("toggleMask", [l.id], l.maskOn ? "off" : "on");
+        if (maskView) exitMaskView(toggle); else toggle();
+      } else targetPart(l.id, "mask");
     });
     return cell;
   }
@@ -973,8 +1039,10 @@ export function createLayerTreeView(tree: LayerTree, status: Status, tools?: Lay
       if (suppressClick) return;
       const m = e as MouseEvent;
       if (m.ctrlKey || m.metaKey) loadSelection(l.id, "vector", m);
-      else if (m.shiftKey) void run("toggleVectorMask", [l.id], l.vmaskOn ? "off" : "on");
-      else targetPart(l.id, "vmask");
+      else if (m.shiftKey) {
+        const toggle = () => void run("toggleVectorMask", [l.id], l.vmaskOn ? "off" : "on");
+        if (maskView) exitMaskView(toggle); else toggle();
+      } else targetPart(l.id, "vmask");
     });
     return cell;
   }
@@ -982,27 +1050,42 @@ export function createLayerTreeView(tree: LayerTree, status: Status, tools?: Lay
   /** Alt+click on a mask: the mask alone in the document window (Alt+Shift: over the picture in red);
    *  the same again goes back */
   function viewMask(id: number, overlay: boolean, filter = false) {
-    const was = maskView, which = (f?: boolean) => f ? ":filter" : "";
-    if (was && was.id === id && !!was.filter === filter) { maskView = null; void run("viewMask", [id], (was.overlay ? "off-overlay" : "off-alone") + which(was.filter)); }
-    else { maskView = { id, overlay, filter }; void run("viewMask", [id], (overlay ? "overlay" : "alone") + which(filter)); }
-    for (const r of pool) if (r.id === id) r.key = "";
-    render();
+    const was = maskView, sameTarget = !!was && was.id === id && was.filter === filter;
+    const open = () => {
+      const previousPart = sameTarget && was ? was.previousPart : partOf(id);
+      maskView = { id, overlay, filter, previousPart };
+      localClear = null; selected = new Set([id]); anchor = id;
+      focus = { id, part: filter ? "filterMask" : "mask" };
+      for (const r of pool) if (r.id === id) r.key = "";
+      render();
+      void run("viewMask", [id], (overlay ? "overlay" : "alone") + (filter ? ":filter" : ""));
+    };
+    if (was && sameTarget && was.overlay === overlay) { exitMaskView(); return; }
+    if (was) { exitMaskView(open); return; }
+    open();
   }
 
   /** 载入选区: the layer's pixels (or its mask) as the selection; Shift adds, Alt subtracts, both intersect */
   function loadSelection(id: number, mask: boolean | "vector" | "filter", m: MouseEvent) {
     const mode = m.shiftKey && m.altKey ? "intersect" : m.shiftKey ? "add" : m.altKey ? "subtract" : "set";
-    void run("loadSelection", [id], JSON.stringify({ mode, mask }));
+    const load = () => void run("loadSelection", [id], JSON.stringify({ mode, mask }));
+    if (maskView) { exitMaskView(load); return; }
+    load();
   }
 
-  /** fx: the layer has effects; click opens 图层样式 */
+  /** fx: click expands/collapses the effects row; right-click opens layer-style options. */
   function fxCell(l: TreeLayer): HTMLElement {
     const open = openSubs().has(l.id);
     const cell = h("span", { class: "lt-col col-fx lt-fx" + (l.effectsOn ? "" : " off") + (open ? " open" : ""),
-      title: (l.effectsOn ? "图层样式" : "图层样式（已隐藏）") + `：单击${open ? "收起" : "展开"}效果；拖到别的图层上移动整个样式（按住 Alt 复制），拖到垃圾桶清除；双击缩略图打开图层样式` }, "fx");
+      title: (l.effectsOn ? "图层样式" : "图层样式（已隐藏）") + "：单击" + (open ? "收起" : "展开") + "效果；右键查看图层样式选项；拖到别的图层上移动整个样式（按住 Alt 复制），拖到垃圾桶清除" }, "fx");
     // dragged like Photoshop's fx icon: onto another layer (move; Alt: copy), the trash (clear)
     cell.addEventListener("mousedown", e => { e.stopPropagation(); startDrag(l.id, e as MouseEvent, { what: { kind: "effects", layerId: l.id }, row: rowOf(l.id) }); });
     cell.addEventListener("click", e => { e.stopPropagation(); if (!suppressClick) toggleSub(l.id); });
+    cell.addEventListener("contextmenu", e => {
+      e.preventDefault();
+      e.stopPropagation();
+      openFxMenu(l, cell, e as MouseEvent);
+    });
     return cell;
   }
 
@@ -1017,10 +1100,10 @@ export function createLayerTreeView(tree: LayerTree, status: Status, tools?: Lay
     }
   }
 
-  /** Column `c` of layer `l`: its icon, or a blank of the same width. */
   /** a layer's own row in the list now (rows move as groups open and the list scrolls) */
   const rowOf = (id: number) => Math.max(0, rows.findIndex(x => x.layer.id === id && !x.filter));
-  function cell(l: TreeLayer, c: Col, color: number | undefined, peer: boolean): HTMLElement {
+  /** Column `c` of layer `l`: its icon, or a blank of the same width. */
+  function cell(l: TreeLayer, c: Col, peer: boolean): HTMLElement {
     const box = (cls: string, tip: string, ...kids: (Node | null)[]) => h("span", { class: `lt-col col-${c} ${cls}`, title: tip }, ...kids);
     if (!cellUsed(l, c)) return h("span", { class: `lt-col col-${c}` });
     const tag = (cls: string[]) => layerTags(l, users).find(t => cls.includes(t.cls.split(" ")[0]));
@@ -1037,7 +1120,15 @@ export function createLayerTreeView(tree: LayerTree, status: Status, tools?: Lay
       }
       case "fx": return fxCell(l);
       case "chain": return box("lt-chain" + (peer ? " peer" : ""), peer ? "和选中的图层链接在一起" : `和 ${l.links.length} 个图层链接（一起移动、变换）`, ic("link", 13));
-      case "lock": return box("lt-lock" + (l.lockAll ? "" : " part"), l.lockAll ? "锁定全部（上方的锁定按钮可以解开）" : "锁定透明像素（上方的锁定按钮可以解开）", ic("lock", 13));
+      case "lock": {
+        const background = l.kind === "background";
+        const tip = background
+          ? "背景图层（双击此锁图标：转换为普通图层并解锁）"
+          : l.lockAll
+            ? "锁定全部（双击此锁图标：解除该图层的全部锁定）"
+            : "锁定透明像素（双击此锁图标：解除该图层的全部锁定）";
+        return zoneOf(box("lt-lock" + (l.lockAll ? "" : " part"), tip, ic("lock", 13)), l.id, "lock");
+      }
     }
   }
 
@@ -1367,6 +1458,25 @@ export function createLayerTreeView(tree: LayerTree, status: Status, tools?: Lay
   let selecting = 0, selectGen = 0;
   /** Serialise Photoshop selection changes. Rapid Ctrl/Shift clicks must not overlap modal calls. */
   let selectTail: Promise<void> = Promise.resolve();
+  let rescuing = false;
+  /** New layers Photoshop put inside an AI group (made / placed / pasted while it was selected) go
+   *  just above it, as one undo step; the host checks the names again inside that step, so a
+   *  variation being written (placed, then renamed vN) is never moved. */
+  async function rescueAiStrays(doc: number, steps: MoveStep[]) {
+    if (rescuing) return;
+    rescuing = true;
+    try {
+      log("info", "ai group strays", doc, JSON.stringify(steps));
+      const r = await tree.move(doc, steps, { history: "WavePlug 移出 AI 图层", onlyIf: isAiStray });
+      if (r.done) status(`新图层已放到 AI 图层上方（AI 图层组里只放变体）`, "info");
+      if (r.skipped?.length) log("info", "ai group strays skipped", r.skipped.join("；"));
+    } catch (e) {
+      log("warn", "ai group strays move failed", e);
+    } finally {
+      rescuing = false;
+      void refresh();
+    }
+  }
   async function refresh() {
     // Ignore intermediate selections and layer states during a batch delete. The delete command
     // itself requests a fresh read after Photoshop commits its history step.
@@ -1395,7 +1505,7 @@ export function createLayerTreeView(tree: LayerTree, status: Status, tools?: Lay
         const before = [...selected].sort().join(",");
         // A layer ID may be reused by another open document; never carry an editor across documents.
         if (renaming !== null && (!r || r.docId !== docId)) endRename(false);
-        if (!r) { docId = null; layers = []; byId = new Map(); selected = new Set(); users = new Map(); localClear = null; lastHostSelection = null; }
+        if (!r) { docId = null; layers = []; byId = new Map(); selected = new Set(); users = new Map(); localClear = null; lastHostSelection = null; focus = null; maskView = null; }
         else {
           docKey = r.docKey;
           lastHostSelection = { docId: r.docId, ids: [...r.selected] };
@@ -1403,7 +1513,7 @@ export function createLayerTreeView(tree: LayerTree, status: Status, tools?: Lay
             if (localClear.docId !== r.docId || !selectionAfterLocalClear(r.selected, localClear.hostIds).keepClear) localClear = null;
           }
           if (r.docId !== docId) {
-            firstRow = 0; anchor = null; hideFrame();
+            firstRow = 0; anchor = null; hideFrame(); focus = null; maskView = null;
             // thumbnails (data URLs) are kept for the last few documents only: most recent last
             const c = thumbsByDoc.get(r.docId);
             if (c) { thumbsByDoc.delete(r.docId); thumbsByDoc.set(r.docId, c); }
@@ -1419,8 +1529,13 @@ export function createLayerTreeView(tree: LayerTree, status: Status, tools?: Lay
             // masks show the whole canvas: a new canvas size redraws the thumbnails
             if (r.width !== canvas.width || r.height !== canvas.height) thumbs().invalidate("all");
           }
+          if (!stale && focus && !r.selected.includes(focus.id)) focus = null;
+          if (!stale && maskView && !r.selected.includes(maskView.id)) maskView = null;
           if (!stale || r.docId !== docId) selected = localClear ? new Set() : new Set(r.selected);
           else if (stale) again = selecting === 0;
+          const seen = r.docId === docId ? new Set(layers.map(l => l.id)) : null;
+          const strays = aiStrayMoves(seen, r.layers);
+          if (strays.length) void rescueAiStrays(r.docId, strays);
           docId = r.docId; layers = r.layers; byId = new Map(layers.map(l => [l.id, l])); users = contentUsers(layers); colors = sharedColors(layers, users); canvas = { width: r.width, height: r.height };
         }
         const now = [...selected].sort().join(",");
@@ -1458,6 +1573,7 @@ export function createLayerTreeView(tree: LayerTree, status: Status, tools?: Lay
 
   async function clickRow(id: number, mods: { ctrl: boolean; shift: boolean }) {
     if (docId === null || deleting) return;
+    if (maskView) { exitMaskView(() => { void clickRow(id, mods); }); return; }
     const before = [...selected];
     const r = clickSelect(rows.filter(x => !x.filter).map(x => x.layer.id), layers.filter(l => selected.has(l.id)).map(l => l.id), anchor, id, mods);
     anchor = r.anchor;
@@ -1545,6 +1661,8 @@ export function createLayerTreeView(tree: LayerTree, status: Status, tools?: Lay
   // ── layer commands (right-click menu, toolbar, mask / fx cells) ──
   async function run(action: LayerAction | SmartAction, ids: number[], arg?: string, opts?: RunOptions) {
     if (docId === null) return;
+    // constant, silent ones (a click on a thumbnail) aside, every command is a step of the report
+    if (!action.startsWith("target")) crumb(`图层命令：${action}${arg && arg.length < 40 ? "(" + arg + ")" : ""}（${ids.length} 个图层）`);
     // Delete from keyboard, toolbar, right-click menu and drag-to-trash must all use the same
     // guard. Previously only the keyboard/toolbar had protection against concurrent deletes.
     const destructive = action === "delete" || action === "deleteMask" || action === "applyMask"
@@ -1643,8 +1761,18 @@ export function createLayerTreeView(tree: LayerTree, status: Status, tools?: Lay
     | { kind: "mask" | "vmask" | "filterMask"; layerId: number }
     | { kind: "variant"; layerId: number; variantId: number };
   let drag: {
-    ids: number[]; sourceId: number; sourceDocId: number; referenceDragStarted: boolean;
-    y0: number; view0: number; fix: number; view: number; active: boolean; probed: boolean;
+    lifecycle: LayerDragLifecycle;
+    ids: number[]; sourceId: number; sourceDocId: number; referenceDragStarted: boolean; previewStarted: boolean; previewKey: string;
+    /** client → panel origin learned from measurable events; `view` is list-local Y (raw, may be
+     *  above 0 / below the list inside the buffer band) */
+    cal: ClientCalibration; view: number; active: boolean;
+    /** the press (clientY, list-local Y): fallback only, while there is no calibration */
+    y0: number; view0: number;
+    /** layout rectangles and the last calibration sample, refreshed at most every DRAG_LAYOUT_MS:
+     *  reading offsets after trackDrop's writes forces a UXP relayout, so not on every move */
+    layout: DragLayout | null; layoutAt: number; sampledAt: number;
+    /** handler cost and event spacing, logged on release (evidence for lag reports) */
+    perf: { moves: number; total: number; max: number; layouts: number; lastAt: number; gapMax: number };
     target: { id: number; where: Where; plan: MoveStep[] } | null;
     /** dragging a smart filter / all of them / one effect / the whole style instead of layers; where a
      *  filter would go (`toPos` as moved, `insertAt` as copied), the layer the rest would go onto, and
@@ -1656,7 +1784,24 @@ export function createLayerTreeView(tree: LayerTree, status: Status, tools?: Lay
     canDelete: boolean; overLeftDelete: boolean; overWorkbench: boolean;
     pointerX: number; pointerY: number;
     hoverTimer: ReturnType<typeof setTimeout> | null; scroller: ReturnType<typeof setInterval> | null;
+    /** 跨软件拖拽: the PNG export started when this drag first left the panel (at most once) */
+    external: ExternalRun | null;
   } | null = null;
+  /** A cross-app drag session and the deleters of its temporary PNGs (drained when they go). Kept
+   *  by id until it is over: an export can finish, or the helper report, after the drag ended. */
+  type ExternalRun = { session: ExternalDragSession; removers: (() => Promise<void>)[] };
+  const externalRuns = new Map<string, ExternalRun>();
+  /** this plugin load, in every reuse key (externalDragKey) */
+  const externalLoad = externalDragSessionId();
+  /** prepare's answer (external-drag-cached), per session */
+  const cachedWaiters = new Map<string, (keys: string[]) => void>();
+  /** The keys the helper already has exported; none if it doesn't answer quickly (then all export). */
+  function cachedKeys(sessionId: string, ms = 300): Promise<Set<string>> {
+    return new Promise(resolve => {
+      const timer = setTimeout(() => { cachedWaiters.delete(sessionId); resolve(new Set()); }, ms);
+      cachedWaiters.set(sessionId, keys => { clearTimeout(timer); cachedWaiters.delete(sessionId); resolve(new Set(keys)); });
+    });
+  }
   // Mousemove can fire much more often than the active drop target changes. Recompute
   // the multi-layer drag plan only when the hovered row/zone/Alt state or tree changes.
   let dragPlanCache: { tree: TreeLayer[]; id: number; where: Where; alt: boolean; plan: MoveStep[] | null } | null = null;
@@ -1677,38 +1822,96 @@ export function createLayerTreeView(tree: LayerTree, status: Status, tools?: Lay
   const leftDelete = h("div", { class: "lt-left-delete", title: "松开鼠标删除（Ctrl+Z 可撤销）" }, ic("trash", 15));
   setShown(leftDelete, false);
   list.append(leftDelete);
-  leftDelete.addEventListener("mouseenter", () => {
-    if (!drag?.active || !drag.canDelete) return;
-    drag.overLeftDelete = true;
-    leftDelete.classList.add("hot");
-    track();
-  });
-  leftDelete.addEventListener("mouseleave", () => {
-    if (drag) {
-      drag.overLeftDelete = false;
-      // Until the pointer moves over another row again, treat leaving the rail as cancel.
-      // In particular, moving completely outside the panel must NOT turn into a stale reorder.
-      drag.target = null; drag.ftarget = null; drag.ltarget = null;
-      setShown(marker, false);
+
+  // Drop regions are resolved by geometry (core/layers/dragGeometry.ts), not by event.target:
+  // UXP keeps targeting the pressed row during a drag. A 50px band above / below the rows, across
+  // the panel's width, still counts as the list (first / last visible slot).
+  const DROP_BUFFER = 50;
+
+  /** `node`'s border-box origin in `root`'s space, from layout offsets (which UXP reports correctly,
+   *  unlike getBoundingClientRect). Null for nodes without layout offsets (SVG, text). */
+  function offsetIn(node: HTMLElement, root: HTMLElement): { x: number; y: number } | null {
+    const abs = (n: HTMLElement) => {
+      let x = 0, y = 0, e: HTMLElement | null = n;
+      while (e) {
+        x += e.offsetLeft; y += e.offsetTop;
+        const p = e.offsetParent as HTMLElement | null;
+        if (p) { x += p.clientLeft || 0; y += p.clientTop || 0; }
+        e = p;
+      }
+      return { x, y };
+    };
+    if (typeof node.offsetTop !== "number" || typeof node.offsetWidth !== "number") return null;
+    const a = abs(node), b = abs(root);
+    return { x: a.x - b.x, y: a.y - b.y };
+  }
+  function rectIn(node: HTMLElement, root: HTMLElement): DragRect | null {
+    if (!isShown(node) || !node.offsetWidth || !node.offsetHeight) return null;
+    const o = offsetIn(node, root);
+    return o ? { left: o.x, top: o.y, width: node.offsetWidth, height: node.offsetHeight } : null;
+  }
+  function dragLayout(): DragLayout {
+    const listRect = rectIn(list, el), innerAt = offsetIn(inner, el);
+    return {
+      panel: { left: 0, top: 0, width: el.offsetWidth, height: el.offsetHeight },
+      rows: {
+        left: listRect?.left ?? 0, top: innerAt?.y ?? listRect?.top ?? 0,
+        width: listRect?.width ?? 0, height: list.clientHeight,
+      },
+      deleteRail: rectIn(leftDelete, el),
+      tools: dropTools.map(b => rectIn(b.el, el)),
+      workbench: rectIn(workbench.el, el),
+      buffer: DROP_BUFFER,
+    };
+  }
+  /** Learn the client → panel origin from an event whose target box we can measure. */
+  function sampleCalibration(cal: ClientCalibration, m: MouseEvent) {
+    const t = m.target as HTMLElement | null;
+    if (!t || typeof (t as Node).nodeType !== "number" || !containsEventTarget(el, t)) return;
+    if (syntheticOffset(m.offsetX, m.offsetY)) return;
+    const o = offsetIn(t, el);
+    if (!o) return;
+    addCalibrationSample(cal, m.clientX, m.clientY,
+      plausibleAxisOffset(m.offsetX, t.offsetWidth) ? o.x + m.offsetX : NaN,
+      plausibleAxisOffset(m.offsetY, t.offsetHeight) ? o.y + m.offsetY : NaN);
+  }
+  const DRAG_LAYOUT_MS = 250;
+  const now = () => typeof performance !== "undefined" && performance.now ? performance.now() : Date.now();
+  /** Where the pointer is (panel space), which region that is, and the list-local Y. Falls back to
+   *  the event target only when no calibration sample exists yet. `fresh` (press / release) reads
+   *  the layout and samples now; moves reuse them for up to DRAG_LAYOUT_MS. */
+  function locateDrag(d: NonNullable<typeof drag>, m: MouseEvent, fresh = false) {
+    const t = now();
+    if (fresh || d.cal.ys.length < d.cal.limit || t - d.sampledAt > DRAG_LAYOUT_MS) {
+      sampleCalibration(d.cal, m);
+      d.sampledAt = t;
     }
-    leftDelete.classList.remove("hot");
-  });
-  hit.addEventListener("mousemove", e => {
-    const m = e as MouseEvent;
-    if (!drag?.active || typeof m.offsetY !== "number") return;
-    const exact = m.offsetY;
-    drag.fix = exact - (drag.view0 + m.clientY - drag.y0);
-    if (!drag.probed) {
-      drag.probed = true;
-      log("info", "layer drag probe", JSON.stringify({ clientY: m.clientY, offsetY: m.offsetY, firstRow, view0: drag.view0, fix: drag.fix }));
+    const off = calibrationOffset(d.cal);
+    if (!off) {
+      const region = dragRegionAt(m.target);
+      return { region, toolEl: dropTools.find(b => containsEventTarget(b.el, m.target))?.el ?? null,
+        listY: d.view0 + m.clientY - d.y0, x: NaN, y: NaN };
     }
-  });
+    if (fresh || !d.layout || t - d.layoutAt > DRAG_LAYOUT_MS) { d.layout = dragLayout(); d.layoutAt = t; d.perf.layouts++; }
+    const x = m.clientX - off.dx, y = m.clientY - off.dy, layout = d.layout;
+    const hitAt = resolveDragRegion(layout, x, y);
+    return { region: hitAt.region as LayerDragRegion, toolEl: hitAt.tool >= 0 ? dropTools[hitAt.tool].el : null, listY: y - layout.rows.top, x, y };
+  }
+  /** list-local Y just after the last visible row (list height from the cached drag layout) */
+  const visibleBottom = () => {
+    const room = drag?.layout?.rows.height ?? listH();
+    let y = 0;
+    for (let i = firstRow; i < rows.length; i++) { const h0 = heightOf(rows[i]); if (y + h0 > room) break; y += h0; }
+    return y;
+  };
 
   // Cached overlay content, size and panel bounds: mousemove should never rebuild DOM
   // or force a synchronous layout read at 60+ events/second.
   let ghostContent = "", ghostThumbUrl: string | null = null;
   let ghostSize = { width: 180, height: 36 };
   let ghostPanel: { left: number; top: number; width: number; height: number } | null = null;
+  // Temporarily disabled; the floating drag preview will be rebuilt as an external overlay.
+  const showDragGhost = false;
   function startDrag(id: number, e: MouseEvent, sub?: { what: SubDrag; row: number }) {
     if (e.button !== 0 || docId === null || deleting || orderPreview) return;
     ghostContent = "";
@@ -1718,13 +1921,22 @@ export function createLayerTreeView(tree: LayerTree, status: Status, tools?: Lay
     // the selection when the grabbed layer is part of it, in list order; else just that layer
     const ids = sub ? [] : selected.has(id) ? layers.filter(l => selected.has(l.id)).map(l => l.id) : [id];
     const idx = sub ? sub.row : Math.max(0, rows.findIndex(r => r.layer.id === id));
-    drag = { ids, sourceId: id, sourceDocId: docId, referenceDragStarted: false,
-      y0: e.clientY, view0: yOf(idx) + heightOf(rows[idx]) / 2, fix: 0, view: 0, active: false, probed: false,
+    // The press itself is the first calibration sample (its target is the pressed row or a child of
+    // it, with a measurable offset); the row centre is only a fallback when it can't be measured.
+    const cal = createClientCalibration();
+    sampleCalibration(cal, e);
+    const off = calibrationOffset(cal), innerAt = offsetIn(inner, el);
+    const view0 = off && innerAt ? e.clientY - off.dy - innerAt.y : yOf(idx) + heightOf(rows[idx]) / 2;
+    const lifecycle = createLayerDragLifecycle({ x: e.clientX, y: e.clientY, listY: view0, alt: e.altKey });
+    drag = { lifecycle, ids, sourceId: id, sourceDocId: docId, referenceDragStarted: false, previewStarted: false, previewKey: "",
+      cal, view: view0, active: false, y0: e.clientY, view0,
+      layout: null, layoutAt: 0, sampledAt: 0,
+      perf: { moves: 0, total: 0, max: 0, layouts: 0, lastAt: 0, gapMax: 0 },
       target: null, sub: sub?.what ?? null, ftarget: null, ltarget: null, alt: e.altKey,
       x0: e.clientX, px: sub && "x" in sub.what ? sub.what.x : 0,
       hover: null, overTool: null, hoverTimer: null, scroller: null,
       canDelete: canDropToDelete(layers, ids, sub?.what), overLeftDelete: false,
-      overWorkbench: false, pointerX: e.clientX, pointerY: e.clientY };
+      overWorkbench: false, pointerX: e.clientX, pointerY: e.clientY, external: null };
   }
 
   /** Where all the filters / an effect / the whole style would go at row `idx`: onto that row's layer
@@ -1778,21 +1990,32 @@ export function createLayerTreeView(tree: LayerTree, status: Status, tools?: Lay
 
   function track() {
     trackDrop();
-    drawGhost();
+    syncLayerDragPreview();
+    if (showDragGhost) drawGhost();
   }
+  function containsEventTarget(root: HTMLElement, target: EventTarget | null): boolean {
+    if (!target || typeof (target as Node).nodeType !== "number") return false;
+    const node = target as Node;
+    return node === root || root.contains(node);
+  }
+
+  /** Fallback only (no calibration sample yet): the region from the event target. */
+  function dragRegionAt(target: EventTarget | null): LayerDragRegion {
+    if (containsEventTarget(leftDelete, target)) return "delete";
+    const tool = dropTools.find(b => containsEventTarget(b.el, target));
+    if (tool) return "tool";
+    if (containsEventTarget(workbench.el, target)) return "workbench";
+    if (containsEventTarget(list, target) || containsEventTarget(hit, target)) return "list";
+    if (containsEventTarget(el, target)) return "panel";
+    return "outside";
+  }
+
   function pointerOutsidePanel() {
-    if (!drag?.referenceDragStarted) return false;
-    if (!ghostPanel) {
-      const rect = el.getBoundingClientRect();
-      ghostPanel = { left: rect.left, top: rect.top, width: rect.width, height: rect.height };
-    }
-    return drag.pointerX < ghostPanel.left || drag.pointerY < ghostPanel.top
-      || drag.pointerX >= ghostPanel.left + ghostPanel.width
-      || drag.pointerY >= ghostPanel.top + ghostPanel.height;
+    return drag?.lifecycle.region === "outside";
   }
   function drawGhost() {
     const d = drag;
-    if (!d?.active) { setShown(ghost, false); return; }
+    if (!showDragGhost || !d?.active) { setShown(ghost, false); return; }
     const s = d.sub, tool = d.overLeftDelete ? "delete" : dropTools.find(b => b.el === d.overTool)?.action ?? null;
     const nameOf = (id: number | null) => layers.find(x => x.id === id)?.name ?? "";
     const cachedThumb = !s ? thumbs().get(d.sourceId) : undefined;
@@ -1857,23 +2080,62 @@ export function createLayerTreeView(tree: LayerTree, status: Status, tools?: Lay
     ghost.style.left = x + "px";
     ghost.style.top = y + "px";
   }
+  function syncLayerDragPreview() {
+    const d = drag;
+    if (!d?.active || !d.previewStarted) return;
+    const s = d.sub, tool = d.overLeftDelete ? "delete" : dropTools.find(b => b.el === d.overTool)?.action ?? null;
+    const nameOf = (id: number | null) => layers.find(x => x.id === id)?.name ?? "";
+    let action = "不能放在这里", tone: "move" | "copy" | "delete" | "workbench" | "invalid" = "invalid";
+    if (d.overWorkbench && !s) { action = "加入编辑工作台"; tone = "workbench"; }
+    // outside this panel the native reference panel may take it; over a slot the helper
+    // replaces this text with what the drop does (放入 / 替换参考图)
+    else if (d.referenceDragStarted && d.lifecycle.region === "outside") action = "拖到参考图槽位上";
+    else if (tool === "delete") { action = s && s.kind !== "filters" && s.kind !== "effects" ? "删除" : s ? "全部清除" : "删除"; tone = "delete"; }
+    else if (tool && s) {
+      const ok = tool === "duplicate" && (s.kind === "filter" || s.kind === "effect" && MULTI_EFFECTS.has(s.key));
+      action = ok ? "在本图层复制一份" : s.kind === "effect" && tool === "duplicate" ? "这种效果一个图层只能有一个" : "不能放在这里";
+      tone = ok ? "copy" : "invalid";
+    } else if (tool) {
+      action = tool === "duplicate" ? "复制图层" : tool === "groupLayers" ? "编组" : "不能放在这里";
+      tone = tool === "duplicate" ? "copy" : tool === "groupLayers" ? "move" : "invalid";
+    } else if (s?.kind === "mask" || s?.kind === "vmask" || s?.kind === "filterMask") {
+      const dest = layers.find(l => l.id === d.ltarget);
+      action = dest ? (d.alt ? "复制" : "移动") + "到「" + dest.name + "」" : "不能放在这里（目标已带蒙版、被锁定或不支持）";
+      tone = !dest ? "invalid" : d.alt ? "copy" : "move";
+    } else if (s?.kind === "variant") {
+      action = "拖到左侧红色区域或垃圾桶删除";
+      tone = "invalid";
+    } else if (s?.kind === "filter") {
+      const target = d.ftarget;
+      action = !target ? "不能放在这里" : target.layerId === s.layerId ? (d.alt ? "在这里复制一份" : "调整顺序") : (d.alt ? "复制" : "移动") + "到「" + nameOf(target.layerId) + "」";
+      tone = !target ? "invalid" : d.alt ? "copy" : "move";
+    } else if (s) {
+      action = d.ltarget === null ? (s.kind === "filters" ? "只能放到智能对象上" : "不能放在这里") : (d.alt ? "复制" : "移动") + "到「" + nameOf(d.ltarget) + "」";
+      tone = d.ltarget === null ? "invalid" : d.alt ? "copy" : "move";
+    } else if (d.target) {
+      const destination = `「${nameOf(d.target.id)}」` + (d.target.where === "above" ? "上方" : d.target.where === "below" ? "下方" : "内部");
+      action = (d.alt ? "复制到" : "移动到") + destination;
+      tone = d.alt ? "copy" : "move";
+    }
+    const key = tone + "\u001f" + action;
+    if (key !== d.previewKey) {
+      d.previewKey = key;
+      overlay?.updateLayerDragPreview(action, tone);
+    }
+  }
   function trackDrop() {
     if (!drag || !rows.length) return;
-    if (pointerOutsidePanel()) {
+    if (drag.lifecycle.region !== "list" || drag.overTool || drag.overLeftDelete || drag.overWorkbench) {
       setShown(marker, false);
       drag.target = null; drag.ftarget = null; drag.ltarget = null;
       if (drag.hoverTimer) clearTimeout(drag.hoverTimer);
       drag.hoverTimer = null; drag.hover = null;
       return;
     }
-    if (drag.overTool || drag.overLeftDelete || drag.overWorkbench) {
-      setShown(marker, false); drag.target = null; drag.ftarget = null; drag.ltarget = null;
-      if (drag.hoverTimer) clearTimeout(drag.hoverTimer);
-      drag.hoverTimer = null; drag.hover = null;
-      return;
-    }
-    const { idx, top } = rowAt(drag.view);
-    const frac = Math.max(0, Math.min(1, (drag.view - top) / heightOf(rows[idx])));
+    // above the rows = before the first visible row; below them = after the last visible one
+    const y = clampDropListY(drag.view, visibleBottom());
+    const { idx, top } = rowAt(y);
+    const frac = Math.max(0, Math.min(1, (y - top) / heightOf(rows[idx])));
     if (drag.sub) {
       if (drag.sub.kind === "filter") trackFilter(idx);
       else if (drag.sub.kind === "variant") {
@@ -1900,148 +2162,396 @@ export function createLayerTreeView(tree: LayerTree, status: Status, tools?: Lay
       drag.hoverTimer = opens === null ? null : setTimeout(() => { if (drag?.hover === opens) { expanded().add(opens); render(); track(); } }, OPEN_DELAY);
     }
     if (!plan) { setShown(marker, false); return; }
-    setShown(marker, true);
     const indent = LEAD + l.depth * INDENT + (where === "inside" ? 0 : 16);
-    marker.className = "lt-drop" + (where === "inside" ? " into" : "") + (drag.alt ? " copy" : "");
+    const cls = "lt-drop" + (where === "inside" ? " into" : "") + (drag.alt ? " copy" : "");
+    const markTop = (where === "inside" ? yOf(idx) : yOf(where === "above" ? idx : idx + 1) - 1) + "px";
+    const height = where === "inside" ? heightOf(rows[idx]) + "px" : "";
+    // unchanged marker: no style writes, so the next move's reads don't force a relayout
+    if (isShown(marker) && marker.className === cls && marker.style.top === markTop && marker.style.left === indent + "px" && marker.style.height === height) return;
+    setShown(marker, true);
+    marker.className = cls;
     marker.style.left = indent + "px";
-    marker.style.top = (where === "inside" ? yOf(idx) : yOf(where === "above" ? idx : idx + 1) - 1) + "px";
-    marker.style.height = where === "inside" ? heightOf(rows[idx]) + "px" : "";
+    marker.style.top = markTop;
+    marker.style.height = height;
   }
 
-  /** -1 / 1 while the pointer is near (or past) the list's top / bottom edge */
-  const edgeDir = () => !drag || drag.overTool || drag.overLeftDelete || drag.overWorkbench || pointerOutsidePanel() ? 0
-    : drag.view < 22 ? -1 : drag.view > list.clientHeight - 22 ? 1 : 0;
+  /** -1 / 1 while the pointer is in the 22px band just inside the list's top / bottom edge. The
+   *  buffer bands outside the rows don't scroll: they are stable "first / last visible slot" drops. */
+  /** rows per second the list scrolls by itself during a drag (dragGeometry.edgeScrollRate) */
+  const edgeRate = () => {
+    if (!drag || drag.lifecycle.region !== "list") return 0;
+    return edgeScrollRate(drag.view, drag.layout?.rows.height ?? list.clientHeight);
+  };
+  /** whole rows still owed by the auto-scroll (it runs in fractions of a row per tick) */
+  let edgeOwed = 0;
+  const EDGE_TICK_MS = 30;
 
-  listen(document, "mousemove", e => {
+  function updateDragRegion(region: LayerDragRegion, toolEl: HTMLElement | null) {
+    if (!drag) return;
+    drag.lifecycle.region = region;
+    drag.overWorkbench = region === "workbench";
+    drag.overLeftDelete = region === "delete" && drag.canDelete;
+    drag.overTool = region === "tool" ? toolEl : null;
+    leftDelete.classList.toggle("hot", drag.overLeftDelete);
+    for (const b of dropTools) b.el.classList.toggle("drop-on", drag.overTool === b.el);
+    workbench.setDragHover(drag.overWorkbench);
+  }
+
+  function beginVisualDrag(d: NonNullable<typeof drag>) {
+    lastDown = null;
+    const previewIds = d.sub ? [d.sourceId] : d.ids;
+    const previewLayers = previewIds.slice(0, 8).map(layerId => {
+      const layer = layers.find(x => x.id === layerId);
+      const subName = d.sub && "name" in d.sub ? d.sub.name
+        : d.sub?.kind === "effects" ? "整个图层样式"
+        : d.sub?.kind === "filters" ? "全部智能滤镜"
+        : d.sub?.kind === "mask" ? "图层蒙版"
+        : d.sub?.kind === "vmask" ? "矢量蒙版"
+        : d.sub?.kind === "filterMask" ? "智能滤镜蒙版" : null;
+      const thumb = thumbs().get(layerId);
+      return { layerId, name: subName ?? layer?.name ?? "图层", ...(typeof thumb === "string" ? { thumb } : {}) };
+    });
+    d.previewStarted = overlay?.beginLayerDragPreview(previewLayers, previewIds.length) ?? false;
+    if (!d.sub) {
+      workbench.openForDrag();
+      const source = byId.get(d.sourceId);
+      const excluded = [FILL_PREFIX, BLEND_PREFIX, EXTRACT_PREFIX, EXPAND_PREFIX, GENERATE_PREFIX, UPSCALE_PREFIX];
+      if (source && source.kind !== "group" && !excluded.some(prefix => source.name.startsWith(prefix))) {
+        const selectedIds = new Set(d.ids);
+        const candidates = layers.filter(layer => selectedIds.has(layer.id)
+          && layer.kind !== "group" && !excluded.some(prefix => layer.name.startsWith(prefix)))
+          .map(layer => {
+            const thumb = thumbs().get(layer.id);
+            return { layerId: layer.id, name: layer.name, ...(typeof thumb === "string" ? { thumb } : {}) };
+          });
+        if (candidates.length) {
+          const cachedThumb = thumbs().get(candidates[0].layerId);
+          d.referenceDragStarted = overlay?.beginLayerDrag(
+            d.sourceDocId, candidates.slice(0, MAX_REFERENCES), candidates.length,
+            typeof cachedThumb === "string" ? cachedThumb : undefined,
+          ) ?? false;
+        }
+      }
+    }
+    ghostPanel = null; // opening the workbench may change panel geometry
+    d.layout = null;
+    list.classList.add("dragging");
+    setShown(hit, true);
+    // Keep the side trash rail visible for every drag; locked/background layers show it disabled
+    // instead of making the target disappear and changing the drag layout unexpectedly.
+    setShown(leftDelete, true);
+    leftDelete.classList.toggle("disabled", !d.canDelete);
+    leftDelete.title = d.canDelete
+      ? "松开鼠标删除（Ctrl+Z 可撤销）"
+      : "当前拖拽内容不可删除（可能是锁定图层或受保护内容）";
+    draw();
+  }
+
+  function handleDragMove(e: Event) {
     if (!drag) return;
     const m = e as MouseEvent;
     if (!drag.active) {
-      // Horizontal movement must also start a drag: the delete rail is on the left edge.
-      if (Math.abs(m.clientY - drag.y0) < 5 && Math.abs(m.clientX - drag.x0) < 5) return;
+      // armed moves are still over the pressed row: good calibration samples
+      if (!activateLayerDragLifecycle(drag.lifecycle, m.clientX, m.clientY, 5)) { sampleCalibration(drag.cal, m); return; }
       drag.active = true;
-      lastDown = null;
-      if (!drag.sub) {
-        workbench.openForDrag();
-        const source = byId.get(drag.sourceId);
-        const excluded = [FILL_PREFIX, BLEND_PREFIX, EXTRACT_PREFIX, EXPAND_PREFIX, GENERATE_PREFIX, UPSCALE_PREFIX];
-        if (source && source.kind !== "group" && !excluded.some(prefix => source.name.startsWith(prefix))) {
-          const selectedIds = new Set(drag.ids);
-          const candidates = layers.filter(layer => selectedIds.has(layer.id)
-            && layer.kind !== "group" && !excluded.some(prefix => layer.name.startsWith(prefix)))
-            .map(layer => ({ layerId: layer.id, name: layer.name }));
-          if (candidates.length) {
-            const cachedThumb = thumbs().get(candidates[0].layerId);
-            drag.referenceDragStarted = overlay?.beginLayerDrag(
-              drag.sourceDocId, candidates.slice(0, MAX_REFERENCES), candidates.length,
-              typeof cachedThumb === "string" ? cachedThumb : undefined,
-            ) ?? false;
-          }
-        }
-      }
-      ghostPanel = null; // opening the workbench may change panel geometry
-      list.classList.add("dragging");
-      setShown(hit, true);
-      setShown(leftDelete, drag.canDelete);
-      draw();
+      beginVisualDrag(drag);
     }
+    // One geometric snapshot per event, identical for move and release (locateDrag).
+    const t0 = now();
+    const at = locateDrag(drag, m);
+    drag.view = at.listY;
     drag.pointerX = m.clientX;
     drag.pointerY = m.clientY;
-    drag.overWorkbench = !drag.sub && workbench.isDropTarget(m.clientX, m.clientY);
-    workbench.setDragHover(drag.overWorkbench);
-    drag.view = drag.view0 + m.clientY - drag.y0 + drag.fix;
     drag.alt = m.altKey;
+    const previousRegion = drag.lifecycle.region;
+    updateDragRegion(at.region, at.toolEl);
+    if (previousRegion !== at.region) {
+      log("info", "layer drag region", JSON.stringify({
+        sourceIds: drag.ids, from: previousRegion, to: at.region,
+        x: Math.round(at.x), y: Math.round(at.y), listY: Math.round(at.listY),
+      }));
+    }
+    updateLayerDragLifecycle(drag.lifecycle, {
+      x: m.clientX, y: m.clientY, listY: drag.view, alt: drag.alt, region: at.region,
+    });
+    // 跨软件拖拽: only a drag that leaves the panel exports anything (never a reorder in the list)
+    if (at.region === "outside" && previousRegion !== "outside" && !drag.external && exportLayerPng && overlay) {
+      const candidates = externalDragCandidates(layers, drag.ids, !!drag.sub);
+      if (shouldPrepareExternalDrag({ active: drag.active, previousRegion, region: at.region, started: false,
+        candidates: candidates.length, connected: overlay.connected, sub: !!drag.sub })) startExternalExport(drag, candidates);
+    }
     if (drag.sub?.kind === "filter") drag.px = drag.sub.x + m.clientX - drag.x0;
     track();
-    // near the top / bottom edge the list scrolls by itself
-    if (edgeDir() && !drag.scroller) drag.scroller = setInterval(() => {
-      const dir = edgeDir();
-      if (dir) { scrollRows(dir); track(); }
-    }, 90);
-    if (!edgeDir() && drag.scroller) { clearInterval(drag.scroller); drag.scroller = null; }
+    // near (or past) the top / bottom edge the list scrolls by itself, faster the further out
+    if (edgeRate() && !drag.scroller) {
+      edgeOwed = 0;
+      drag.scroller = setInterval(() => {
+        const rate = edgeRate();
+        if (!drag || !rate) { if (drag?.scroller) { clearInterval(drag.scroller); drag.scroller = null; } return; }
+        edgeOwed += rate * EDGE_TICK_MS / 1000;
+        const n = Math.trunc(edgeOwed);
+        if (n) { edgeOwed -= n; scrollRows(n); track(); }
+      }, EDGE_TICK_MS);
+    }
+    if (!edgeRate() && drag.scroller) { clearInterval(drag.scroller); drag.scroller = null; }
+    const t1 = now(), p = drag.perf;
+    p.moves++; p.total += t1 - t0; p.max = Math.max(p.max, t1 - t0);
+    if (p.lastAt) p.gapMax = Math.max(p.gapMax, t0 - p.lastAt);
+    p.lastAt = t0;
+  }
+
+  // Capture phase is deliberate: a child row, chip, native overlay, or UXP widget cannot swallow
+  // the move/release before the drag controller sees it.
+  listen(window, "mousemove", handleDragMove, true);
+
+  /** 跨软件拖拽 (externalDrag.ts): prepare, write one PNG per layer, then ready if still dragging. */
+  function startExternalExport(d: NonNullable<typeof drag>, all: ReturnType<typeof externalDragCandidates>) {
+    const { layers: capped, leftOut } = capExternalLayers(all);
+    if (leftOut) status(`一次最多拖出 ${MAX_EXTERNAL_LAYERS} 个图层：这次只带前 ${MAX_EXTERNAL_LAYERS} 个`, "info");
+    const version = docVersion?.(d.sourceDocId) ?? null;
+    const candidates = capped.map(l => ({ ...l, key: externalDragKey(externalLoad, d.sourceDocId, version, l.layerId) }));
+    const session = createExternalDragSession(externalDragSessionId(), d.sourceDocId, candidates);
+    const run: ExternalRun = { session, removers: [] };
+    d.external = run;
+    externalRuns.set(session.sessionId, run);
+    const answer = cachedKeys(session.sessionId);
+    if (!overlay?.prepareExternalDrag(session.sessionId, session.docId, candidates.length, candidates.map(l => l.key))) {
+      log("warn", "external drag prepare not sent", session.sessionId);
+      closeExternalRun(run, "prepare-failed");
+      return;
+    }
+    beginExternalExport(session);
+    void exportExternal(d, run, answer);
+  }
+  async function exportExternal(d: NonNullable<typeof drag>, run: ExternalRun, answer: Promise<Set<string>>) {
+    const s = run.session, t0 = now();
+    const cached = await answer;
+    const fresh = new Set(layersToExport(s.layers, cached).map(l => l.layerId));
+    log("info", "external drag export start", JSON.stringify({ sessionId: s.sessionId, docId: s.docId, count: s.layers.length, reused: s.layers.length - fresh.size }));
+    try {
+      for (const [order, layer] of s.layers.entries()) {
+        if (s.phase !== "exporting") break;
+        // the helper already has this unchanged layer: no PNG, it reuses its own copy
+        const extra = await vectorExtra(s.docId, layer);
+        if (s.phase !== "exporting") break;
+        if (!fresh.has(layer.layerId)) { recordExportedFile(s, { layerId: layer.layerId, name: layer.name, path: "", order, key: layer.key, ...extra }); continue; }
+        const out = await exportLayerPng!(s.docId, layer.layerId, s.sessionId, order);
+        // cancelled while this one was written: it is not handed over, so it goes now
+        if (!recordExportedFile(s, { layerId: layer.layerId, name: layer.name, path: out.path, order, key: layer.key, ...extra, rect: out.rect })) { await out.remove(); break; }
+        run.removers.push(out.remove);
+        // the card says how far it is (only worth it when several are exported)
+        if (fresh.size > 1) overlay?.progressExternalDrag(s.sessionId, s.files.length, s.layers.length);
+      }
+    } catch (e) {
+      log("warn", "external drag export failed", s.sessionId, e);
+      closeExternalRun(run, "export-failed");
+      return;
+    }
+    const ms = Math.round(now() - t0);
+    const ready = finishExternalExport(s, drag === d && d.lifecycle.phase === "dragging");
+    log("info", "external drag export", JSON.stringify({ sessionId: s.sessionId, files: s.files.length, exported: fresh.size, ms, ready, phase: s.phase }));
+    if (ready && !overlay?.readyExternalDrag(s.sessionId, s.files)) {
+      log("warn", "external drag ready not sent", s.sessionId);
+      closeExternalRun(run, "ready-failed");
+    }
+    if (externalDragOver(s)) externalRuns.delete(s.sessionId);
+  }
+  /** Position and (text / shape) SVG fragment of a layer for vector programs; nothing on failure:
+   *  the layer still goes as its PNG. */
+  async function vectorExtra(docId: number, layer: { layerId: number; kind?: string }): Promise<{ rect?: Rect; vector?: string; res?: number }> {
+    if (!layerDragInfo) return {};
+    try {
+      const info = await layerDragInfo(docId, layer.layerId, layer.kind ?? "");
+      const out: { rect?: Rect; vector?: string; res?: number } = { res: info.res, ...(info.rect ? { rect: info.rect } : {}) };
+      if (info.vector) {
+        const v = vectorFragment(info.vector);
+        if (v.svg !== null) out.vector = v.svg;
+        else log("info", "external drag vector fallback", layer.layerId, layer.kind, v.reason);
+      }
+      return out;
+    } catch (e) {
+      log("warn", "external drag layer info", layer.layerId, e);
+      return {};
+    }
+  }
+  /** The session ends here unless the helper took it over: tell the helper, delete the PNGs. */
+  function closeExternalRun(run: ExternalRun, reason: string) {
+    const s = run.session, r = endExternalDrag(s);
+    if (r.sendCancel) {
+      overlay?.cancelExternalDrag(s.sessionId, reason);
+      log("info", "external drag cancel", s.sessionId, reason, Math.round(Date.now() - s.startedAt));
+    }
+    if (r.removeFiles) removeExternalFiles(run);
+    if (externalDragOver(s)) externalRuns.delete(s.sessionId);
+  }
+  function removeExternalFiles(run: ExternalRun) {
+    // remove() logs and never throws
+    for (const remove of run.removers.splice(0)) void remove();
+  }
+  overlay?.onExternalDrag(ev => {
+    if (ev.type === "external-drag-cached") { cachedWaiters.get(ev.sessionId)?.(ev.keys); return; }
+    const run = externalRuns.get(ev.sessionId);
+    if (ev.type === "external-drag-files-copied") {
+      log("info", "external drag files copied", ev.sessionId, run ? run.removers.length : "unknown session");
+      if (run && helperCopiedExternalFiles(run.session)) removeExternalFiles(run);
+      if (run && externalDragOver(run.session)) externalRuns.delete(ev.sessionId);
+      return;
+    }
+    const current = !!run && drag?.external === run;
+    log("info", "external drag finished", JSON.stringify({ sessionId: ev.sessionId, status: ev.status, effect: ev.effect, dragging: current, known: !!run }));
+    const result = externalDragResultText(ev.status, ev.target, ev.count, ev.effect);
+    if (result) status(result.text, result.kind);
+    if (!run) return;
+    helperFinishedExternalDrag(run.session);
+    // the system drag swallowed the mouseup: this is the end of the WaveLayer drag, with no internal action
+    if (current) { endDrag(); workbench.finishDrag(false); }
+    else closeExternalRun(run, "finished");
   });
 
-  function endDrag(): typeof drag {
+  function endDrag(reason = "drag-ended"): typeof drag {
     const d = drag;
+    if (d) cancelLayerDragLifecycle(d.lifecycle);
     drag = null;
+    if (d?.external) closeExternalRun(d.external, reason);
     ghostContent = "";
     ghostThumbUrl = null;
     ghostPanel = null;
     dragPlanCache = null;
+    if (d?.previewStarted) overlay?.endLayerDragPreview();
     if (d?.hoverTimer) clearTimeout(d.hoverTimer);
     if (d?.scroller) clearInterval(d.scroller);
     setShown(marker, false);
     setShown(hit, false);
     setShown(ghost, false);
     setShown(leftDelete, false);
-    leftDelete.classList.remove("hot");
+    leftDelete.classList.remove("hot", "disabled");
+    leftDelete.title = "松开鼠标删除（Ctrl+Z 可撤销）";
     list.classList.remove("dragging");
     for (const b of dropTools) b.el.classList.remove("drop-on");
     if (d?.active) { suppressClick = true; setTimeout(() => { suppressClick = false; }, 0); draw(); }
     return d;
   }
   overlay?.onDisconnected(() => {
-    if (!drag?.referenceDragStarted) return;
-    const d = endDrag();
+    if (!drag?.referenceDragStarted && !drag?.previewStarted) return;
+    const d = endDrag("disconnected");
     workbench.finishDrag(false);
     log("warn", "external layer drag aborted: helper disconnected", d?.sourceDocId, d?.sourceId);
   });
-  // The native reference panel may receive the mouse-up after the pointer leaves this UXP panel.
-  // Its completion action is the cross-window equivalent of our normal document mouse-up handler.
+  // The native reference panel may receive the release after the pointer leaves this UXP panel.
+  // Its completion action is the cross-window equivalent of the normal pointerup/mouseup path.
   listen(document, "waveplug:external-layer-drag-finished", () => {
-    if (!drag?.referenceDragStarted) return;
+    if (!drag?.referenceDragStarted && !drag?.previewStarted) return;
     endDrag();
     workbench.finishDrag(false);
   });
-  listen(document, "mouseup", e => {
+
+  function handleDragRelease(e: Event) {
+    const d = drag;
+    if (!d) return;
     const release = e as MouseEvent;
-    const rect = el.getBoundingClientRect();
-    const releasedInsidePanel = release.clientX >= rect.left && release.clientX < rect.right
-      && release.clientY >= rect.top && release.clientY < rect.bottom;
-    const acceptedWorkbench = !!drag?.active && !drag.sub && workbench.isDropTarget(release.clientX, release.clientY);
-    const route = routeLayerDragRelease({
-      active: !!drag?.active,
-      referenceDragStarted: !!drag?.referenceDragStarted,
-      releasedInsidePanel,
-      acceptedWorkbench,
+    // the release point goes through exactly the same geometry as every move
+    const at = locateDrag(d, release, true);
+    const region = at.region, finalView = at.listY, off = calibrationOffset(d.cal);
+    log("info", "layer drag release captured", JSON.stringify({
+      sourceIds: d.ids, active: d.active, phase: d.lifecycle.phase, region,
+      x: release.clientX, y: release.clientY, offsetY: release.offsetY,
+      panelX: Math.round(at.x), panelY: Math.round(at.y), listY: Math.round(finalView),
+      calibration: off ? { dx: Math.round(off.dx), dy: Math.round(off.dy), samples: d.cal.ys.length } : null,
+      perf: { moves: d.perf.moves, avgMs: d.perf.moves ? +(d.perf.total / d.perf.moves).toFixed(2) : 0,
+        maxMs: +d.perf.max.toFixed(1), layouts: d.perf.layouts, maxGapMs: Math.round(d.perf.gapMax) },
+      hitTarget: containsEventTarget(hit, release.target),
+    }));
+    d.pointerX = release.clientX;
+    d.pointerY = release.clientY;
+    d.view = finalView;
+    d.alt = release.altKey;
+    updateDragRegion(region, at.toolEl);
+    if (d.sub?.kind === "filter") d.px = d.sub.x + release.clientX - d.x0;
+
+    if (d.active) {
+      updateLayerDragLifecycle(d.lifecycle, {
+        x: release.clientX, y: release.clientY, listY: finalView, alt: release.altKey, region,
+      });
+      // This is the same target calculation used during hover. The visible marker and the
+      // committed target therefore come from one final release-coordinate snapshot.
+      track();
+    }
+    const snapshot = releaseLayerDragLifecycle(d.lifecycle, {
+      x: release.clientX, y: release.clientY, listY: finalView, alt: release.altKey, region,
     });
-    const d = endDrag();
+    if (!snapshot) return; // pointerup + mouseup can both fire; the session commits once.
+
+    const route = routeLayerDragRelease({
+      active: snapshot.active,
+      referenceDragStarted: d.referenceDragStarted,
+      region: snapshot.region,
+    });
+    const ended = endDrag("released");
     if (route === "external" || route === "outside") {
       workbench.finishDrag(false);
       if (route === "external") {
         log("info", "external layer drag release delegated", JSON.stringify({
-          docId: d?.sourceDocId, layerId: d?.sourceId, x: release.clientX, y: release.clientY,
-          panel: [rect.left, rect.top, rect.right, rect.bottom],
+          docId: ended?.sourceDocId, layerId: ended?.sourceId,
+          x: release.clientX, y: release.clientY, region: snapshot.region,
         }));
       }
       return;
     }
-    if (route === "workbench" && d && docId !== null) {
-      workbench.add(d.ids.map(layerId => {
+    if (route === "workbench" && ended && docId !== null) {
+      workbench.add(ended.ids.map(layerId => {
         const layer = layers.find(l => l.id === layerId)!;
         return { docId: docId!, docKey, layerId, name: layer.name, kind: layer.kind };
       }));
       workbench.finishDrag(true);
-      status("已加入工作台 " + d.ids.length + " 个图层；原 PSD 没有修改", "ok");
+      status("已加入工作台 " + ended.ids.length + " 个图层；原 PSD 没有修改", "ok");
       return;
     }
     workbench.finishDrag(false);
-    // an effect chip pressed and let go without dragging: its switch
-    if (!d?.active) { if (d?.sub && "chip" in d.sub) d.sub.toggleOnUp?.(); return; }
-    // a chip that was dragged isn't also switched when its press's moment is up
-    if (d.sub && "chip" in d.sub) d.sub.dragged = true;
-    const tool = dropTools.find(b => b.el === d.overTool);
-    const action = d.overLeftDelete && d.canDelete ? "delete" : tool?.action ?? null;
-    if (d.sub) { dropSub(d.sub, d, action, (e as MouseEvent).altKey || d.alt); return; }
-    if (action === "delete") { if (d.canDelete) void run("delete", d.ids); return; }
-    if (tool) void run(tool.action, d.ids);
-    else if (d.target && list.contains(e.target as Node)) {
-      // Mouseup is authoritative: Alt may have been released just before the pointer.
-      const copy = release.altKey;
-      const plan = copy ? copyPlan(layers, d.ids, d.target.id, d.target.where)
-        : dropPlan(layers, d.ids, d.target.id, d.target.where);
-      if (plan) void drop(d.target.id, d.target.where, plan, plan.length, copy);
+    // A chip pressed and released without crossing the drag threshold remains a click.
+    if (!ended?.active) { if (ended?.sub && "chip" in ended.sub) ended.sub.toggleOnUp?.(); return; }
+    if (ended.sub && "chip" in ended.sub) ended.sub.dragged = true;
+
+    const tool = dropTools.find(b => b.el === ended.overTool);
+    const action = ended.overLeftDelete && ended.canDelete ? "delete" : tool?.action ?? null;
+    if (ended.sub) {
+      if (snapshot.region === "list" || action) dropSub(ended.sub, ended, action, snapshot.alt);
+      return;
     }
-  });
+    if (action === "delete") { if (ended.canDelete) void run("delete", ended.ids); return; }
+    if (tool) { void run(tool.action, ended.ids); return; }
+    // No geometry gate here: UXP's getBoundingClientRect() and clientX/clientY are known to
+    // disagree. A valid live target exists only while the pointer region is "list".
+    if (snapshot.region === "list" && ended.target) {
+      const copy = snapshot.alt;
+      const plan = copy ? copyPlan(layers, ended.ids, ended.target.id, ended.target.where)
+        : dropPlan(layers, ended.ids, ended.target.id, ended.target.where);
+      log("info", "layer drag release", JSON.stringify({
+        docId: ended.sourceDocId, sourceIds: ended.ids, targetId: ended.target.id,
+        where: ended.target.where, copy, listY: snapshot.listY, phase: d.lifecycle.phase,
+        plan: plan?.map(s => ({ id: s.id, rel: s.rel, place: s.place })) ?? null,
+      }));
+      if (plan) void drop(ended.target.id, ended.target.where, plan, plan.length, copy);
+      else log("warn", "layer drag release rejected: plan is null", JSON.stringify({ sourceIds: ended.ids, targetId: ended.target.id, where: ended.target.where }));
+    } else {
+      log("info", "layer drag release without list target", JSON.stringify({
+        sourceIds: ended.ids, region: snapshot.region, listY: snapshot.listY,
+        hadTarget: !!ended.target, overTool: !!ended.overTool, overDelete: ended.overLeftDelete,
+      }));
+    }
+  }
+
+  // Capture phase avoids losing release when a child widget calls stopPropagation. pointerup is
+  // primary; mouseup is a compatibility fallback for UXP surfaces that only dispatch mouse events.
+  listen(window, "pointerup", handleDragRelease, true);
+  listen(window, "mouseup", handleDragRelease, true);
+  listen(document, "pointerup", handleDragRelease, true);
+  listen(document, "mouseup", handleDragRelease, true);
+  listen(window, "pointercancel", () => {
+    if (!drag) return;
+    const d = endDrag();
+    workbench.finishDrag(false);
+    log("info", "layer drag cancelled by pointer", d?.sourceId);
+  }, true);
   /** a dragged filter / effect let go: moved or copied (Alt) where it was over, or deleted on the trash */
   function dropSub(s: SubDrag, d: NonNullable<typeof drag>, tool: LayerAction | null, copy: boolean) {
     // onto 新建图层: one more of this filter / effect on its own layer, as a layer dropped there is copied
@@ -2086,7 +2596,7 @@ export function createLayerTreeView(tree: LayerTree, status: Status, tools?: Lay
     const key = (e as KeyboardEvent).key;
     if (key === "Escape") {
       if (drag.referenceDragStarted) overlay?.cancelLayerDrag();
-      endDrag();
+      endDrag("escape");
       workbench.finishDrag(false);
     } else if (key === "Alt") {
       drag.alt = true;
@@ -2103,6 +2613,8 @@ export function createLayerTreeView(tree: LayerTree, status: Status, tools?: Lay
   async function drop(targetId: number, where: Where, plan: MoveStep[], count: number, copy: boolean) {
     if (docId === null || orderPreview) return;
     const doc = docId, generation = selectGen, dragStart = Date.now();
+    log("info", "layer drag destination", JSON.stringify({ doc, sourceIds: plan.map(s => s.id), targetId, where, copy,
+      steps: plan.map(s => ({ id: s.id, relativeId: s.rel, place: s.place })) }));
     let visualMs = 0, nativeStart = 0, nativeMs = 0;
     if (where === "inside") expanded().add(targetId);
     // Native Photoshop operations can take hundreds of milliseconds or longer. Render the
@@ -2144,6 +2656,7 @@ export function createLayerTreeView(tree: LayerTree, status: Status, tools?: Lay
         nativeStart = Date.now();
         const r = await tree.move(doc, plan);
         nativeMs = Date.now() - nativeStart;
+        log("info", "layer drag move result", JSON.stringify({ doc, targetId, where, done: r.done, requested: count, skipped: r.skipped }));
         needsRestore = !!r.skipped.length || r.done < count;
         if (needsRestore) status(resultText("已移动", { ...r, unit: "个图层" }), r.done ? "info" : "error");
         else status("已移动 " + r.done + " 个图层", "ok");
@@ -2161,8 +2674,9 @@ export function createLayerTreeView(tree: LayerTree, status: Status, tools?: Lay
       }));
       // Photoshop's modal-done event provides the success refresh. On an error (including
       // before executeAsModal starts), force a read to undo the speculative visual order.
-      // events skipped during the native move (`missed`) are caught up the same way
-      if (needsRestore || missed) void refresh();
+      // Always reconcile ordinary moves against Photoshop's real tree after the history state
+      // commits. The native move notification is not guaranteed to arrive while this panel is shown.
+      if (!copy || needsRestore || missed) void refresh();
     }
   }
 
@@ -2170,55 +2684,119 @@ export function createLayerTreeView(tree: LayerTree, status: Status, tools?: Lay
   const el = h("section", { class: "lt fill", tabindex: "-1" });
   el.append(ghost);
   el.addEventListener("mouseenter", () => { pointerIn = true; refocus("hover"); });
+  // no drag state here: UXP fires leave/enter spuriously mid-drag; locateDrag owns the region
   el.addEventListener("mouseleave", () => { pointerIn = false; });
   const popup = createPopup(el);
   /** y (px from the panel section's top) just below row `idx` */
   const rowBottom = (idx: number) => list.offsetTop + yOf(idx + 1);
 
+  /** The right-click menu (core/layers/contextMenu.ts): a native menu at the mouse when the helper
+   *  is running (outside the panel, submenus to the side), else the panel's own popup. */
   function openRowMenu(id: number) {
     if (docId === null) return;
     // like Photoshop: right-clicking a layer outside the selection selects it first
     if (!selected.has(id)) void clickRow(id, { ctrl: false, shift: false });
-    const sel = selectedLayers(), ids = sel.map(l => l.id);
-    // Smart objects use a narrow left rail (status + four unique tools) alongside
-    // Photoshop-like ordinary text commands. Conversion/duplicate remain for regular
-    // layers only, not redundant smart-object icons.
-    const smartClick = byId.get(id)?.kind === "smartObject" && !!tools;
-    const panel = smartClick ? smartQuickMenu(sel, users) : null;
-    const items: PopItem[] = [];
-    if (panel) {
-      const bindStatus = (chip: typeof panel.type) => ({
-        label: chip.label, value: chip.value, tone: chip.tone,
-        hint: chip.hint, enabled: chip.enabled, disabledReason: chip.disabledReason,
-        run: chip.action ? () => { void run(chip.action!, ids); } : undefined,
-        runDouble: chip.doubleAction ? () => { void run(chip.doubleAction!, ids); } : undefined,
+    const doc = docId, ids = selectedLayers().map(l => l.id);
+    const menu = contextMenu({ layers, selected, users, smartTools: !!tools, colors: LABELS.map(([k, name]) => [k, name] as const) });
+    const native = overlay?.openMenu(menu.title, menu.items) ?? null;
+    if (native) {
+      popup.close();
+      void native.then(item => {
+        log("info", "layer menu", JSON.stringify({ native: true, item, ids: ids.slice(0, 8) }));
+        if (item && docId === doc) runMenu(item, id, ids);
       });
-      items.push({ sidebar: {
-        title: "智能对象",
-        type: bindStatus(panel.type),
-        shared: bindStatus(panel.shared),
-        icons: panel.actions.map(q => ({
-          label: q.label, icon: q.icon, hint: q.hint,
-          enabled: q.enabled, disabledReason: q.disabledReason,
-          run: () => void run(q.action, ids),
-        })),
-      } });
+      return;
     }
-    // For a smart-object right-click, old dedicated SmartAction rows are now entirely
-    // represented by the left rail; native "duplicate", "edit contents" and "rasterize"
-    // remain in the RIGHT normal menu rather than duplicating a shortcut icon.
-    const ordinary = layerMenu(sel)
-      .filter(m => m === "-" || (
-        !isSmartAction(m.action) && !(panel && m.action === "convertSmart")
-      ))
-      .map(m => m === "-" ? m : {
-        label: m.label, hint: m.hint, enabled: m.enabled,
-        run: () => m.action === "rename" ? startRename(ids[0]) : void run(m.action, ids),
-      });
-    items.push(...ordinary);
-    items.push({ label: "图层颜色…", hint: "眼睛列的底色", enabled: ids.length > 0, run: () => setTimeout(() => openColorMenu(ids[0], ids), 0) });
+    const at = () => rowBottom(Math.max(0, rows.findIndex(r => r.layer.id === id)));
+    const toPop = (nodes: MenuNode[]): PopItem[] => nodes.map((nd): PopItem => nd.separator ? "-"
+      : nd.children ? { label: nd.label + "  ›", enabled: nd.enabled !== false, run: () => setTimeout(() => popup.open([{ heading: nd.label ?? "" }, ...toPop(nd.children!)], at()), 0) }
+      : nd.id ? { label: (nd.checked ? "✓ " : "") + nd.label, hint: nd.hint, enabled: nd.enabled !== false, run: () => runMenu(nd.id!, id, ids) }
+      : { heading: nd.label ?? "" });
     // after this mousedown has reached the document (which closes open menus)
-    setTimeout(() => popup.open(items, rowBottom(Math.max(0, rows.findIndex(r => r.layer.id === id)))), 0);
+    setTimeout(() => popup.open([{ heading: menu.title }, ...toPop(menu.items)], at()), 0);
+  }
+  /** Runs the menu row `item` ("kind:argument", as contextMenu names them) on the layers `ids`. */
+  function runMenu(item: string, rowId: number, ids: number[]) {
+    crumb(`右键菜单：${item}（${ids.length} 个图层）`);
+    const cut = item.indexOf(":"), kind = item.slice(0, cut), arg = item.slice(cut + 1);
+    if (kind === "act") { if (arg === "rename") startRename(ids[0]); else void run(arg as LayerAction | SmartAction, ids); }
+    else if (kind === "align") void run("align", ids, arg);
+    else if (kind === "dist") void run("distribute", ids, arg);
+    else if (kind === "arrange") arrange(arg as "forward" | "backward" | "front" | "back");
+    else if (kind === "tool") void runTool(arg, ids);
+    else if (kind === "select") {
+      const choice = selectMenu(layers, selected).find(c => c.which === arg);
+      if (choice?.enabled) void selectIds(choice.ids, choice.label);
+    }
+    else if (kind === "color") {
+      if (arg === "custom") void pickCustom(ids, customOf(rowId) ?? LABELS.find(([k]) => k === byId.get(rowId)?.color)?.[2] ?? "#4f9cf0");
+      else void run("setColor", ids, arg).then(() => setCustom(ids, null));
+    }
+  }
+  /** A tool of the 工具 page from the menu, with the settings last used there (they act on
+   *  Photoshop's selection, so `ids` are selected first). */
+  async function runTool(which: string, ids: number[]) {
+    if (!tools || docId === null || deleting) return;
+    const doc = docId, px = pixelSettings();
+    const name = which === "trim" ? "裁剪边缘" : which === "islands" ? "拆分像素岛" : "按行拆分文字";
+    try {
+      await selectTail;
+      await tree.select(doc, ids);
+      status(name + "中…", "busy");
+      if (which === "islands") {
+        const count = await tools.countIslands(px.minArea, px.merge);
+        if (!count) { status("没有可拆的图层：每个图层只有一块（在工具页调小最小面积或合并距离）", "info"); return; }
+        if (count > CONFIRM_ABOVE) { status(`会拆成 ${count} 个图层，太多了：请到工具页调整最小面积 / 合并距离后在那里确认`, "error"); return; }
+      }
+      const r = which === "trim" ? await tools.trimEdges(px.strength)
+        : which === "islands" ? await tools.splitIslands(px.minArea, px.merge) : await tools.splitTextLines();
+      status(resultText(which === "trim" ? "已清理" : "已拆分", r), r.done ? "ok" : "error");
+    } catch (e) {
+      log("warn", "layer menu tool", which, e);
+      status(`${name}失败：${(e as Error).message ?? e}`, "error");
+    } finally { refocus("tool"); void refresh(); }
+  }
+  // Esc closes the native menu too (the keys stay in Photoshop while it is open)
+  listen(document, "keydown", e => { if ((e as KeyboardEvent).key === "Escape") overlay?.closeMenu(); });
+
+  /** 选择 commands (core/layers/selectSets.ts): each row says how many layers it would select.
+   *  Only the selection changes; delete, group, lock … then work on it as on any selection. */
+  function openSelectMenu(id?: number) {
+    if (docId === null) return;
+    const items: PopItem[] = [{ heading: "选择" }, ...selectMenu(layers, selected).map(c => ({
+      label: c.enabled ? `${c.label}（${c.ids.length}）` : c.label,
+      hint: c.enabled ? c.hint : c.disabledReason, enabled: c.enabled,
+      run: () => void selectIds(c.ids, c.label),
+    }))];
+    if (id === undefined) popup.open(items, bar.offsetTop - 2, { upward: true });
+    else popup.open(items, rowBottom(Math.max(0, rows.findIndex(r => r.layer.id === id))));
+  }
+  /** Makes `ids` the selection, here and in Photoshop. */
+  async function selectIds(ids: number[], what: string) {
+    if (docId === null || deleting || !ids.length) return;
+    if (maskView) { exitMaskView(() => { void selectIds(ids, what); }); return; }
+    selected = new Set(ids); anchor = ids[0]; localClear = null;
+    if (focus && !(selected.size === 1 && selected.has(focus.id))) focus = null;
+    reveal();
+    await commitSelection("select");
+    status(`${what}：已选中 ${ids.length} 个图层`, "ok");
+  }
+
+  function openFxMenu(l: TreeLayer, from: HTMLElement, event: MouseEvent) {
+    if (docId === null) return;
+    const rect = el.getBoundingClientRect();
+    const items: PopItem[] = [
+      { label: "混合选项…", hint: "打开图层样式设置", run: () => void run("layerStyle", [l.id]) },
+      { label: l.effectsOn ? "隐藏全部效果" : "显示全部效果", hint: "切换该图层的全部图层样式效果",
+        run: () => void run("toggleEffects", [l.id], l.effectsOn ? "off" : "on") },
+      { label: openSubs().has(l.id) ? "折叠效果列表" : "展开效果列表", hint: "控制 WaveLayer 中效果列表的展开状态",
+        run: () => toggleSub(l.id) },
+      "-",
+      { label: "拷贝图层样式", enabled: l.effects, run: () => void run("copyStyle", [l.id]) },
+      { label: "粘贴图层样式", enabled: true, run: () => void run("pasteStyle", [l.id]) },
+      { label: "清除图层样式", enabled: l.effects, run: () => void run("clearStyle", [l.id]) },
+    ];
+    popup.open(items, event.clientY - rect.top, { left: event.clientX - rect.left, from });
   }
 
   /** 图层颜色 / 画板颜色 as colour squares: Photoshop's labels (kept in the PSD), the colours used lately and
@@ -2291,7 +2869,7 @@ export function createLayerTreeView(tree: LayerTree, status: Status, tools?: Lay
     renaming = null;
     renameRow = null;
     if (row && renameBox.parentElement === row.body) {
-      if (save && name) replace(row.name, name);
+      if (save && name) replace(row.name, h("span", { class: "lt-name-text" }, name));
       renameBox.replaceWith(row.name);
       row.key = "";
     } else renameBox.remove();
@@ -2352,11 +2930,76 @@ export function createLayerTreeView(tree: LayerTree, status: Status, tools?: Lay
   const dropTools: { el: HTMLElement; action: LayerAction }[] = [
     { el: groupBtn, action: "groupLayers" }, { el: newBtn, action: "duplicate" }, { el: trashBtn, action: "delete" },
   ];
-  for (const b of dropTools) {
-    b.el.addEventListener("mouseenter", () => { if (drag?.active) { drag.overTool = b.el; b.el.classList.add("drop-on"); track(); } });
-    b.el.addEventListener("mouseleave", () => { if (drag?.overTool === b.el) { drag.overTool = null; b.el.classList.remove("drop-on"); drawGhost(); } });
-  }
+  // whether the pointer is over one of them while dragging is decided by locateDrag's geometry
   const bar = h("div", { class: "lt-bar" }, linkBtn, fxBtn, maskBtn, adjBtn, groupBtn, newBtn, trashBtn);
+
+  // ── the panel menu (☰, as the menu at the top right of Photoshop's Layers panel) ──
+  const SHORTCUT_KEY = "wp.layers.shortcuts";
+  let shortcutsOn = localStorage.getItem(SHORTCUT_KEY) !== "off";
+  const menuBtn = h("button", { class: "lt-head-btn", title: "图层面板菜单：新建图层、选择、合并、清理、快捷键" }, "☰");
+  menuBtn.addEventListener("click", () => openPanelMenu());
+  function openPanelMenu() {
+    if (docId === null) return;
+    const hidden = selectSet(layers, selected, "hidden"), blank = selectSet(layers, selected, "empty");
+    // 锁定组内的所有图层: what the selected groups hold (not the versions of a 变体图层)
+    const groups = new Set(selectedLayers().filter(l => l.kind === "group" && !isVariantLayer(l)).map(l => l.id));
+    const held = layers.filter(l => ancestors(layers, l.id).some(a => groups.has(a))
+      && !ancestors(layers, l.id).some(a => { const g = byId.get(a); return !!g && isVariantLayer(g); })).map(l => l.id);
+    const items: PopItem[] = [
+      { label: "新建图层…", hint: "名称、颜色、模式", run: () => void run("newLayerDialog", ids()) },
+      { label: "选择…", hint: "所有、反选、相似、同色、链接、隐藏、空图层", run: () => setTimeout(() => openSelectMenu(), 0) },
+      "-",
+      { label: "合并可见图层", hint: "Shift+Ctrl+E", run: () => void run("mergeVisible", ids()) },
+      { label: "拼合图像", run: () => void run("flatten", ids()) },
+      "-",
+      { label: hidden.length ? `删除隐藏的图层（${hidden.length}）` : "删除隐藏的图层", hint: "Ctrl+Z 可撤销", enabled: hidden.length > 0, run: () => void run("delete", hidden) },
+      { label: blank.length ? `删除空图层（${blank.length}）` : "删除空图层", hint: "Ctrl+Z 可撤销", enabled: blank.length > 0, run: () => void run("delete", blank) },
+      { label: held.length ? `锁定组内的所有图层（${held.length}）` : "锁定组内的所有图层", hint: groups.size ? undefined : "请先选中图层组", enabled: held.length > 0, run: () => void run("lock", held) },
+      "-",
+      { label: shortcutsOn ? "快捷键：已开启" : "快捷键：已关闭", hint: "鼠标在面板上时 Ctrl+J / G / E / [ ] 等",
+        run: () => { shortcutsOn = !shortcutsOn; localStorage.setItem(SHORTCUT_KEY, shortcutsOn ? "on" : "off"); status(shortcutsOn ? "图层面板快捷键已开启" : "图层面板快捷键已关闭", "info"); } },
+    ];
+    popup.open(items, bar.offsetTop - 2, { upward: true, from: menuBtn });
+  }
+
+  // ── keyboard shortcuts, Photoshop's own for the Layers panel. Only while the pointer is over
+  // this panel and nothing is being typed; Delete stays with Photoshop (see deleteSelected). ──
+  /** 图层 › 排列: the selection one place up / down, or to the top / bottom of its group */
+  function arrange(how: "forward" | "backward" | "front" | "back") {
+    const t = arrangeTarget(layers, selected, how), now = ids();
+    const plan = t ? dropPlan(layers, now, t.rel, t.where) : null;
+    if (!t || !plan?.length) { status(how === "front" || how === "forward" ? "已经在最上面，或选中的图层不在同一个组里" : "已经在最下面，或选中的图层不在同一个组里", "info"); return; }
+    void drop(t.rel, t.where, plan, now.length, false);
+  }
+  listen(document, "keydown", e => {
+    const k = e as KeyboardEvent;
+    if (!shortcutsOn || docId === null || drag?.active || renaming !== null || deleting || !pointerIn || typing(document.activeElement)) return;
+    const ctrl = k.ctrlKey || k.metaKey, key = (k.key ?? "").toLowerCase(), code = k.code ?? "";
+    const left = code === "BracketLeft" || key === "[" || key === "{", right = code === "BracketRight" || key === "]" || key === "}";
+    const sel = selectedLayers(), now = sel.map(l => l.id), doc = docId;
+    /** a menu command, only when the right-click menu would offer it for this selection */
+    const menu = (...actions: LayerAction[]) => {
+      const item = layerMenu(sel).find(m => m !== "-" && actions.includes(m.action as LayerAction) && m.enabled);
+      if (item && item !== "-") void run(item.action as LayerAction, now); else status("当前选中的图层不能执行这个快捷键", "info");
+    };
+    let did = "";
+    if (ctrl && !k.altKey && key === "j") { did = "duplicate"; if (now.length) void run("duplicate", now); }
+    else if (ctrl && !k.altKey && key === "g") { did = k.shiftKey ? "ungroup" : "group"; menu(k.shiftKey ? "ungroup" : "groupLayers"); }
+    else if (ctrl && k.altKey && key === "g") { did = "clip"; menu("clip", "unclip"); }
+    else if (ctrl && !k.altKey && key === "e") { did = k.shiftKey ? "mergeVisible" : "merge"; if (k.shiftKey) void run("mergeVisible", now); else menu("merge", "mergeDown"); }
+    else if (ctrl && k.altKey && key === "a") { did = "selectAll"; void selectIds(selectSet(layers, selected, "all"), "所有图层"); }
+    else if (ctrl && !k.altKey && (left || right)) { did = "arrange"; if (now.length) arrange(k.shiftKey ? (right ? "front" : "back") : right ? "forward" : "backward"); }
+    else if (!ctrl && k.altKey && (left || right)) {
+      did = "neighbour";
+      const next = neighbourRow(rows.filter(r => !r.filter).map(r => r.layer.id), selected, right);
+      if (next !== null) void selectIds([next], right ? "上一个图层" : "下一个图层");
+    }
+    else if (ctrl && !k.altKey && key === ",") { did = "visibility"; if (now.length) void tree.setVisible(doc, now, !sel.every(l => l.visible)).then(() => refresh()).catch(x => status("操作失败：" + ((x as Error).message ?? x), "error")); }
+    else if (ctrl && !k.altKey && key === "/") { did = "lock"; menu("lock", "unlock"); }
+    if (!did) return;
+    k.preventDefault(); k.stopPropagation();
+    log("info", "layer panel shortcut", did, JSON.stringify({ key: k.key, code, ctrl, alt: k.altKey, shift: k.shiftKey, ids: now.slice(0, 8) }));
+  });
 
   // 混合模式 / 不透明度 / 填充 and the locks, for the selected layers
   const modeSel = h("select", { class: "field lt-mode", title: "混合模式" },
@@ -2457,7 +3100,7 @@ export function createLayerTreeView(tree: LayerTree, status: Status, tools?: Lay
   const lockBtns = LOCKS.map(([key, ico, tip, has]) => {
     const b = h("button", { class: "lt-lockbtn", title: tip + (key === "all" ? "（作用于选中的图层和图层组）" : "（作用于选中的图层；图层组只能锁定全部）") }, ic(ico, 14));
     b.addEventListener("click", () => {
-      const sel = selectedLayers().filter(x => x.kind !== "background" && (x.kind !== "group" || key === "all"));
+      const sel = selectedLayers().filter(x => (x.kind !== "background" || key === "all") && (x.kind !== "group" || key === "all"));
       if (!sel.length) return;
       const plan = lockPlan(layers, sel.map(x => x.id), key, !sel.every(has));
       void run("setLock", plan.map(p => p.id), JSON.stringify(plan));
@@ -2485,7 +3128,7 @@ export function createLayerTreeView(tree: LayerTree, status: Status, tools?: Lay
     }
     LOCKS.forEach(([, , , has], i) => {
       // groups take 锁定全部 only, like Photoshop
-      const takes = sel.filter(x => x.kind !== "background" && (x.kind !== "group" || LOCKS[i][0] === "all"));
+      const takes = sel.filter(x => (x.kind !== "background" || LOCKS[i][0] === "all") && (x.kind !== "group" || LOCKS[i][0] === "all"));
       (lockBtns[i] as any).disabled = none || !takes.length;
       lockBtns[i].classList.toggle("on", takes.length > 0 && takes.every(has));
     });
@@ -2557,14 +3200,14 @@ export function createLayerTreeView(tree: LayerTree, status: Status, tools?: Lay
   }, 400);
 
 
-  list.title = "点击图层选中，点击列表空白处取消全选；Ctrl / ⌘ 加选，Shift 连选；双击打开图层样式；右键更多操作；拖动改顺序（拖到图层组中间放进组里）";
+  list.title = "点击图层选中，点击列表空白处取消全选；Ctrl / ⌘ 加选，Shift 连选；双击图层空白区域打开图层样式；右键更多操作；拖动改顺序（拖到图层组中间放进组里）";
   el.append(
     h("div", { class: "card-head lt-top-head" }, h("span", { class: "label" }, "图层"), countEl, peersBtn, h("span", { class: "grow" }), thumbButton),
     findRow,
     props, lockRow,
     list,
     workbench.el,
-    h("div", { class: "lt-foot" }, h("div", { class: "lt-foot-btns" }, frameBtn, workbench.toggleButton), bar));
+    h("div", { class: "lt-foot" }, h("div", { class: "lt-foot-btns" }, menuBtn, frameBtn, workbench.toggleButton), bar));
   render();
   return { el, refresh };
 }

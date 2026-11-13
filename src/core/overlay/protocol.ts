@@ -35,9 +35,68 @@ export type OverlayCommand =
   | { type: "layer-drag-start"; docId: number; layers: { layerId: number; name: string }[]; totalCount: number; thumb?: string }
   /** Escape / cancellation: stop the external reference drop without changing the layer. */
   | { type: "layer-drag-cancel" }
+  /** Independent native cursor-following card; data is limited to small cached thumbnails. */
+  | { type: "layer-drag-preview-start"; layers: { layerId: number; name: string; thumb?: string }[]; totalCount: number }
+  | { type: "layer-drag-preview-update"; action: string; tone: "move" | "copy" | "delete" | "workbench" | "invalid" }
+  | { type: "layer-drag-preview-end" }
   /** A WaveLayer row is hovered: a thin frame around `rect` on screen, cut to `clip` (the canvas
    *  view). Click-through and never activated; `rect: null` takes it away. */
-  | { type: "hover-frame"; rect: ScreenRect | null; clip?: ScreenRect };
+  | { type: "hover-frame"; rect: ScreenRect | null; clip?: ScreenRect }
+  /** A WaveLayer drag left the panel: PNGs for `totalCount` layers are being written (cross-app drag).
+   *  `keys` (one per layer version) let the helper say which it already has (external-drag-cached). */
+  | { type: "external-drag-prepare"; sessionId: string; docId: number; totalCount: number; keys: string[] }
+  /** Every PNG is written; the helper copies them into its own cache (no image bytes on the socket). */
+  | { type: "external-drag-ready"; sessionId: string; files: ExternalDragFile[] }
+  /** `done` of `total` layers are exported so far: the helper's card shows the progress. */
+  | { type: "external-drag-progress"; sessionId: string; done: number; total: number }
+  /** The drag ended without the helper taking it over (or export failed). */
+  | { type: "external-drag-cancel"; sessionId: string; reason: string }
+  /** WaveLayer's right-click menu as a native menu at the cursor (native/overlay/src/menu.rs);
+   *  answered by `menu-result`. */
+  | { type: "menu-open"; menuId: string; title: string; items: MenuNode[] }
+  /** Take the menu away (Esc, the document changed); without an id: whatever is open. */
+  | { type: "menu-close"; menuId?: string };
+
+/** One row of a menu: a command (`id`), a submenu (`children`), a heading (neither) or a separator. */
+export interface MenuNode {
+  /** what comes back when the row is picked */
+  id?: string;
+  label?: string;
+  /** shown at the right: a shortcut */
+  hint?: string;
+  enabled?: boolean;
+  checked?: boolean;
+  separator?: boolean;
+  children?: MenuNode[];
+}
+
+/** The helper version that first shows menus (menu-open). */
+export const MENU_HELPER_VERSION = "0.8.0";
+
+/** One exported layer of a cross-app drag; `path` is a native file path, `order` is list order (0 = top).
+ *  `key` names this layer version; `path` is "" when the helper already has that key exported. */
+export interface ExternalDragFile {
+  layerId: number; name: string; path: string; order: number; key?: string;
+  /** where the PNG's pixels sit in the document (px): the helper's combined SVG keeps the layers'
+   *  positions relative to each other */
+  rect?: { left: number; top: number; right: number; bottom: number };
+  /** text / shape layers: the layer as an SVG fragment in document pixels (svgFragment.ts);
+   *  missing when it can't be expressed (the PNG goes instead) */
+  vector?: string;
+  /** the document's resolution (ppi): the combined SVG lands at the layers' printed size */
+  res?: number;
+}
+
+export type ExternalDragStatus = "dropped" | "cancelled" | "rejected" | "error";
+
+/** helper → plugin, about a cross-app drag session. */
+export type ExternalDragEvent =
+  /** the answer to prepare: the keys the helper already has exported (no PNG needed for those) */
+  | { type: "external-drag-cached"; sessionId: string; keys: string[] }
+  /** the helper has its own copies: the plugin's temporary files can go */
+  | { type: "external-drag-files-copied"; sessionId: string }
+  /** the system drag (DoDragDrop) is over; the plugin may never see a mouseup, so this ends the drag */
+  | { type: "external-drag-finished"; sessionId: string; status: ExternalDragStatus; effect: "copy" | "none" | "embed"; target?: string; count?: number };
 
 /** helper → plugin. `action` is the surface's own (checked by that surface). */
 export type ComfyManagerStatus = {
@@ -52,7 +111,28 @@ export type OverlayEvent =
   | { type: "action"; panel: string; action: unknown }
   /** Photoshop's window moved or changed size: send `show` again with the new view */
   | { type: "view-request"; panel: string }
-  | ComfyManagerStatus;
+  | ComfyManagerStatus
+  | ExternalDragEvent
+  /** the row picked in menu `menuId` (its id), or null when the menu was closed */
+  | { type: "menu-result"; menuId: string; item: string | null };
+
+/** The helper build this plugin's protocol needs (native/overlay/Cargo.toml). Bump both together:
+ *  an older helper still connects, but e.g. can't arbitrate drag verdicts (drag_target.rs), and
+ *  without this check a stale exe looks exactly like a bug in new code. */
+export const EXPECTED_HELPER_VERSION = "0.10.1";
+
+/** `version` is older than EXPECTED_HELPER_VERSION (numeric x.y.z; unparsable counts as older). */
+export function helperOutdated(version: string | null, expected = EXPECTED_HELPER_VERSION): boolean {
+  if (version === null) return false;
+  const parts = (v: string) => v.trim().split(".").map(n => Number.parseInt(n, 10));
+  const a = parts(version), b = parts(expected);
+  if (a.some(n => !Number.isFinite(n))) return true;
+  for (let i = 0; i < Math.max(a.length, b.length); i++) {
+    const x = a[i] ?? 0, y = b[i] ?? 0;
+    if (x !== y) return x < y;
+  }
+  return false;
+}
 
 export function parseOverlayEvent(text: string): OverlayEvent | null {
   let m: any;
@@ -64,6 +144,25 @@ export function parseOverlayEvent(text: string): OverlayEvent | null {
     && typeof m.message === "string"
     && typeof m.owned === "boolean") {
     return { type: "comfy-status", state: m.state, message: m.message, owned: m.owned };
+  }
+  if (m?.type === "external-drag-cached" && typeof m.sessionId === "string" && m.sessionId
+    && Array.isArray(m.keys) && m.keys.every((k: unknown) => typeof k === "string")) {
+    return { type: "external-drag-cached", sessionId: m.sessionId, keys: m.keys };
+  }
+  if (m?.type === "external-drag-files-copied" && typeof m.sessionId === "string" && m.sessionId) {
+    return { type: "external-drag-files-copied", sessionId: m.sessionId };
+  }
+  if (m?.type === "external-drag-finished" && typeof m.sessionId === "string" && m.sessionId
+    && ["dropped", "cancelled", "rejected", "error"].includes(m.status)
+    && (m.effect === "copy" || m.effect === "none" || m.effect === "embed")) {
+    return {
+      type: "external-drag-finished", sessionId: m.sessionId, status: m.status, effect: m.effect,
+      ...(typeof m.target === "string" ? { target: m.target } : {}),
+      ...(typeof m.count === "number" && Number.isFinite(m.count) ? { count: m.count } : {}),
+    };
+  }
+  if (m?.type === "menu-result" && typeof m.menuId === "string" && m.menuId && (m.item === null || m.item === undefined || typeof m.item === "string")) {
+    return { type: "menu-result", menuId: m.menuId, item: m.item ?? null };
   }
   if (typeof m?.panel !== "string") return null;
   if (m.type === "view-request") return { type: "view-request", panel: m.panel };

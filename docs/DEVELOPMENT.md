@@ -30,7 +30,7 @@ mainpc 不使用 UXP Developer Tool，而是使用 `D:\App\Adobe-UPIA-Extract\UP
 
 ## 开发版（免重装迭代）
 
-开发版 `WavePlug Studio Dev` 只装一次。它的面板每次打开时都从 `F:\waveplug\studio\dist\plugin` 读取最新构建运行；`npm run build` 之后点标题旁的橙色 ⟳ 即重新加载，不用关闭 Photoshop。
+开发版 `WavePlug Studio Dev` 只装一次。它的面板每次打开时都从 `G:\waveplug\studio\dist\plugin` 读取最新构建运行；`npm run build` 之后点标题旁的橙色 ⟳ 即重新加载，不用关闭 Photoshop。
 
 - 只有改 `plugin/manifest.json`（权限、名称）或 `dev/` 时才需要重新打包开发版并用 UPIA 安装。
 - 开发版的数据（导入的工作流、设置）与正式版分开存放。
@@ -39,7 +39,7 @@ mainpc 不使用 UXP Developer Tool，而是使用 `D:\App\Adobe-UPIA-Extract\UP
 ## 日志
 
 - 正式版：`%APPDATA%\Adobe\UXP\PluginsStorage\PHSP\27\External\com.waveplug.studio\PluginData\waveplug.log`
-- 开发版：同目录的 `com.waveplug.studio.dev\…`，并镜像到 `F:\waveplug\studio\reports\uxp_runtime.log`
+- 开发版：同目录的 `com.waveplug.studio.dev\…`，并镜像到 `G:\waveplug\studio\reports\uxp_runtime.log`
 
 日志包含：每次运行的提示词/种子/选项、ComfyUI 复用缓存的节点、每个执行节点的耗时、发送与返回的尺寸、写回 Photoshop 的每一步、文档色彩模式/配置/分辨率。
 

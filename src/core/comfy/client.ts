@@ -113,12 +113,12 @@ export class ComfyClient {
     return new Uint8Array(await res.arrayBuffer());
   }
 
-  /** Cancels only our own job: running → targeted interrupt, queued → delete from queue. */
   /** Native /free: unloads models and clears ComfyUI's node cache, so the next job runs every node. */
   async freeCache(): Promise<void> {
     await this.json("/free", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ unload_models: true, free_memory: true }) });
   }
 
+  /** Cancels only our own job: running → targeted interrupt, queued → delete from queue. */
   async cancel(promptId: string): Promise<void> {
     const q = await this.json<{ queue_running: unknown[][]; queue_pending: unknown[][] }>("/queue");
     if (q.queue_pending.some(item => item[1] === promptId)) {

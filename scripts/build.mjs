@@ -19,12 +19,13 @@ cpSync("tests/fixtures/ui/guhai_remove_inpaint_outpaint.json", "dist/preview/fix
 cpSync("tests/fixtures/ui/qwen_txt2img.json", "dist/preview/fixture_txt2img.json");
 cpSync("tests/fixtures/ui/vosr2_upscale.json", "dist/preview/fixture_upscale.json");
 
-// development loader: separate plugin id, loads dist/plugin/index.js from F: at runtime
+// development loader: separate plugin id, loads dist/plugin/index.js from G: at runtime
 const manifest = JSON.parse(readFileSync("plugin/manifest.json", "utf8"));
 // the loader has its own version: UPIA refuses to install a lower one over what is there (-418),
 // and the installed dev loader was 1.3.0 before releases were renumbered. Bump when dev/ or the
 // panels in the manifest change.
-const DEV_LOADER_VERSION = "1.4.0";
+// 1.4.1: the project moved from F: to G: (dev/loader.js ROOT).
+const DEV_LOADER_VERSION = "1.4.1";
 const devManifest = {
   ...manifest,
   version: DEV_LOADER_VERSION,

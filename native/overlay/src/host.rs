@@ -13,7 +13,7 @@ use eframe::egui::{self, Frame, Id, Margin, Sense, Stroke, ViewportCommand};
 
 use crate::panel::generate::GenerateSurface;
 use crate::panel::variants::{self, VariantRail};
-use crate::panel::{theme, Surface};
+use crate::panel::{theme, Surface, DraggedLayer};
 use crate::protocol::{Command, Event, ScreenRect};
 use crate::server;
 
@@ -22,6 +22,18 @@ pub const TITLE: &str = "WavePlug 外置生成面板";
 /// The completion notice's window (an egui viewport), found the same way.
 pub const TOAST_TITLE: &str = "WavePlug 提示";
 const TOAST_SIZE: egui::Vec2 = egui::vec2(300.0, 70.0);
+const COLLAPSED_BAR_HEIGHT: f32 = 12.0;
+const DRAG_REVEAL_ZONE_HEIGHT: f32 = 72.0;
+
+fn should_expand_generate_panel(
+    pointer_inside: bool,
+    pointer_down: bool,
+    keep_open: bool,
+    dragging_over_reveal_zone: bool,
+) -> bool {
+    pointer_inside || pointer_down || keep_open || dragging_over_reveal_zone
+}
+
 
 /// Every surface the helper can show. A new one is added here (and on the plugin's side).
 fn surfaces() -> Vec<Box<dyn Surface>> {
@@ -46,6 +58,9 @@ pub fn size_of(panel: &str) -> egui::Vec2 {
     let h = f32::from_bits(CONTENT_H.load(Ordering::SeqCst));
     if h > 0.0 {
         size.y = h;
+    } else if panel == "generate" {
+        // First show starts collapsed too; never flash the full-height surface before its first frame.
+        size.y = COLLAPSED_BAR_HEIGHT + 2.0;
     }
     size
 }
@@ -78,6 +93,41 @@ fn on_command(c: Command) {
         std::thread::spawn(|| crate::life::restart("requested by the plugin"));
         return;
     }
+    // drags to other programs go straight to the drag engine (files are copied off-thread)
+    match c {
+        Command::ExternalDragPrepare { session_id, total_count, keys, .. } => {
+            // answered at once (a few file lookups): the plugin waits for this before exporting
+            let cached = crate::drag::cached_keys(&keys);
+            server::send(&Event::ExternalDragCached { session_id: session_id.clone(), keys: cached });
+            crate::drag::send(crate::drag::Cmd::TransferPrepare { session_id, count: total_count });
+            return;
+        }
+        Command::ExternalDragReady { session_id, files } => {
+            crate::drag::transfer_ready(session_id, files);
+            return;
+        }
+        Command::ExternalDragCancel { session_id, .. } => {
+            crate::drag::send(crate::drag::Cmd::TransferCancel { session_id });
+            return;
+        }
+        Command::ExternalDragProgress { session_id, done, .. } => {
+            crate::drag::send(crate::drag::Cmd::TransferProgress { session_id, done });
+            return;
+        }
+        _ => {}
+    }
+    // the right-click menu is a native menu on its own thread (menu.rs)
+    match c {
+        Command::MenuOpen { menu_id, title, items } => {
+            crate::menu::open(menu_id, title, items);
+            return;
+        }
+        Command::MenuClose { menu_id } => {
+            crate::menu::close(menu_id);
+            return;
+        }
+        _ => {}
+    }
     // the hover frame is its own window: nothing for the UI thread to draw
     if let Command::HoverFrame { rect, clip } = c {
         crate::frame::set(rect, clip);
@@ -102,6 +152,7 @@ fn on_command(c: Command) {
 /// The plugin went away: put everything away and forget its revisions.
 fn on_disconnect() {
     crate::frame::set(None, None);
+    crate::menu::close(None);
     #[cfg(windows)]
     {
         crate::win::hide_all();
@@ -143,6 +194,7 @@ pub fn run() {
         Box::new(move |cc| {
             theme::install(&cc.egui_ctx);
             let _ = CTX.set(cc.egui_ctx.clone());
+            crate::drag::sweep_cache();
             // a second copy finds the port taken: quit
             // a restarting previous copy still holds the port for a moment
             let mut bound = server::start(on_command, on_disconnect);
@@ -173,6 +225,9 @@ pub fn run() {
                 dragging: false,
                 typing: false,
                 height: 0.0,
+                target_height: 0.0,
+                resize_from: None,
+                collapsed: true,
                 toast: None,
                 variant_rail: VariantRail::new(),
                 variant_shown: false,
@@ -198,11 +253,30 @@ struct Host {
     typing: bool,
     /// the window height last fitted to the content
     height: f32,
+    /// the height the content asks for, and the tween towards it while it runs (anim.rs)
+    target_height: f32,
+    resize_from: Option<(f32, Instant)>,
+    /// collapsed while idle; expanded on hover, active input/work, or a drag entering its reveal zone
+    collapsed: bool,
     toast: Option<Toast>,
     variant_rail: VariantRail,
     variant_shown: bool,
     variant_view: Option<ScreenRect>,
     variant_placed: bool,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn generate_panel_expands_only_for_hover_input_work_or_drag_reveal() {
+        assert!(!should_expand_generate_panel(false, false, false, false));
+        assert!(should_expand_generate_panel(true, false, false, false));
+        assert!(should_expand_generate_panel(false, true, false, false));
+        assert!(should_expand_generate_panel(false, false, true, false));
+        assert!(should_expand_generate_panel(false, false, false, true));
+    }
 }
 
 struct Toast {
@@ -215,7 +289,45 @@ struct Toast {
     placed: bool,
 }
 
+/// Wake the UI thread (the drag engine queued an event).
+pub fn wake() {
+    if let Some(ctx) = CTX.get() {
+        ctx.request_repaint();
+    }
+}
+
 impl Host {
+    /// What the drag engine decided: a drop becomes the surface's own action, the end of a
+    /// reference drag is reported to the plugin (finish-layer-drag) as before.
+    fn take_drag_events(&mut self) {
+        for e in crate::drag::take_events() {
+            match e {
+                crate::drag::Event::Dropped { surface, target, reference } => {
+                    if let Some(i) = self.index(surface) {
+                        for action in self.surfaces[i].external_drop(target, &reference) {
+                            server::send(&Event::Action { panel: surface.to_string(), action });
+                        }
+                    }
+                }
+                crate::drag::Event::Finished => {
+                    for surface in &mut self.surfaces {
+                        if surface.id() == "generate" {
+                            surface.set_external_layer_drag(None);
+                            server::send(&Event::Action {
+                                panel: surface.id().to_string(),
+                                action: serde_json::json!({ "kind": "finish-layer-drag" }),
+                            });
+                        }
+                    }
+                }
+                crate::drag::Event::Hover => {} // this frame redraws the highlight
+                crate::drag::Event::ExternalFinished { session_id, status, effect, target, count } => {
+                    server::send(&Event::ExternalDragFinished { session_id, status, effect, target, count });
+                }
+            }
+        }
+    }
+
     fn index(&self, panel: &str) -> Option<usize> {
         self.surfaces.iter().position(|s| s.id() == panel)
     }
@@ -229,9 +341,15 @@ impl Host {
             match c {
                 Command::ManageComfy { .. } => {} // handled on the server thread, never enters the UI queue
                 Command::HoverFrame { .. } => {} // frame.rs, on its own thread
+                Command::MenuOpen { .. } | Command::MenuClose { .. } => {} // menu.rs, on its own thread
                 Command::RestartHelper => {}     // life.rs, on its own thread
+                Command::ExternalDragPrepare { .. }
+                | Command::ExternalDragReady { .. }
+                | Command::ExternalDragCancel { .. }
+                | Command::ExternalDragProgress { .. } => {} // the drag engine, from the server thread
                 Command::Hello => {
                     self.revs.clear();
+                    crate::drag::send(crate::drag::Cmd::Cancel);
                     for surface in &mut self.surfaces {
                         surface.set_external_layer_drag(None);
                     }
@@ -242,11 +360,11 @@ impl Host {
                     total_count,
                     layer_id,
                     name,
-                    thumb,
+                    thumb: _,
                 } => {
                     if layers.is_empty() {
                         if let (Some(layer_id), Some(name)) = (layer_id, name) {
-                            layers.push(crate::panel::DraggedLayer { layer_id, name });
+                            layers.push(DraggedLayer { layer_id, name, thumb: None });
                         }
                     }
                     layers.truncate(crate::panel::generate::state::MAX_REFERENCE_SLOTS as usize);
@@ -255,8 +373,12 @@ impl Host {
                             doc_id,
                             total_count: total_count.max(layers.len()),
                             layers,
-                            thumb,
                         };
+                        crate::drag::send(crate::drag::Cmd::Reference(crate::drag::Reference {
+                            doc_id: drag.doc_id,
+                            layers: drag.layers.clone(),
+                            total_count: drag.total_count,
+                        }));
                         for surface in &mut self.surfaces {
                             if surface.id() == "generate" {
                                 surface.set_external_layer_drag(Some(drag.clone()));
@@ -265,6 +387,25 @@ impl Host {
                     }
                 }
                 Command::LayerDragCancel => {
+                    crate::drag::send(crate::drag::Cmd::Cancel);
+                    for surface in &mut self.surfaces {
+                        surface.set_external_layer_drag(None);
+                    }
+                }
+                // The card and the native drop targets live on the drag engine's thread (drag/).
+                Command::LayerDragPreviewStart { mut layers, total_count } => {
+                    layers.truncate(8);
+                    if !layers.is_empty() {
+                        crate::drag::send(crate::drag::Cmd::PreviewStart { layers, total: total_count });
+                    }
+                }
+                Command::LayerDragPreviewUpdate { action, tone } => {
+                    crate::drag::send(crate::drag::Cmd::Verdict { action, tone });
+                }
+                Command::LayerDragPreviewEnd => {
+                    // a drop decided by the engine carries its own payload, so the panel's drag
+                    // state can go now
+                    crate::drag::send(crate::drag::Cmd::End);
                     for surface in &mut self.surfaces {
                         surface.set_external_layer_drag(None);
                     }
@@ -306,6 +447,7 @@ impl Host {
                         self.typing = false;
                     }
                     self.current = next;
+                    self.collapsed = true;
                     if !cfg!(windows) {
                         ctx.send_viewport_cmd(ViewportCommand::Visible(true));
                     }
@@ -334,6 +476,7 @@ impl Host {
                     }
                     if self.current.is_some() && self.current == self.index(&panel) {
                         self.current = None;
+                        self.collapsed = true;
                         self.typing = false;
                         ctx.memory_mut(|mem| mem.stop_text_input());
                         if !cfg!(windows) {
@@ -421,14 +564,35 @@ impl Host {
 
     /// The window follows the surface's content height (no empty space under it); on Windows its
     /// bottom edge stays put (win.rs `fit_height`).
-    fn fit(&mut self, ctx: &egui::Context, content: f32) {
-        // 8 px margin above and below, 1 px border
-        let want = (content + 18.0).round();
-        if (want - self.height).abs() < 1.0 {
+    fn fit(&mut self, ctx: &egui::Context, content: f32, collapsed: bool) {
+        // Expanded: 8 px margin above/below + 1 px border. Collapsed: border only.
+        let chrome = if collapsed { 2.0 } else { 18.0 };
+        let want = (content + chrome).round();
+        // a new height (the bar ↔ the whole panel, a section opening): go there over a moment
+        // instead of jumping (anim.rs). The very first fit has nothing to come from.
+        if (want - self.target_height).abs() >= 1.0 {
+            self.resize_from = (self.height > 0.0).then(|| (self.height, Instant::now()));
+            self.target_height = want;
+            CONTENT_H.store(want.to_bits(), Ordering::SeqCst);
+        }
+        let now = match self.resize_from {
+            Some((from, since)) => {
+                let t = since.elapsed().as_secs_f32() / crate::anim::RESIZE_SECS;
+                if t >= 1.0 {
+                    self.resize_from = None;
+                    want
+                } else {
+                    ctx.request_repaint();
+                    crate::anim::tween(from, want, t).round()
+                }
+            }
+            None => want,
+        };
+        if (now - self.height).abs() < 1.0 {
             return;
         }
+        let want = now;
         self.height = want;
-        CONTENT_H.store(want.to_bits(), Ordering::SeqCst);
         #[cfg(windows)]
         crate::win::fit_height(want);
         #[cfg(not(windows))]
@@ -571,24 +735,30 @@ impl Host {
 impl eframe::App for Host {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         self.take_commands(ctx);
+        self.take_drag_events();
+        let pointer_inside = ctx.input(|i| i.pointer.hover_pos().is_some());
+        let pointer_down = ctx.input(|i| i.pointer.any_down());
+        let keep_open = self.typing
+            || self.dragging
+            || self.current.map(|i| self.surfaces[i].keep_expanded()).unwrap_or(false);
+        // Any WaveLayer drag (groups and effects too) opens the bar when it nears the panel.
+        let external_drag = crate::drag::active();
         #[cfg(windows)]
-        if self.current.is_none() && (!crate::win::left_button_down() || crate::win::escape_down())
-        {
-            // If Photoshop selection hid the native panel mid-drag, never leave a stale target.
-            let mut finished = Vec::new();
-            for surface in &mut self.surfaces {
-                if surface.has_external_layer_drag() {
-                    surface.set_external_layer_drag(None);
-                    finished.push(surface.id());
-                }
-            }
-            for panel in finished {
-                server::send(&Event::Action {
-                    panel: panel.to_string(),
-                    action: serde_json::json!({ "kind": "finish-layer-drag" }),
-                });
-            }
+        let dragging_over_reveal_zone = external_drag
+            && crate::win::cursor_in_panel_reveal_zone(DRAG_REVEAL_ZONE_HEIGHT);
+        #[cfg(not(windows))]
+        let dragging_over_reveal_zone = external_drag && pointer_inside;
+        self.collapsed = self.current.is_none()
+            || !should_expand_generate_panel(pointer_inside, pointer_down, keep_open, dragging_over_reveal_zone);
+        if self.collapsed {
+            // a collapsed or hidden panel has no slots on screen to drop on
+            crate::drag::targets::publish("generate", Vec::new());
         }
+        if external_drag {
+            // the reveal zone is checked here, so look again while the drag lasts
+            ctx.request_repaint_after(Duration::from_millis(50));
+        }
+
         let mut sent: Vec<(&'static str, serde_json::Value)> = Vec::new();
         let mut content: Option<f32> = None;
         egui::CentralPanel::default()
@@ -596,13 +766,33 @@ impl eframe::App for Host {
                 Frame::new()
                     .fill(theme::BG)
                     .stroke(Stroke::new(1.0_f32, theme::LINE))
-                    .inner_margin(Margin::same(8)),
+                    .inner_margin(Margin::same(if self.collapsed { 0 } else { 8 })),
             )
             .show(ctx, |ui| {
                 let Some(i) = self.current else {
                     ui.label(egui::RichText::new("等待插件…").color(theme::TEXT_3));
                     return;
                 };
+                if self.collapsed {
+                    let (rect, response) = ui.allocate_exact_size(
+                        egui::vec2(ui.available_width(), COLLAPSED_BAR_HEIGHT),
+                        Sense::hover(),
+                    );
+                    ui.painter().rect_filled(
+                        rect,
+                        egui::CornerRadius::same(2),
+                        egui::Color32::from_rgb(0x0b, 0x0b, 0x0b),
+                    );
+                    ui.painter().rect_stroke(
+                        rect,
+                        egui::CornerRadius::same(2),
+                        Stroke::new(1.0_f32, egui::Color32::from_rgb(0x58, 0x58, 0x58)),
+                        egui::StrokeKind::Inside,
+                    );
+                    response.on_hover_text("悬停展开外置生图面板");
+                    content = Some(COLLAPSED_BAR_HEIGHT);
+                    return;
+                }
                 let surface = &mut self.surfaces[i];
                 let id = surface.id();
                 // The panel sizes itself to its content. Keep ScrollArea only for its
@@ -620,9 +810,11 @@ impl eframe::App for Host {
                 content = Some(out.content_size.y);
             });
         if let Some(h) = content {
-            self.fit(ctx, h);
+            self.fit(ctx, h, self.collapsed);
         }
-        self.grip(ctx);
+        if !self.collapsed {
+            self.grip(ctx);
+        }
         #[cfg(windows)]
         self.track_typing(ctx);
         self.variant_viewport(ctx);

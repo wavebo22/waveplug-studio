@@ -499,6 +499,8 @@ export type Where = "above" | "below" | "inside";
  */
 export function dropZone(l: TreeLayer, frac: number, open: boolean): Where {
   if (l.kind !== "group" || isVariantLayer(l)) return frac < 0.5 ? "above" : "below";
+  // Photoshop's split: top quarter above, middle into, bottom quarter below. (A 0.55 / 0.84 split
+  // once compensated for drags located from the pressed row's centre; dragGeometry is exact now.)
   if (frac < 0.25) return "above";
   if (frac > 0.75 && !(open && l.children)) return "below";
   return "inside";
@@ -506,6 +508,32 @@ export function dropZone(l: TreeLayer, frac: number, open: boolean): Where {
 
 /** One Photoshop move: `id` goes before / after / into layer `rel`. */
 export interface MoveStep { id: number; rel: number; place: "before" | "after" | "inside" }
+
+/** A layer that doesn't belong in an AI result group: the group holds only its variations (vN …).
+ *  Checked again by the host inside its history step, by name, just before it moves anything. */
+export const isAiStray = (name: string, parentName: string): boolean => !!aiLabel(parentName) && !VARIATION.test(name);
+
+/**
+ * Photoshop puts a layer made, placed or pasted while an AI result group is selected *inside* the
+ * group; the group then no longer reads as one AI layer (it shows as a folder). The new layers
+ * (ids not in `seen`, the previous read of this document) directly in an AI group go just above
+ * it, top to bottom as they were. Layers already there before are left alone (an undo of this
+ * move, or an old document, is not fought). `seen` null: first read of the document, nothing.
+ */
+export function aiStrayMoves(seen: ReadonlySet<number> | null, layers: readonly TreeLayer[]): MoveStep[] {
+  if (!seen) return [];
+  const byId = new Map(layers.map(l => [l.id, l]));
+  const last = new Map<number, number>();
+  const out: MoveStep[] = [];
+  for (const l of layers) {
+    const p = l.parentId === null ? undefined : byId.get(l.parentId);
+    if (!p?.ai || seen.has(l.id) || !isAiStray(l.name, p.name)) continue;
+    const prev = last.get(p.id);
+    out.push(prev === undefined ? { id: l.id, rel: p.id, place: "before" } : { id: l.id, rel: prev, place: "after" });
+    last.set(p.id, l.id);
+  }
+  return out;
+}
 
 /**
  * The moves that put the dragged layers (kept in their top-to-bottom order) above / below / into
@@ -654,7 +682,10 @@ export type LayerAction =
   | "addVectorMask" | "deleteVectorMask" | "toggleVectorMask" | "targetVectorMask" | "toggleMaskLink" | "viewMask" | "editFilter"
   | "targetLayer" | "targetFilterMask" | "deleteFilterMask"
   | "moveEffect" | "moveEffects" | "deleteEffect" | "moveFilters" | "deleteFilter" | "deleteFilters"
-  | "moveMask" | "moveVectorMask" | "moveFilterMask";
+  | "moveMask" | "moveVectorMask" | "moveFilterMask"
+  // Photoshop's own commands the panel passes on (uxpLayers.ts actionDescs / menu commands)
+  | "mergeDown" | "mergeVisible" | "flatten" | "rasterizeStyle" | "smartViaCopy" | "embedLinked" | "convertToLinked" | "relink"
+  | "align" | "distribute" | "artboardFromLayers" | "newLayerDialog" | "quickExport" | "copyCSS" | "copySVG";
 
 /** 智能对象 tools offered in the menu (they act on the selection, like on the 工具 page) */
 export type SmartAction =
@@ -757,10 +788,17 @@ export function layerMenu(sel: TreeLayer[]): MenuItem[] {
     "-",
     { label: "从图层新建组", action: "groupLayers", enabled: movable, hint: "Ctrl+G" },
     { label: "取消图层编组", action: "ungroup", enabled: any(x => x.kind === "group") },
-    { label: "合并图层", action: "merge", enabled: n > 1 || (one && l.kind === "group") },
+    { label: "来自图层的画板…", action: "artboardFromLayers", enabled: movable && !any(x => x.artboard) },
+    "-",
+    n > 1 || (one && l.kind === "group")
+      ? { label: one ? "合并组" : "合并图层", action: "merge", enabled: true, hint: "Ctrl+E" }
+      : { label: "向下合并", action: "mergeDown", enabled: one && l.kind !== "background" && !l.lockAll, hint: "Ctrl+E" },
+    { label: "合并可见图层", action: "mergeVisible", enabled: true, hint: "Shift+Ctrl+E" },
+    { label: "拼合图像", action: "flatten", enabled: true },
     "-",
     { label: "转换为智能对象", action: "convertSmart", enabled: n > 0 },
     { label: "栅格化图层", action: "rasterize", enabled: any(x => x.kind === "smartObject" || x.kind === "text" || x.kind === "shape" || x.kind === "fill") },
+    { label: "栅格化图层样式", action: "rasterizeStyle", enabled: any(x => x.effects) },
   ];
   if (smart) items.push(
     { label: "编辑智能对象内容", action: "editContents", enabled: one && l.kind === "smartObject", hint: "双击状态图标" },
@@ -768,6 +806,11 @@ export function layerMenu(sel: TreeLayer[]): MenuItem[] {
     { label: "选择同源智能对象", action: "selectSameSource", enabled: true },
     { label: "转为可编辑智能对象", action: "makeEditable", enabled: true },
     { label: "解包智能对象", action: "unpack", enabled: true },
+    { label: "通过拷贝新建智能对象", action: "smartViaCopy", enabled: one && l.kind === "smartObject", hint: "副本有自己的内容，不和原来的共用" },
+    any(x => !!x.smart?.linked)
+      ? { label: "嵌入链接的智能对象", action: "embedLinked", enabled: true }
+      : { label: "转换为链接对象…", action: "convertToLinked", enabled: one && l.kind === "smartObject" },
+    { label: "重新链接到文件…", action: "relink", enabled: one && !!l.smart?.linked },
   );
   items.push(
     "-",
@@ -792,6 +835,10 @@ export function layerMenu(sel: TreeLayer[]): MenuItem[] {
     { label: "取消链接图层", action: "unlink", enabled: n > 0 },
     all(x => x.locked) ? { label: "解除锁定", action: "unlock", enabled: true } : { label: "锁定全部", action: "lock", enabled: movable },
     { label: "只显示此图层", action: "solo", enabled: one, hint: "Alt+单击眼睛" },
+    "-",
+    { label: "快速导出为 PNG", action: "quickExport", enabled: n > 0 },
+    { label: "复制 CSS", action: "copyCSS", enabled: n > 0 },
+    { label: "复制 SVG", action: "copySVG", enabled: any(x => x.kind === "shape" || x.kind === "text" || x.kind === "group") },
   );
   return items;
 }
@@ -842,10 +889,14 @@ function withLock(l: TreeLayer, which: LockKey, on: boolean): Locks {
  * 锁定 / 解锁 one lock on the layers `ids`, each keeping its other locks.
  */
 export function lockPlan(layers: TreeLayer[], ids: number[], which: LockKey, on: boolean): { id: number; locks: Locks }[] {
-  // like Photoshop: a group can only be locked as a whole (its layers are then locked through it),
-  // and the background is left alone
-  return layers.filter(l => ids.includes(l.id) && l.kind !== "background" && (l.kind !== "group" || which === "all"))
-    .map(l => ({ id: l.id, locks: withLock(l, which, on) }));
+  // Groups can only be locked as a whole. A Background layer is inherently locked, so only
+  // the "lock all" control may include it, and only when the requested state is unlocked.
+  return layers.filter(l => ids.includes(l.id)
+    && (l.kind !== "background" || (which === "all" && !on))
+    && (l.kind !== "group" || which === "all"))
+    .map(l => ({ id: l.id, locks: l.kind === "background"
+      ? { protectAll: false, protectPosition: false, protectComposite: false, protectTransparency: false }
+      : withLock(l, which, on) }));
 }
 
 /** Layers inside a fully locked group: their own locks can't be changed until the group is unlocked. */
@@ -938,4 +989,63 @@ export function rawProblem(raw: RawLayer[], topLevel: number): string | null {
   if (depth !== 0) return `有 ${depth} 个组没有结束标记`;
   if (top !== topLevel) return `顶层图层 ${top} 个，Photoshop 说是 ${topLevel} 个`;
   return null;
+}
+
+// ── 对齐 / 分布 (Photoshop's 图层 › 对齐 and 分布, on the selected layers) ──
+
+/** Photoshop's alignDistributeSelector values */
+export const ALIGNS: [string, string][] = [
+  ["ADSLefts", "左边"], ["ADSCentersH", "水平居中"], ["ADSRights", "右边"],
+  ["ADSTops", "顶边"], ["ADSCentersV", "垂直居中"], ["ADSBottoms", "底边"],
+];
+export const DISTRIBUTES: [string, string][] = [
+  ...ALIGNS, ["ADSDistH", "水平间距"], ["ADSDistV", "垂直间距"],
+];
+
+/** How many layers 对齐 / 分布 would move: locked ones and the background stay where they are. */
+export function arrangeable(sel: readonly TreeLayer[]): number {
+  return sel.filter(l => l.kind !== "background" && !l.lockAll && !l.lockPosition).length;
+}
+/** Why 对齐 (2 layers or more) or 分布 (3 or more) can't run on `sel`; null when it can. */
+export function arrangeProblem(sel: readonly TreeLayer[], kind: "align" | "distribute"): string | null {
+  const need = kind === "align" ? 2 : 3, n = arrangeable(sel);
+  if (sel.length < need) return `请先选中 ${need} 个或更多图层`;
+  return n < need ? "选中的图层里可以移动的不够（锁定位置的图层和背景不会动）" : null;
+}
+
+// ── 顺序 (Ctrl+[ / ], Shift+Ctrl+[ / ]) and 选择上一个 / 下一个 (Alt+[ / ]) ──
+
+/** The row to select with Alt+] (`up`) / Alt+[ from the selection, among the rows shown; null at the end. */
+export function neighbourRow(shown: readonly number[], selected: ReadonlySet<number>, up: boolean): number | null {
+  const at = shown.map((id, i) => selected.has(id) ? i : -1).filter(i => i >= 0);
+  if (!at.length) return shown.length ? shown[up ? shown.length - 1 : 0] : null;
+  const i = up ? at[0] - 1 : at[at.length - 1] + 1;
+  return i >= 0 && i < shown.length ? shown[i] : null;
+}
+
+/**
+ * 图层 › 排列: where the selected layers go for 前移一层 / 后移一层 / 置为顶层 / 置为底层, as one drop of
+ * the whole selection beside a layer of the same group (the background stays at the bottom).
+ * null when they are already there or the selection isn't inside one group.
+ */
+export function arrangeTarget(layers: readonly TreeLayer[], selected: ReadonlySet<number>, how: "forward" | "backward" | "front" | "back"): { rel: number; where: "above" | "below" } | null {
+  const byId = new Map(layers.map(l => [l.id, l]));
+  // the outermost selected layers: a selected group takes its layers with it
+  const inside = (l: TreeLayer) => { for (let p = l.parentId; p !== null; p = byId.get(p)?.parentId ?? null) if (selected.has(p)) return true; return false; };
+  const moving = layers.filter(l => selected.has(l.id) && !inside(l) && l.kind !== "background");
+  if (!moving.length) return null;
+  const parent = moving[0].parentId;
+  if (moving.some(l => l.parentId !== parent)) return null;
+  const siblings = layers.filter(l => l.parentId === parent && l.kind !== "background");
+  const idx = moving.map(l => siblings.indexOf(l));
+  const first = idx[0], last = idx[idx.length - 1], rest = siblings.filter(l => !selected.has(l.id));
+  if (!rest.length) return null;
+  if (how === "front") return last === moving.length - 1 ? null : { rel: rest[0].id, where: "above" };
+  if (how === "back") return first === siblings.length - moving.length ? null : { rel: rest[rest.length - 1].id, where: "below" };
+  if (how === "forward") {
+    const above = siblings.slice(0, first).reverse().find(l => !selected.has(l.id));
+    return above ? { rel: above.id, where: "above" } : null;
+  }
+  const below = siblings.slice(last + 1).find(l => !selected.has(l.id));
+  return below ? { rel: below.id, where: "below" } : null;
 }

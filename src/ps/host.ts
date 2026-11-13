@@ -11,6 +11,7 @@ import type { Side, TaskType } from "../core/workflow/profile.ts";
 import type { ToolLayer, ToolResult } from "../core/layers/smart.ts";
 import type { DocScan, SlimKind } from "../core/layers/slim.ts";
 import type { CanvasView } from "../core/overlay/protocol.ts";
+import type { VectorInput } from "../core/overlay/svgFragment.ts";
 import type { LayerAction, MoveStep, TreeLayer } from "../core/layers/tree.ts";
 
 export type Pads = Record<Side, number>;
@@ -107,6 +108,15 @@ export interface PsHost {
   activeLayers(docId: number): ActiveLayer[];
   /** A layer's own pixels at full resolution (RGBA when it has transparency) and where they are. */
   layerImage(docId: number, layerId: number): Promise<{ pixels: Pixels; rect: Rect }>;
+  /** Writes the layer's own pixels (alpha kept) to `waveplug_drag_<sessionId>_<order>.png` in the
+   *  temporary folder, for dragging out of Photoshop (native/overlay hands the file to Windows).
+   *  `path` is the file's native path; `remove()` deletes it (never throws). The PSD is not touched. */
+  exportLayerPng(docId: number, layerId: number, sessionId: string, order: number): Promise<{ path: string; rect: Rect; remove(): Promise<void> }>;
+  /** For drags into vector programs: where the layer's pixels are (bounds without effects) and,
+   *  for text and shape layers, the descriptors `svgFragment.ts` turns into SVG. Read only. */
+  layerDragInfo(docId: number, layerId: number, kind: string): Promise<{ rect: Rect | null; vector: VectorInput | null; res: number }>;
+  /** the document's current history state id (changes with every edit, undo or redo), null if unknown */
+  docVersion(docId: number): string | null;
   /** Places the PNG as an embedded smart object directly above `layerId`, scaled to cover `rect`,
    *  named `name`, with the layer's opacity and blend mode; the original layer is hidden. One undo step. */
   placeUpscaledLayer(docId: number, layerId: number, png: Uint8Array, rect: Rect, name: string): Promise<number>;
@@ -166,9 +176,11 @@ export interface LayerTools {
   splitIslands(minArea: number, merge: number): Promise<ToolResult>;
   /** 按行拆分文字: each line of the selected text layers into its own text layer, in place */
   splitTextLines(): Promise<ToolResult>;
-  /** 文档瘦身: what the active document holds that could go, or null without a document */
+  /** 批量重命名: sets each layer's name (core/layers/batchRename.ts worked them out), one undo step */
+  renameLayers(names: { id: number; name: string }[]): Promise<ToolResult>;
+  /** 文档优化: what the active document holds that could go, or null without a document */
   scanDoc(): Promise<DocScan | null>;
-  /** 文档瘦身: removes the given kinds of items (one undo step) */
+  /** 文档优化: removes the given kinds of items (one undo step) */
   slim(kinds: SlimKind[]): Promise<ToolResult>;
   /** Photoshop's 清理 → 全部 (history, clipboard, caches); can't be undone */
   purgeMemory(): Promise<void>;
@@ -182,6 +194,10 @@ export interface LayerDeleteResult {
 }
 
 /** WavePlug 图层 panel: the active document's layer tree, kept in step with Photoshop's Layers panel. */
+/** `history`: the undo step's name; `onlyIf`: checked inside the step, just before each move,
+ *  with the layer's and its parent's current names (a step whose check fails is dropped). */
+export interface MoveOptions { history?: string; onlyIf?: (name: string, parentName: string) => boolean }
+
 export interface LayerTree {
   /** Insert all staged references into the active PSD inside one new layer group (single undo step).
    *  Source PSDs must still be open. Nothing is removed from the workbench or source PSDs. */
@@ -204,7 +220,7 @@ export interface LayerTree {
   /** Shows / hides `ids` (one Photoshop call, however many: a drag down the eye column). */
   setVisible(docId: number, ids: number[], visible: boolean): Promise<void>;
   /** Runs the moves (core/layers/tree.ts dropPlan) as one undo step. */
-  move(docId: number, steps: MoveStep[]): Promise<ToolResult>;
+  move(docId: number, steps: MoveStep[], opts?: MoveOptions): Promise<ToolResult>;
   /** Alt-drag duplicates whole layers/groups (including AI variants), positions the copies in
    *  list order and selects only the copies, all in one Photoshop undo state. */
   copy(docId: number, steps: MoveStep[]): Promise<{ done: number; skipped: string[]; ids: number[] }>;

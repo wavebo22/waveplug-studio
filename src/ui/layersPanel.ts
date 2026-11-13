@@ -17,7 +17,10 @@ export function mountLayersPanel(root: HTMLElement, svc: Services, isShown: () =
     // pending message after 3s while Photoshop is still working.
     clear = kind === "busy" ? null : setTimeout(() => replace(statusEl), kind === "error" ? 8000 : 3000);
   };
-  const view = createLayerTreeView(svc.layers, status, svc.tools, svc.overlay, svc.host.canvasView ? id => svc.host.canvasView!(id) : undefined);
+  const view = createLayerTreeView(svc.layers, status, svc.tools, svc.overlay, svc.host.canvasView ? id => svc.host.canvasView!(id) : undefined,
+    (docId, layerId, sessionId, order) => svc.host.exportLayerPng(docId, layerId, sessionId, order),
+    docId => svc.host.docVersion(docId),
+    (docId, layerId, kind) => svc.host.layerDragInfo(docId, layerId, kind));
   const panel = h("div", { class: "lp" }, view.el, statusEl);
   replace(root, panel);
   attachTooltips(panel);

@@ -12,7 +12,9 @@ set "NEW=target\release\waveplug-overlay.exe"
 for %%D in ("..\..\dist" "..\..\dist\plugin" "..\..\dist\dev") do call :put "%%~D" || (pause & exit /b 1)
 echo.
 echo 完成：dist、dist\plugin、dist\dev 里的 waveplug-overlay.exe 已更新。
-echo 正在运行的外置框架会在几秒内自动换成新版本（ComfyUI 不会被关闭）；没在运行时，Photoshop 下次启动会自动打开它。
+rem no full-width brackets / semicolons here: under chcp 65001 cmd split this line and ran half of it
+echo 正在运行的外置框架会在几秒内自动换成新版本，ComfyUI 不会被关闭。
+echo 外置框架没在运行时，Photoshop 下次启动会自动打开它。
 pause
 exit /b 0
 

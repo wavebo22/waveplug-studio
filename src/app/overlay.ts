@@ -7,8 +7,8 @@
 // Photoshop by itself. `launchHelper` / `restartHelper` are the settings page's 启动 / 重启.
 
 import { onDispose } from "../ui/dom.ts";
-import { log } from "./log.ts";
-import { OVERLAY_URL, type ComfyManagerStatus, type OverlayCommand, type ScreenRect, parseOverlayEvent } from "../core/overlay/protocol.ts";
+import { log, setLogContext } from "./log.ts";
+import { EXPECTED_HELPER_VERSION, OVERLAY_URL, type ComfyManagerStatus, type ExternalDragEvent, type ExternalDragFile, type MenuNode, type OverlayCommand, MENU_HELPER_VERSION, type ScreenRect, helperOutdated, parseOverlayEvent } from "../core/overlay/protocol.ts";
 import { type Hub, createHub } from "../core/overlay/hub.ts";
 
 const RETRY_MS = 3000;
@@ -23,8 +23,18 @@ export interface Overlay {
   beginLayerDrag(docId: number, layers: { layerId: number; name: string }[], totalCount: number, thumb?: string): boolean;
   /** Cancel an external layer-to-reference drag (Escape). */
   cancelLayerDrag(): void;
+  /** Start/update/end the independent cursor-following drag card. */
+  beginLayerDragPreview(layers: { layerId: number; name: string; thumb?: string }[], totalCount: number): boolean;
+  updateLayerDragPreview(action: string, tone: "move" | "copy" | "delete" | "workbench" | "invalid"): void;
+  endLayerDragPreview(): void;
   /** 悬停边框: frame `rect` (screen px) cut to `clip` on the canvas; null takes it away. */
   hoverFrame(frame: { rect: ScreenRect; clip: ScreenRect } | null): void;
+  /** Cross-app drag (把图层拖出 Photoshop): PNGs are being written / are written / the session is
+   *  over without the helper. Return false when the message could not be sent. */
+  prepareExternalDrag(sessionId: string, docId: number, totalCount: number, keys: string[]): boolean;
+  readyExternalDrag(sessionId: string, files: ExternalDragFile[]): boolean;
+  progressExternalDrag(sessionId: string, done: number, total: number): void;
+  cancelExternalDrag(sessionId: string, reason: string): void;
   /** Ask the native helper to reconcile the configured local ComfyUI process (`restart`: stop the
    *  one it started and start it again). */
   manageComfy(options: { path: string; base: string; closeWithPhotoshop: boolean; restartIfNeeded?: boolean; disableBrowser?: boolean; startIfMissing?: boolean; restart?: boolean }): void;
@@ -33,11 +43,19 @@ export interface Overlay {
   launchHelper(waitMs?: number): Promise<string | null>;
   /** Restarts a connected helper (keeping its ComfyUI); starts it when it isn't running. */
   restartHelper(waitMs?: number): Promise<string | null>;
+  /** Shows `items` as a native menu at the mouse (outside the panel, submenus to the side): the id
+   *  of the row picked, or null when it was closed. Returns null instead of a promise when the
+   *  helper isn't connected or is older than MENU_HELPER_VERSION: the panel then shows its own menu. */
+  openMenu(title: string, items: MenuNode[]): Promise<string | null> | null;
+  /** Takes the native menu away (Esc; the keys stay in Photoshop while it is open). */
+  closeMenu(): void;
   /** the connected helper's version, null while not connected */
   readonly helperVersion: string | null;
   onConnected(cb: () => void): () => void;
   onDisconnected(cb: () => void): () => void;
   onComfyStatus(cb: (status: ComfyManagerStatus) => void): () => void;
+  /** external-drag-cached / -files-copied / -finished from the helper */
+  onExternalDrag(cb: (event: ExternalDragEvent) => void): () => void;
   readonly connected: boolean;
 }
 
@@ -48,6 +66,10 @@ export function connectOverlay(opts: { launch?: () => Promise<string | null>; au
   const connectionListeners = new Set<() => void>();
   const disconnectionListeners = new Set<() => void>();
   const comfyListeners = new Set<(status: ComfyManagerStatus) => void>();
+  const externalDragListeners = new Set<(event: ExternalDragEvent) => void>();
+  let menuSeq = 0;
+  const menus = new Map<string, (item: string | null) => void>();
+  const endMenus = () => { for (const done of menus.values()) done(null); menus.clear(); };
   const send = (m: OverlayCommand) => {
     if (ws && ws.readyState === 1) { try { ws.send(JSON.stringify(m)); } catch { /* closing */ } }
   };
@@ -98,10 +120,25 @@ export function connectOverlay(opts: { launch?: () => Promise<string | null>; au
     };
     sock.onmessage = e => {
       const m = parseOverlayEvent(String(e.data));
-      if (m?.type === "ready") { helperVersion = m.version; log("info", "overlay ready", m.version); }
+      if (m?.type === "ready") {
+        helperVersion = m.version;
+        setLogContext({ 外置框架: m.version });
+        log("info", "overlay ready", m.version);
+        if (helperOutdated(m.version)) log("warn", "overlay helper outdated: rebuild native/overlay (build.cmd)", JSON.stringify({ running: m.version, expected: EXPECTED_HELPER_VERSION }));
+      }
       if (m?.type === "comfy-status") {
         log("info", "ComfyUI manager", m.state, m.owned, m.message);
         comfyListeners.forEach(cb => { try { cb(m); } catch (err) { log("warn", "ComfyUI status listener", err); } });
+      }
+      if (m?.type === "menu-result") {
+        const done = menus.get(m.menuId);
+        menus.delete(m.menuId);
+        done?.(m.item);
+        return;
+      }
+      if (m?.type === "external-drag-cached" || m?.type === "external-drag-files-copied" || m?.type === "external-drag-finished") {
+        externalDragListeners.forEach(cb => { try { cb(m); } catch (err) { log("warn", "external drag listener", err); } });
+        return;
       }
       if (m) { try { hub.receive(m); } catch (err) { log("warn", "overlay action failed", err); } }
     };
@@ -114,6 +151,8 @@ export function connectOverlay(opts: { launch?: () => Promise<string | null>; au
       connected = false;
       helperVersion = null;
       ws = null;
+      setLogContext({ 外置框架: "未连接" });
+      endMenus(); // a menu the helper was showing went with it
       if (!closed) retry();
     };
     sock.onerror = () => { /* onclose follows */ };
@@ -128,6 +167,7 @@ export function connectOverlay(opts: { launch?: () => Promise<string | null>; au
     connectionListeners.clear();
     disconnectionListeners.clear();
     comfyListeners.clear();
+    externalDragListeners.clear();
   });
   return {
     hub,
@@ -138,8 +178,32 @@ export function connectOverlay(opts: { launch?: () => Promise<string | null>; au
     cancelLayerDrag() {
       send({ type: "layer-drag-cancel" });
     },
+    beginLayerDragPreview(layers, totalCount) {
+      if (!connected) return false;
+      return sendChecked({ type: "layer-drag-preview-start", layers, totalCount });
+    },
+    updateLayerDragPreview(action, tone) {
+      send({ type: "layer-drag-preview-update", action, tone });
+    },
+    endLayerDragPreview() {
+      send({ type: "layer-drag-preview-end" });
+    },
     hoverFrame(frame) {
       send(frame ? { type: "hover-frame", rect: frame.rect, clip: frame.clip } : { type: "hover-frame", rect: null });
+    },
+    prepareExternalDrag(sessionId, docId, totalCount, keys) {
+      if (!connected) return false;
+      return sendChecked({ type: "external-drag-prepare", sessionId, docId, totalCount, keys });
+    },
+    readyExternalDrag(sessionId, files) {
+      if (!connected) return false;
+      return sendChecked({ type: "external-drag-ready", sessionId, files });
+    },
+    progressExternalDrag(sessionId, done, total) {
+      send({ type: "external-drag-progress", sessionId, done, total });
+    },
+    cancelExternalDrag(sessionId, reason) {
+      send({ type: "external-drag-cancel", sessionId, reason });
     },
     manageComfy(options) {
       send({
@@ -152,6 +216,15 @@ export function connectOverlay(opts: { launch?: () => Promise<string | null>; au
         startIfMissing: options.startIfMissing ?? true,
         restart: options.restart ?? false,
       });
+    },
+    openMenu(title, items) {
+      if (!connected || helperVersion === null || helperOutdated(helperVersion, MENU_HELPER_VERSION)) return null;
+      const menuId = "m" + (++menuSeq);
+      if (!sendChecked({ type: "menu-open", menuId, title, items })) return null;
+      return new Promise<string | null>(resolve => { menus.set(menuId, resolve); });
+    },
+    closeMenu() {
+      if (menus.size) send({ type: "menu-close" });
     },
     launchHelper,
     async restartHelper(waitMs = 15_000) {
@@ -178,6 +251,10 @@ export function connectOverlay(opts: { launch?: () => Promise<string | null>; au
     onComfyStatus(cb) {
       comfyListeners.add(cb);
       return () => comfyListeners.delete(cb);
+    },
+    onExternalDrag(cb) {
+      externalDragListeners.add(cb);
+      return () => externalDragListeners.delete(cb);
     },
     queueSync() {
       if (syncTimer || !connected) return;

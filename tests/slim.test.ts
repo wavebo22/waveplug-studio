@@ -45,3 +45,25 @@ test("瘦身: warnings and size text", () => {
   assert.equal(sizeText(12.34 * 1024 * 1024), "约 12.3 MB");
   assert.equal(sizeText(0), "");
 });
+
+test("优化: a hidden group stands for its layers; 不透明度 0; risk and document stats", async () => {
+  const { docStats, SLIM_RISK } = await import("../src/core/layers/slim.ts");
+  const g = (id: number, visible: boolean, parentId: number | null = null): ScanLayer => ({ id, name: "组" + id, kind: "group", visible, bounds: null, children: 2, parentId });
+  const s = scan([
+    g(10, false), px(11, 0, 0, 100, 100, { parentId: 10 }), px(12, 0, 0, 50, 50, { parentId: 10, visible: false }),
+    px(20, 0, 0, 10, 10, { parentId: null, visible: false }),
+    px(30, 0, 0, 200, 100, { parentId: null, opacity: 0 }), px(31, 0, 0, 10, 10, { parentId: null, opacity: 100 }),
+    g(40, true), px(41, 0, 0, 10, 10, { parentId: 40, variationOf: 40, visible: false }),
+  ]);
+  const hidden = item(s, "hidden")!;
+  // the group once, not its layers again; the AI group's hidden variation is not a hidden layer
+  assert.deepEqual(hidden.ids, [10, 20]);
+  assert.equal(hidden.bytes, (100 * 100 + 50 * 50 + 10 * 10) * 4);
+  assert.deepEqual(item(s, "transparent")!.ids, [30]);
+  assert.equal(item(s, "transparent")!.on, false);
+  for (const i of planSlim(s)) assert.equal(i.risk, SLIM_RISK[i.kind]);
+  assert.equal(item(s, "variations")!.risk, "safe");
+  assert.equal(hidden.risk, "review");
+  assert.deepEqual(docStats(s), { layers: 6, groups: 2, smart: 0, bytes: (100 * 100 + 50 * 50 + 10 * 10 + 200 * 100 + 10 * 10 + 10 * 10) * 4 });
+  assert.match(slimWarnings(scan(Array.from({ length: 800 }, (_, i) => px(i + 1, 0, 0, 1, 1)))).join(), /图层很多/);
+});

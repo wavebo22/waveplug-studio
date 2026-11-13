@@ -267,7 +267,6 @@ impl Demo {
                     });
                 }
             }
-            Action::FinishLayerDrag => {}
             Action::RemoveRef(slot) => {
                 if let Some(r) = s.refs.iter_mut().find(|r| r.slot == slot) {
                     r.filled = None;
@@ -419,7 +418,7 @@ impl eframe::App for Demo {
                 egui::ScrollArea::vertical()
                     .auto_shrink([false, false])
                     .show(ui, |ui| {
-                        actions = view::panel(ui, &mut self.s, None);
+                        actions = view::panel(ui, &mut self.s);
                     });
             });
         for a in actions {

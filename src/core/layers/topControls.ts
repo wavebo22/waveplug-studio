@@ -1,6 +1,5 @@
 /** WaveLayer top controls: migrate the old four thumbnail steps to continuous percent. */
 export const THUMB_PERCENT_KEY = "wp.layers.thumbPercent";
-export type LegacyThumbSize = "off" | "s" | "m" | "l";
 export const legacyThumbPercent = (size: string | null, wasOff: boolean): number =>
   size === "off" ? 0 : size === "s" ? 63 : size === "l" ? 150 : size === "m" ? 100 : wasOff ? 0 : 100;
 

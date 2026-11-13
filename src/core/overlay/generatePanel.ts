@@ -55,7 +55,7 @@ export function parseGenerateAction(a: any): GenerateAction | null {
   switch (a?.kind) {
     case "set-mode": return str(a.mode) ? { kind: a.kind, mode: a.mode } : null;
     case "set-prompt": return str(a.text) ? { kind: a.kind, text: a.text } : null;
-    case "set-count": return num(a.count) ? { kind: a.kind, count: Math.max(1, Math.min(4, Math.round(a.count))) } : null;
+    case "set-count": return Number.isInteger(a.count) ? { kind: a.kind, count: Math.max(1, Math.min(4, a.count)) } : null;
     case "set-number": return str(a.key) && num(a.value) ? { kind: a.kind, key: a.key, value: a.value } : null;
     case "reset-number": return str(a.key) ? { kind: a.kind, key: a.key } : null;
     case "set-toggle": return str(a.key) && typeof a.value === "boolean" ? { kind: a.kind, key: a.key, value: a.value } : null;

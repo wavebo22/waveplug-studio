@@ -10,7 +10,6 @@ use eframe::egui::{
 
 use super::state::{Action, Mode, PanelState, Param, RefSource, Tone};
 use crate::panel::theme::*;
-use crate::panel::ExternalLayerDrag;
 use data_encoding::BASE64;
 
 /// The button says this in every mode (the plugin's own text, 融图 / 抠图 …, isn't used here).
@@ -21,12 +20,11 @@ const SHOW_ADVANCED: bool = false;
 pub fn panel(
     ui: &mut Ui,
     s: &mut PanelState,
-    drag_preview: Option<&egui::TextureHandle>,
 ) -> Vec<Action> {
     let mut out = Vec::new();
     mode_tabs(ui, s, &mut out);
     ui.add_space(6.0);
-    card(ui, |ui| main_card(ui, s, &mut out, drag_preview));
+    card(ui, |ui| main_card(ui, s, &mut out));
     if SHOW_ADVANCED {
         ui.add_space(6.0);
         card(ui, |ui| advanced(ui, s, &mut out));
@@ -88,7 +86,6 @@ fn main_card(
     ui: &mut Ui,
     s: &mut PanelState,
     out: &mut Vec<Action>,
-    drag_preview: Option<&egui::TextureHandle>,
 ) {
     // prompt; the mode's hint sits inside the box until something is typed (the plugin keeps it
     // outside only because UXP's textarea can merge a placeholder into the text)
@@ -134,7 +131,7 @@ fn main_card(
     // References remain mounted during an external drag, even when the workflow currently has
     // no slots, so a release can safely clear the pending drag state.
     if !s.refs.is_empty() || s.external_drag.is_some() {
-        references(ui, s, out, drag_preview);
+        references(ui, s, out);
     }
 
     // 数量：左侧 × 重置，滚轮在输入框上方快速调整 1～4。
@@ -289,131 +286,46 @@ fn reference_texture(
     ))
 }
 
-pub fn drag_preview_texture(
-    ctx: &egui::Context,
-    data_url: &str,
-) -> Result<egui::TextureHandle, String> {
-    reference_texture(ctx, u32::MAX, data_url)
-}
-
-fn draw_drag_preview(
-    ui: &Ui,
-    drag: &ExternalLayerDrag,
-    cursor: Pos2,
-    texture: Option<&egui::TextureHandle>,
-) {
-    let clip = ui.clip_rect();
-    let size = vec2(168.0, 44.0);
-    let mut pos = cursor + vec2(14.0, 14.0);
-    if pos.x + size.x > clip.right() {
-        pos.x = cursor.x - size.x - 14.0;
+/// The drag card's action while a WaveLayer drag is over a reference slot (`tag`: what fills it).
+pub fn drop_hint_text(count: usize, tag: Option<&str>) -> String {
+    match tag {
+        _ if count > 1 => format!("依次放入 {count} 个参考图"),
+        Some(tag) => format!("替换参考图「{tag}」"),
+        None => "放入参考图".to_string(),
     }
-    if pos.y + size.y > clip.bottom() {
-        pos.y = cursor.y - size.y - 14.0;
-    }
-    pos.x = pos
-        .x
-        .clamp(clip.left(), (clip.right() - size.x).max(clip.left()));
-    pos.y = pos
-        .y
-        .clamp(clip.top(), (clip.bottom() - size.y).max(clip.top()));
-    let rect = Rect::from_min_size(pos, size);
-    let painter = ui.painter();
-    painter.rect_filled(
-        rect,
-        CornerRadius::same(R),
-        Color32::from_rgba_unmultiplied(38, 38, 38, 224),
-    );
-    painter.rect_stroke(
-        rect,
-        CornerRadius::same(R),
-        Stroke::new(1.0_f32, ACCENT_HI),
-        StrokeKind::Inside,
-    );
-    let image = Rect::from_min_size(rect.min + vec2(6.0, 6.0), vec2(32.0, 32.0));
-    painter.rect_filled(image, CornerRadius::same(R), FIELD);
-    if let Some(texture) = texture {
-        painter.image(
-            texture.id(),
-            image.shrink(1.0),
-            Rect::from_min_max(Pos2::ZERO, pos2(1.0, 1.0)),
-            Color32::from_white_alpha(230),
-        );
-    } else {
-        painter.text(
-            image.center(),
-            Align2::CENTER_CENTER,
-            "图层",
-            font(FS_S),
-            TEXT_2,
-        );
-    }
-    let label = Rect::from_min_max(
-        pos2(image.right() + 8.0, rect.top()),
-        rect.max - vec2(6.0, 0.0),
-    );
-    let p = painter.with_clip_rect(label);
-    let count = drag.total_count.max(drag.layers.len());
-    let title = if count > drag.layers.len() {
-        format!("{} / {} 个图层", drag.layers.len(), count)
-    } else if count > 1 {
-        format!("{} 个图层", count)
-    } else {
-        drag.layers.first().map(|layer| layer.name.as_str()).unwrap_or("图层").to_string()
-    };
-    p.text(
-        pos2(label.left(), rect.top() + 14.0),
-        Align2::LEFT_CENTER,
-        title,
-        font(FS),
-        TEXT,
-    );
-    p.text(
-        pos2(label.left(), rect.top() + 30.0),
-        Align2::LEFT_CENTER,
-        if count > 1 { "依次放入空槽位" } else { "拖入参考图" },
-        font(FS_S),
-        ACCENT_HI,
-    );
 }
 
 fn references(
     ui: &mut Ui,
     s: &mut PanelState,
     out: &mut Vec<Action>,
-    drag_preview: Option<&egui::TextureHandle>,
 ) {
     const TILE: f32 = 56.0;
     let ctx = ui.ctx().clone();
     let external_drag = s.external_drag.clone();
+    // During a reference drag the slots are the drag engine's drop targets (crate::drag): it
+    // hit-tests them on every mouse move and decides the release. This only says where they are
+    // (screen px) and highlights the one it reports under the cursor.
+    let hovered = crate::drag::hovered();
+    let count = external_drag.as_ref().map(|d| d.total_count.max(d.layers.len())).unwrap_or(1);
+    let ppp = ctx.pixels_per_point();
     #[cfg(windows)]
-    let cursor = external_drag.as_ref().and_then(|_| crate::win::cursor_local(ctx.pixels_per_point()))
-        .map(|(x, y)| pos2(x, y));
+    let origin = external_drag.as_ref().and_then(|_| crate::win::client_origin());
     #[cfg(not(windows))]
-    let cursor: Option<Pos2> = None;
-    #[cfg(windows)]
-    let released = external_drag.is_some() && !crate::win::left_button_down();
-    #[cfg(not(windows))]
-    let released = false;
-    #[cfg(windows)]
-    let cancelled = external_drag.is_some() && crate::win::escape_down();
-    #[cfg(not(windows))]
-    let cancelled = false;
-    let mut dropped = false;
+    let origin: Option<(i32, i32)> = None;
+    let mut targets = Vec::new();
     ui.horizontal_wrapped(|ui| {
         for r in &mut s.refs {
             let (rect, resp) = ui.allocate_exact_size(vec2(TILE, TILE), Sense::click());
-            let drop_hover = external_drag.is_some() && cursor.is_some_and(|point| rect.contains(point));
-            if released && drop_hover {
-                if let Some(drag) = external_drag.as_ref() {
-                    out.push(Action::DropRefs {
-                        slot: r.slot,
-                        doc_id: drag.doc_id,
-                        layers: drag.layers.clone(),
-                        total_count: drag.total_count,
-                    });
-                    dropped = true;
-                }
+            let drop_hover = external_drag.is_some() && hovered == Some(("generate", r.slot));
+            if let Some((ox, oy)) = origin {
+                let px = |v: f32, o: i32| (o as f32 + v * ppp).round() as i32;
+                targets.push(crate::drag::targets::Target {
+                    surface: "generate",
+                    id: r.slot,
+                    rect: (px(rect.left(), ox), px(rect.top(), oy), px(rect.right(), ox), px(rect.bottom(), oy)),
+                    action: drop_hint_text(count, r.filled.as_ref().map(|f| f.tag.as_str())),
+                });
             }
             if let Some(f) = &mut r.filled {
                 if f.texture.is_none() && f.texture_error.is_none() {
@@ -560,22 +472,8 @@ fn references(
             }
         }
     });
-    if !released && !cancelled {
-        if let (Some(drag), Some(cursor)) = (external_drag.as_ref(), cursor) {
-            draw_drag_preview(ui, drag, cursor, drag_preview);
-        }
-    }
-    if cancelled {
-        crate::log::line("WaveLayer layer drag cancelled with Escape");
-        out.push(Action::FinishLayerDrag);
-        s.external_drag = None;
-    } else if released {
-        if !dropped {
-            crate::log::line("WaveLayer layer drag released outside a reference slot");
-        }
-        out.push(Action::FinishLayerDrag);
-        s.external_drag = None;
-    }
+    // replaced every time the slots are drawn: none outside a reference drag
+    crate::drag::targets::publish("generate", targets);
     // where the picture comes from (the plugin's refMenu)
     if let Some(slot) = s.ref_menu {
         ui.horizontal(|ui| {

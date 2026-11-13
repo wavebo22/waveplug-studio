@@ -11,10 +11,14 @@
 
 #![cfg_attr(not(test), windows_subsystem = "windows")]
 
+mod anim;
 mod host;
 mod comfy;
+mod drag;
+mod drag_target;
 mod frame;
 mod life;
+mod menu;
 mod log;
 mod panel;
 mod protocol;

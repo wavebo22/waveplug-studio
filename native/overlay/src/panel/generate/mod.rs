@@ -26,8 +26,6 @@ pub struct GenerateSurface {
     s: PanelState,
     /// the prompt typed here, waiting for a pause
     prompt_due: Option<Instant>,
-    /// decoded once per dragged layer; the source sends only its cached small thumbnail
-    drag_preview: Option<(String, Option<egui::TextureHandle>)>,
 }
 
 impl GenerateSurface {
@@ -35,7 +33,6 @@ impl GenerateSurface {
         GenerateSurface {
             s: PanelState::empty(),
             prompt_due: None,
-            drag_preview: None,
         }
     }
 }
@@ -130,14 +127,27 @@ impl Surface for GenerateSurface {
     }
 
     fn set_external_layer_drag(&mut self, drag: Option<ExternalLayerDrag>) {
-        if drag.is_none() {
-            self.drag_preview = None;
-        }
         self.s.external_drag = drag;
     }
 
-    fn has_external_layer_drag(&self) -> bool {
-        self.s.external_drag.is_some()
+    fn external_drop(&mut self, target: u32, reference: &crate::drag::Reference) -> Vec<Value> {
+        crate::log::line(format!("WaveLayer layer drag dropped on reference slot {target}"));
+        vec![action_json(&Action::DropRefs {
+            slot: target,
+            doc_id: reference.doc_id,
+            layers: reference.layers.clone(),
+            total_count: reference.total_count,
+        })]
+    }
+
+    fn keep_expanded(&self) -> bool {
+        self.s.running.is_some()
+            || self.s.prompt_focused
+            || self.s.count_focused
+            || self.s.fav_open
+            || self.s.adv_open
+            || self.s.ref_menu.is_some()
+            || self.prompt_due.is_some()
     }
 
     fn apply(&mut self, sections: &Map<String, Value>) {
@@ -275,28 +285,7 @@ impl Surface for GenerateSurface {
 
     fn ui(&mut self, ui: &mut egui::Ui) -> Vec<Value> {
         let mut out = Vec::new();
-        let thumb_url = self
-            .s
-            .external_drag
-            .as_ref()
-            .and_then(|drag| drag.thumb.as_deref());
-        if self.drag_preview.as_ref().map(|(url, _)| url.as_str()) != thumb_url {
-            self.drag_preview = thumb_url.map(|url| {
-                let texture = match view::drag_preview_texture(ui.ctx(), &url) {
-                    Ok(texture) => Some(texture),
-                    Err(error) => {
-                        crate::log::line(format!("layer drag thumbnail decode failed: {error}"));
-                        None
-                    }
-                };
-                (url.to_string(), texture)
-            });
-        }
-        let drag_preview = self
-            .drag_preview
-            .as_ref()
-            .and_then(|(_, texture)| texture.as_ref());
-        for a in view::panel(ui, &mut self.s, drag_preview) {
+        for a in view::panel(ui, &mut self.s) {
             match a {
                 // held until typing pauses (due)
                 Action::SetPrompt(_) => self.prompt_due = Some(Instant::now() + PROMPT_PAUSE),
@@ -308,9 +297,6 @@ impl Surface for GenerateSurface {
                     out.push(action_json(&other));
                 }
             }
-        }
-        if self.s.external_drag.is_none() {
-            self.drag_preview = None;
         }
         out
     }
@@ -326,13 +312,7 @@ impl Surface for GenerateSurface {
     }
 
     fn next_due(&self) -> Option<Instant> {
-        let drag_due = self.s.external_drag.as_ref().map(|_| Instant::now() + Duration::from_millis(16));
-        match (self.prompt_due, drag_due) {
-            (Some(prompt), Some(drag)) => Some(prompt.min(drag)),
-            (Some(prompt), None) => Some(prompt),
-            (None, Some(drag)) => Some(drag),
-            (None, None) => None,
-        }
+        self.prompt_due
     }
 }
 
@@ -355,7 +335,6 @@ fn action_json(a: &Action) -> Value {
             "layers": layers,
             "totalCount": total_count,
         }),
-        Action::FinishLayerDrag => json!({ "kind": "finish-layer-drag" }),
         Action::SetCount(n) => json!({ "kind": "set-count", "count": n }),
         Action::SetNumber { key, value } => {
             json!({ "kind": "set-number", "key": key, "value": value })
@@ -463,8 +442,8 @@ mod tests {
                 slot: 2,
                 doc_id: 7,
                 layers: vec![
-                    super::super::DraggedLayer { layer_id: 42, name: "产品图层".into() },
-                    super::super::DraggedLayer { layer_id: 43, name: "杯子".into() },
+                    super::super::DraggedLayer { layer_id: 42, name: "产品图层".into(), thumb: None },
+                    super::super::DraggedLayer { layer_id: 43, name: "杯子".into(), thumb: None },
                 ],
                 total_count: 2,
             }),
@@ -475,25 +454,24 @@ mod tests {
     }
 
     #[test]
-    fn finish_layer_drag_action_matches_the_plugin_protocol() {
-        assert_eq!(action_json(&Action::FinishLayerDrag), json!({ "kind": "finish-layer-drag" }));
+    fn drop_hint_names_what_releasing_over_a_slot_does() {
+        assert_eq!(super::view::drop_hint_text(1, None), "放入参考图");
+        assert_eq!(super::view::drop_hint_text(1, Some("图1")), "替换参考图「图1」");
+        assert_eq!(super::view::drop_hint_text(3, Some("图1")), "依次放入 3 个参考图");
     }
 
     #[test]
-    fn external_layer_drag_requests_repaint_until_released() {
+    fn a_drop_from_the_engine_becomes_the_drop_refs_action() {
         let mut g = GenerateSurface::new();
-        assert!(g.next_due().is_none());
-        g.set_external_layer_drag(Some(ExternalLayerDrag {
+        let reference = crate::drag::Reference {
             doc_id: 7,
-            layers: vec![super::super::DraggedLayer { layer_id: 42, name: "产品".into() }],
+            layers: vec![super::super::DraggedLayer { layer_id: 42, name: "产品".into(), thumb: None }],
             total_count: 1,
-            thumb: None,
-        }));
-        assert!(g.has_external_layer_drag());
-        assert!(g.next_due().is_some());
-        g.set_external_layer_drag(None);
-        assert!(!g.has_external_layer_drag());
-        assert!(g.next_due().is_none());
+        };
+        assert_eq!(
+            g.external_drop(2, &reference),
+            vec![json!({ "kind": "drop-refs", "slot": 2, "docId": 7, "layers": [{ "layerId": 42, "name": "产品" }], "totalCount": 1 })]
+        );
     }
 
     #[test]

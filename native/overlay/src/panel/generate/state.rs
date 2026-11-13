@@ -176,7 +176,6 @@ pub enum Action {
         layers: Vec<super::super::DraggedLayer>,
         total_count: usize,
     },
-    FinishLayerDrag,
     SetCount(u32),
     SetNumber { key: String, value: f64 },
     ResetNumber(String),

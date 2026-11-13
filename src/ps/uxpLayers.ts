@@ -5,9 +5,9 @@ import { log } from "../app/log.ts";
 import { type Bounds, frameThumb, thumbArea } from "../core/layers/thumbs.ts";
 import { openSmartContents } from "../core/layers/smartOpen.ts";
 import type { ToolResult } from "../core/layers/smart.ts";
-import { type LayerAction, type MoveStep, type RawLayer, buildTree, nextLayerAfterDelete, planLayerDeletion, effectsOf, EFFECTS, rawProblem } from "../core/layers/tree.ts";
+import { type LayerAction, type MoveStep, type RawLayer, buildTree, ALIGNS, DISTRIBUTES, nextLayerAfterDelete, planLayerDeletion, effectsOf, EFFECTS, rawProblem } from "../core/layers/tree.ts";
 import { addEffect, effectItem, hasEffects, removeEffect } from "../core/layers/effects.ts";
-import { type LayerDeleteResult, type LayerTree, type RunOptions, type TargetPart, ADJUSTMENTS } from "./host.ts";
+import { type LayerDeleteResult, type LayerTree, type MoveOptions, type RunOptions, type TargetPart, ADJUSTMENTS } from "./host.ts";
 import { docById, findLayer, modal, onModalDone, play, step } from "./uxpHost.ts";
 import { act, selectLayers, UxpTools } from "./uxpTools.ts";
 import { type MaskKind, maskTransferDescriptors } from "./maskTransfer.ts";
@@ -22,6 +22,32 @@ const docRef = (id: number) => ({ _ref: "document", _id: id });
 const requireActiveDoc = (docId: number) => {
   if (ps().app.activeDocument?.id !== docId) throw new Error("当前文档已切换，已取消操作以防误删其他 PSD");
 };
+/** Photoshop's Background layer cannot be unlocked with applyLocking; convert it to a normal layer. */
+async function unlockBackgroundLayer(docId: number, id: number): Promise<number> {
+  requireActiveDoc(docId);
+  const doc = docById(docId), layer = findLayer(doc.layers, id);
+  if (!layer?.isBackgroundLayer) return id;
+  await selectLayers([id]);
+  requireActiveDoc(docId);
+  await act({
+    _obj: "set",
+    // `background` is a property reference on the layer class, not an ordinal layer value.
+    // This is the same Action Manager target used by Photoshop's native Layer From Background.
+    _target: [{ _ref: "layer", _property: "background" }],
+    to: {
+      _obj: "layer", name: String(layer.name ?? "Layer 0"),
+      opacity: { _unit: "percentUnit", _value: 100 },
+      mode: { _enum: "blendMode", _value: "normal" },
+    },
+  });
+  requireActiveDoc(docId);
+  const updated = docById(docId), active = updated.activeLayers?.[0];
+  const bottom = updated.layers?.[updated.layers.length - 1];
+  const converted = active && !active.isBackgroundLayer ? active : bottom;
+  if (!converted || converted.isBackgroundLayer) throw new Error("Photoshop 未将背景图层转换为普通图层");
+  log("info", "background layer unlocked", JSON.stringify({ docId, oldId: id, newId: converted.id }));
+  return Number(converted.id);
+}
 const PROPS = ["layerID", "name", "layerKind", "layerSection", "visible", "hasUserMask", "layerLocking", "smartObject", "smartObjectMore", "boundsNoEffects", "background", "group", "userMaskEnabled", "layerEffects", "layerFXVisible", "linkedLayerIDs", "mode", "opacity", "fillOpacity", "artboardEnabled", "color", "hasVectorMask", "vectorMaskEnabled", "userMaskLinked", "vectorMaskLinked", "hasFilterMask", "artboard"];
 /** opacity / fillOpacity as % (Photoshop gives 0–255, or a percent unit) */
 const percent = (v: any): number | undefined => v === undefined || v === null ? undefined
@@ -78,16 +104,16 @@ function boardRect(a: any): RawLayer["board"] {
 /** One multiGet record (or a full layer descriptor) as a RawLayer. */
 function rawOf(r: any): RawLayer {
   const sec = String(r.layerSection?._value ?? r.layerSection ?? "");
-  const so = r.smartObject, more = r.smartObjectMore, b = r.boundsNoEffects;
+  const so = r.smartObject, more = r.smartObjectMore, b = r.boundsNoEffects, background = !!r.background;
   return {
     id: Number(r.layerID), name: String(r.name ?? ""), kind: Number(r.layerKind ?? 0),
     section: /End/.test(sec) ? "end" : /Start/.test(sec) ? "start" : "content",
-    visible: r.visible !== false, locked: isLocked(r.layerLocking), lockAll: !!r.layerLocking?.protectAll, mask: !!r.hasUserMask,
+    visible: r.visible !== false, locked: isLocked(r.layerLocking) || background, lockAll: !!r.layerLocking?.protectAll || background, mask: !!r.hasUserMask,
     lockPosition: !!r.layerLocking?.protectPosition, lockPixels: !!r.layerLocking?.protectComposite, lockTransparency: !!r.layerLocking?.protectTransparency,
     ...smartFilters(so),
     effectList: effectsOf(r.layerEffects),
     mode: r.mode?._value ?? (typeof r.mode === "string" ? r.mode : undefined), opacity: percent(r.opacity), fill: percent(r.fillOpacity),
-    links: Array.isArray(r.linkedLayerIDs) ? r.linkedLayerIDs.map((x: any) => Number(typeof x === "object" && x ? x._id ?? x.layerID : x)).filter((x: number) => Number.isFinite(x)) : [], background: !!r.background,
+    links: Array.isArray(r.linkedLayerIDs) ? r.linkedLayerIDs.map((x: any) => Number(typeof x === "object" && x ? x._id ?? x.layerID : x)).filter((x: number) => Number.isFinite(x)) : [], background,
     maskOn: r.userMaskEnabled !== false, clipped: !!r.group, effects: !!r.layerEffects, effectsOn: r.layerFXVisible !== false,
     contentId: more?.ID ? String(more.ID) : null, linked: !!so?.linked || !!so?.link,
     file: so?.fileReference ? String(so.fileReference) : undefined,
@@ -139,7 +165,9 @@ async function readRawDom(docId: number): Promise<RawLayer[]> {
     for (const l of ls) {
       const group = String(l.kind) === "group";
       ids.push(l.id);
-      out.push({ id: l.id, name: String(l.name), kind: 0, section: group ? "start" : "content", visible: !!l.visible, locked: !!l.allLocked, mask: false });
+      const background = !!l.isBackgroundLayer;
+      out.push({ id: l.id, name: String(l.name), kind: 0, section: group ? "start" : "content", visible: !!l.visible,
+        locked: !!l.allLocked || background, lockAll: !!l.allLocked || background, background, mask: false });
       if (group) { walk(l.layers ?? []); out.push({ id: 0, name: "", kind: 13, section: "end", visible: true, locked: false, mask: false }); }
     }
   };
@@ -294,6 +322,29 @@ async function repairLayerPlacement(doc: any, itemId: number, relativeId: number
   const next = slot.siblings[slot.index + 1], prev = slot.siblings[slot.index - 1];
   let quickAttempts = 0;
   const probed = new Set<number>();
+  // Symmetric recovery for the gap immediately above a folder. Photoshop's group start/end
+  // markers can make PLACEBEFORE land on the wrong side when two folders are adjacent.
+  if (place === "before" && prev && isGroupLayer(rel) && isGroupLayer(prev)) {
+    const gap = doc.id + ":before:" + prev.id + ":" + rel.id;
+    const base = await photoshopLayerIndex(doc.id, rel.id);
+    if (base !== null) {
+      const pref = learnedGroupBoundary.get(gap) ?? 1;
+      for (const offset of [pref, 1, -1, 0, 2, -2]) {
+        const current = await photoshopLayerIndex(doc.id, rel.id);
+        const index = (current ?? base) + offset;
+        if (probed.has(index)) continue;
+        probed.add(index); quickAttempts++;
+        if (await moveAtIndex(itemId, index) && placedAsRequested(doc, itemId, relativeId, place)) {
+          learnedGroupBoundary.set(gap, offset);
+          if (learnedGroupBoundary.size > 96) learnedGroupBoundary.delete(learnedGroupBoundary.keys().next().value!);
+          log("info", "layer group-boundary recovered", JSON.stringify({
+            itemId, relativeId, place, index, attempts: quickAttempts, ms: Date.now() - started, fast: true,
+          }));
+          return true;
+        }
+      }
+    }
+  }
   // Observed real Photoshop: when an AI group is immediately above another group,
   // five AM moves were needed each time. The successful index was NEXT.itemIndex-1.
   // Try that index FIRST and remember another offset if Photoshop needs one.
@@ -458,15 +509,16 @@ export class UxpLayerTree implements LayerTree {
     });
   }
 
-  async move(docId: number, steps: MoveStep[]): Promise<ToolResult> {
+  async move(docId: number, steps: MoveStep[], opts?: MoveOptions): Promise<ToolResult> {
     const doc = docById(docId), P = ps().constants.ElementPlacement;
     const place = { before: P.PLACEBEFORE, after: P.PLACEAFTER, inside: P.PLACEINSIDE };
     const skipped: string[] = [];
-    const done = await step("WavePlug 移动图层", docId, async () => {
+    let done = await step(opts?.history ?? "WavePlug 移动图层", docId, async () => {
       let n = 0;
       for (const s of steps) {
         const l = findLayer(doc.layers, s.id), rel = findLayer(doc.layers, s.rel);
         if (!l || !rel) { skipped.push("#" + s.id + "：图层已不存在"); continue; }
+        if (opts?.onlyIf && !opts.onlyIf(String(l.name ?? ""), String(l.parent?.name ?? ""))) { skipped.push(String(l.name) + "：已不需要移动"); continue; }
         try {
           const anchor = safeLayerAnchor(doc, rel, s.place);
           // Target already directly below a group? No movement required.
@@ -496,6 +548,48 @@ export class UxpLayerTree implements LayerTree {
       }
       return n;
     });
+    // A DOM move can report success while Photoshop is still committing the suspended history
+    // state. Verify again against a fresh document tree AFTER resumeHistory; never treat the
+    // in-modal snapshot alone as proof that the layer reached its destination.
+    if (steps.length === 1 && done > 0) {
+      const s = steps[0];
+      let committedDoc = docById(docId);
+      if (!placedAsRequested(committedDoc, s.id, s.rel, s.place)) {
+        const movedName = String(findLayer(committedDoc.layers, s.id)?.name ?? ("#" + s.id));
+        log("warn", "layer placement post-commit mismatch", JSON.stringify({
+          docId, itemId: s.id, relativeId: s.rel, place: s.place,
+          actualParent: layerSlot(committedDoc.layers, s.id)?.parentId,
+          expectedParent: s.place === "inside" ? s.rel : layerSlot(committedDoc.layers, s.rel)?.parentId,
+        }));
+        try {
+          await step("WavePlug 修复图层放置", docId, async () => {
+            const fresh = docById(docId);
+            if (!await repairLayerPlacement(fresh, s.id, s.rel, s.place))
+              verifyLayerPlacement(fresh, s.id, s.rel, s.place);
+          });
+        } catch (e) {
+          log("warn", "layer placement post-commit repair failed", s.id, s.rel, s.place, e);
+        }
+        committedDoc = docById(docId);
+        if (!placedAsRequested(committedDoc, s.id, s.rel, s.place)) {
+          done = Math.max(0, done - 1);
+          skipped.push(movedName + "：Photoshop 提交后未到达目标位置，已停止报告为成功");
+          const actual = layerSlot(committedDoc.layers, s.id), relative = layerSlot(committedDoc.layers, s.rel);
+          log("warn", "layer placement post-commit verification failed", JSON.stringify({
+            itemId: s.id, relativeId: s.rel, place: s.place,
+            actualParent: actual?.parentId, actualIndex: actual?.index,
+            expectedParent: s.place === "inside" ? s.rel : relative?.parentId,
+            relativeIndex: relative?.index,
+          }));
+        } else {
+          log("info", "layer placement recovered after history commit", JSON.stringify({
+            itemId: s.id, relativeId: s.rel, place: s.place,
+          }));
+        }
+      } else {
+        log("info", "layer placement committed", JSON.stringify({ itemId: s.id, relativeId: s.rel, place: s.place }));
+      }
+    }
     return { done, skipped };
   }
 
@@ -757,6 +851,47 @@ export class UxpLayerTree implements LayerTree {
       if (!there.length) throw new Error("图层已不存在");
       await selectLayers(there);
     };
+    if (action === "toggleEffects") {
+      // Photoshop's FX eye is NOT a layer property setter. It dispatches show/hide
+      // with an ActionList named "target", containing a class reference to layerEffects
+      // chained to the specific layer (Adobe's recorded JSX form).
+      const wanted = arg === "on";
+      const readFxState = async (id: number) => {
+        const ref = [{ _ref: "layer", _id: id }, docRef(docId)];
+        const [fx] = await play([{ _obj: "get", _target: [{ _property: "layerEffects" }, ...ref] }]);
+        const [visible] = await play([{ _obj: "get", _target: [{ _property: "layerFXVisible" }, ...ref] }]);
+        if (fx?._obj === "error") throw new Error(fx.message || "读取图层样式失败");
+        if (visible?._obj === "error") throw new Error(visible.message || "读取图层样式显示状态失败");
+        return { hasEffects: !!fx?.layerEffects, visible: visible?.layerFXVisible !== false };
+      };
+      await whenFree(() => step("WavePlug " + label, docId, async () => {
+        await prepare();
+        const before = await Promise.all(ids.map(readFxState));
+        const targets = ids.filter((_, i) => before[i].hasEffects && before[i].visible !== wanted);
+        if (!targets.length) {
+          log("info", "layer effects visibility unchanged", JSON.stringify({ ids, wanted, before }));
+          return;
+        }
+        const descriptor = {
+          _obj: wanted ? "show" : "hide",
+          target: targets.map(id => ({
+            _ref: [
+              { _ref: "layerEffects" },
+              { _ref: "layer", _id: id },
+              docRef(docId),
+            ],
+          })),
+        };
+        const [result] = await play([descriptor]);
+        if (result?._obj === "error") throw new Error(result.message || "Photoshop 无法切换图层样式");
+        const after = await Promise.all(targets.map(readFxState));
+        log("info", "layer effects visibility", JSON.stringify({ ids: targets, wanted, before, after, result }));
+        if (after.some(state => !state.hasEffects || state.visible !== wanted)) {
+          throw new Error("Photoshop 未能切换图层样式显示状态");
+        }
+      }));
+      return;
+    }
     if (action === "toggleFilter") {
       // index 0: the 智能滤镜 row (hide all if any is shown, else show all); 1…: one filter, by its
       // place in the list we read. Photoshop numbers filters in its own order, so every switch is
@@ -1098,19 +1233,49 @@ export class UxpLayerTree implements LayerTree {
       }));
       return;
     }
+    if (action === "lock" || action === "unlock") {
+      // Background layers cannot be changed with applyLocking. Unlock them by converting them
+      // to normal layers; apply the ordinary lock command only to the remaining selected layers.
+      await whenFree(() => step("WavePlug " + label, docId, async () => {
+        const doc = docById(docId);
+        const existing = ids.filter(id => !!findLayer(doc.layers, id));
+        const backgrounds = existing.filter(id => !!findLayer(doc.layers, id)?.isBackgroundLayer);
+        const ordinary = existing.filter(id => !backgrounds.includes(id));
+        const replacements = new Map<number, number>();
+        if (action === "unlock") for (const id of backgrounds) replacements.set(id, await unlockBackgroundLayer(docId, id));
+        if (ordinary.length) {
+          await selectLayers(ordinary);
+          await act({ _obj: "applyLocking", _target: [target], layerLocking: {
+            _obj: "layerLocking", ...(action === "unlock" ? { protectNone: true } : { protectAll: true }),
+          } });
+        }
+        const currentLayers = docById(docId).layers;
+        const remaining = existing.map(id => replacements.get(id) ?? id).filter(id => !!findLayer(currentLayers, id));
+        if (remaining.length) await selectLayers(remaining).catch(e => log("warn", "reselect", e));
+      }));
+      return;
+    }
     if (action === "setLock") {
       // locks apply to the selected layers only: each layer is selected in turn, then the
       // selection is put back
       const plan: { id: number; locks: Record<string, boolean> }[] = JSON.parse(arg ?? "[]");
       const [t] = await play([{ _obj: "get", _target: [{ _property: "targetLayersIDs" }, { _ref: "document", _id: docId }] }]);
       const keep: number[] = (t?.targetLayersIDs ?? []).map((x: any) => Number(x._id));
+      const replacements = new Map<number, number>();
       await whenFree(() => step("WavePlug " + label, docId, async () => {
         for (const { id, locks: k } of plan) {
-          await selectLayers([id]);
+          const layer = findLayer(docById(docId).layers, id);
           const none = !k.protectAll && !k.protectPosition && !k.protectComposite && !k.protectTransparency;
+          if (layer?.isBackgroundLayer) {
+            if (none) replacements.set(id, await unlockBackgroundLayer(docId, id));
+            continue;
+          }
+          await selectLayers([id]);
           await act({ _obj: "applyLocking", _target: [target], layerLocking: { _obj: "layerLocking", ...(none ? { protectNone: true } : k) } });
         }
-        if (keep.length) await selectLayers(keep).catch(e => log("warn", "reselect", e));
+        const currentLayers = docById(docId).layers;
+        const restore = keep.map(id => replacements.get(id) ?? id).filter(id => !!findLayer(currentLayers, id));
+        if (restore.length) await selectLayers(restore).catch(e => log("warn", "reselect", e));
       }));
       return;
     }
@@ -1156,6 +1321,31 @@ export class UxpLayerTree implements LayerTree {
       log("info", "smart contents opened", JSON.stringify({
         docId, sourceId: id, actualId: result.layerId, sourceFile: file, pngConverted: result.converted,
       }));
+      return;
+    }
+    // Photoshop's own dialogs (a file picker, 新建图层): shown, and Cancel there changes nothing
+    const dialog = DIALOG_COMMANDS[action];
+    if (dialog) {
+      await whenFree(() => modal("WavePlug " + label, async () => {
+        await prepare();
+        const [r] = await play([{ ...dialog, _options: { dialogOptions: "display" } }]);
+        log("info", "layer dialog command", action, JSON.stringify(r ?? null).slice(0, 300));
+        if (r?._obj === "error" && r.result !== -128 && !/cancel|取消/i.test(String(r.message ?? ""))) {
+          throw new Error(r.message || `Photoshop 无法执行「${label}」`);
+        }
+      }, { interactive: true }));
+      return;
+    }
+    // commands that only exist as menu items (图层 › 快速导出为 PNG / 复制 CSS / 复制 SVG): the layers
+    // are selected first, then Photoshop runs its own command on the selection
+    const menu = MENU_COMMANDS[action];
+    if (menu) {
+      const menuId = await layerMenuCommand(action, menu);
+      if (menuId === undefined) throw new Error(`在 Photoshop 的菜单里没找到「${label}」（见日志 layer menu command）`);
+      await whenFree(() => modal(SELECT, async () => { await prepare(); }));
+      const done = await ps().core.performMenuCommand({ commandID: menuId });
+      log("info", "layer menu command run", action, menuId, JSON.stringify(done ?? null));
+      if (done === false || (done as any)?.available === false) throw new Error(`Photoshop 现在不能执行「${label}」`);
       return;
     }
     await whenFree(() => step("WavePlug " + label, docId, async () => {
@@ -1308,7 +1498,50 @@ const ACTION_NAMES: Partial<Record<LayerAction, string>> = {
   addVectorMask: "添加矢量蒙版", deleteVectorMask: "删除矢量蒙版", toggleVectorMask: "停用/启用矢量蒙版", targetVectorMask: "选择矢量蒙版",
   toggleMaskLink: "链接/取消链接蒙版", moveEffect: "移动图层效果", moveEffects: "移动图层样式", deleteEffect: "删除图层效果", moveFilters: "移动智能滤镜", deleteFilter: "删除智能滤镜", deleteFilters: "清除智能滤镜",
   targetLayer: "选择图层", targetFilterMask: "选择智能滤镜蒙版", deleteFilterMask: "删除智能滤镜蒙版", viewMask: "查看蒙版", editFilter: "编辑智能滤镜", showVariant: "切换变体", deleteVariant: "删除变体", setProps: "图层属性", setLock: "锁定/解锁图层", adjustment: "新建调整图层",
+  mergeDown: "向下合并", mergeVisible: "合并可见图层", flatten: "拼合图像", rasterizeStyle: "栅格化图层样式", smartViaCopy: "通过拷贝新建智能对象",
+  embedLinked: "嵌入链接的智能对象", convertToLinked: "转换为链接对象", relink: "重新链接到文件", align: "对齐图层", distribute: "分布图层",
+  artboardFromLayers: "来自图层的画板", newLayerDialog: "新建图层", quickExport: "快速导出为 PNG", copyCSS: "复制 CSS", copySVG: "复制 SVG",
 };
+
+/** Commands run with Photoshop's own dialog shown (dialogOptions "display"). */
+const DIALOG_COMMANDS: Partial<Record<LayerAction, object>> = {
+  newLayerDialog: { _obj: "make", _target: [{ _ref: "layer" }] },
+  convertToLinked: { _obj: "placedLayerConvertToLinked" },
+  relink: { _obj: "placedLayerRelinkToFile" },
+  artboardFromLayers: { _obj: "make", _target: [{ _ref: "artboardSection" }], from: { _ref: "layer", _enum: "ordinal", _value: "targetEnum" } },
+};
+
+/** Menu-only commands: the item's titles (Chinese, English), and a title only the 图层 menu has next to
+ *  it (文件 › 导出 has a 快速导出为 PNG of its own, which exports the whole document). */
+const MENU_COMMANDS: Partial<Record<LayerAction, { titles: string[]; near?: string[] }>> = {
+  quickExport: { titles: ["快速导出为PNG", "QuickExportasPNG"], near: ["复制CSS", "CopyCSS"] },
+  copyCSS: { titles: ["复制CSS", "CopyCSS"] },
+  copySVG: { titles: ["复制SVG", "CopySVG"] },
+};
+/** Every menu command's title → ids, read once (menu ids differ between Photoshop versions). */
+let menuTitles: Promise<Map<string, number[]>> | null = null;
+function menuIndex(): Promise<Map<string, number[]>> {
+  return menuTitles ??= (async () => {
+    const core = ps().core, t0 = Date.now(), out = new Map<string, number[]>();
+    const title = async (id: number) => { try { return plainTitle(String(await core.getMenuCommandTitle({ commandID: id }) ?? "")); } catch { return ""; } };
+    for (let start = 1; start < 12000; start += 250) {
+      const ts = await Promise.all(Array.from({ length: 250 }, (_, i) => title(start + i)));
+      ts.forEach((t, i) => { if (t) { const ids = out.get(t); if (ids) ids.push(start + i); else out.set(t, [start + i]); } });
+    }
+    log("info", "menu index", Date.now() - t0, "ms", out.size, "titles");
+    return out;
+  })();
+}
+/** The menu id of `action`: the only item with one of its titles, or the one nearest to `near`. */
+async function layerMenuCommand(action: string, m: { titles: string[]; near?: string[] }): Promise<number | undefined> {
+  const index = await menuIndex();
+  const all = (titles: string[]) => titles.flatMap(t => index.get(plainTitle(t)) ?? []);
+  const found = all(m.titles), anchors = m.near ? all(m.near) : [];
+  const dist = (id: number) => Math.min(...anchors.map(a => Math.abs(a - id)));
+  const best = found.length <= 1 || !anchors.length ? found[0] : [...found].sort((a, b) => dist(a) - dist(b))[0];
+  log("info", "layer menu command", action, JSON.stringify({ found, anchors, best }));
+  return best;
+}
 
 /** 新建调整图层: the adjustment as Photoshop's own default */
 const ADJUSTMENT_TYPES: Record<string, object> = {
@@ -1362,7 +1595,17 @@ async function actionDescs(docId: number, action: LayerAction, ids: number[], ar
     case "newGroup": return [{ _obj: "make", _target: [{ _ref: "layerSection" }] }];
     case "groupLayers": return [{ _obj: "make", _target: [{ _ref: "layerSection" }], from: target }];
     case "ungroup": return [{ _obj: "ungroupLayersEvent", _target: [target] }];
-    case "merge": return [{ _obj: "mergeLayersNew" }];
+    case "merge": case "mergeDown": return [{ _obj: "mergeLayersNew" }];
+    case "mergeVisible": return [{ _obj: "mergeVisible" }];
+    case "flatten": return [{ _obj: "flattenImage" }];
+    case "rasterizeStyle": return [{ _obj: "rasterizeLayer", _target: [target], what: { _enum: "rasterizeItem", _value: "layerStyle" } }];
+    case "smartViaCopy": return [{ _obj: "placedLayerMakeCopy" }];
+    case "embedLinked": return [{ _obj: "placedLayerConvertToEmbedded" }];
+    // 图层 › 对齐 / 分布: Photoshop moves the selected layers itself (locked ones stay)
+    case "align": case "distribute": {
+      if (![...ALIGNS, ...DISTRIBUTES].some(([k]) => k === arg)) throw new Error(`不认识的对齐方式：${arg}`);
+      return [{ _obj: action, _target: [target], using: { _enum: "alignDistributeSelector", _value: arg }, ...(action === "align" ? { alignToCanvas: false } : {}) }];
+    }
     case "convertSmart": return [{ _obj: "newPlacedLayer" }];
     case "rasterize": return [{ _obj: "rasterizeLayer", _target: [target] }];
     case "addMask": case "addMaskHide": {
@@ -1384,7 +1627,7 @@ async function actionDescs(docId: number, action: LayerAction, ids: number[], ar
     case "copyStyle": return [{ _obj: "copyEffects" }];
     case "pasteStyle": return [{ _obj: "pasteEffects", allowPasteFXOnLayerSet: true }];
     case "clearStyle": return [{ _obj: "disableLayerStyle", _target: [target] }];
-    case "toggleEffects": return [{ _obj: arg === "on" ? "show" : "hide", null: [{ _ref: "layerEffects" }, target] }];
+    case "toggleEffects": throw new Error("toggleEffects must use the dedicated FX visibility handler");
     case "link": return [{ _obj: "linkSelectedLayers", _target: [target] }];
     case "unlink": return [{ _obj: "unlinkSelectedLayers", _target: [target] }];
     case "lock": return [{ _obj: "applyLocking", _target: [target], layerLocking: { _obj: "layerLocking", protectAll: true } }];

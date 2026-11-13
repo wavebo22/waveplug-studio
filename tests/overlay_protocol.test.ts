@@ -59,7 +59,9 @@ test("外附介面：只接受格式正确的消息；操作由各介面自己�
   assert.equal(parseOverlayEvent('{"type":"comfy-status","state":"unknown","message":"x","owned":false}'), null);
   assert.equal(parseOverlayEvent('{"type":"action","action":{"kind":"generate"}}'), null); // no panel
   assert.equal(parseOverlayEvent("not json"), null);
+  assert.deepEqual(parsePanelAction({ kind: "set-count", count: 2 }), { kind: "set-count", count: 2 });
   assert.deepEqual(parsePanelAction({ kind: "set-count", count: 9 }), { kind: "set-count", count: 4 });
+  assert.equal(parsePanelAction({ kind: "set-count", count: 2.5 }), null);
   assert.deepEqual(parsePanelAction({ kind: "add-ref", slot: 1, source: "layer" }), { kind: "add-ref", slot: 1, source: "layer" });
   assert.deepEqual(parsePanelAction({ kind: "add-ref", slot: 2, source: "file" }), { kind: "add-ref", slot: 2, source: "file" });
   assert.deepEqual(parsePanelAction({ kind: "add-ref", slot: 3, source: "clipboard" }), { kind: "add-ref", slot: 3, source: "clipboard" });
@@ -81,4 +83,48 @@ test("外附介面：只接受格式正确的消息；操作由各介面自己�
   assert.equal(parsePanelAction({ kind: "set-number", key: "3.steps" }), null);
   assert.equal(parsePanelAction({ kind: "set-toggle", key: "x", value: "yes" }), null);
   assert.equal(parsePanelAction({ kind: "nope" }), null);
+});
+
+test("helper 版本：旧于协议需要的版本时提示重新构建", async () => {
+  const { helperOutdated } = await import("../src/core/overlay/protocol.ts");
+  assert.equal(helperOutdated("0.5.0", "0.5.1"), true);
+  assert.equal(helperOutdated("0.5.1", "0.5.1"), false);
+  assert.equal(helperOutdated("0.6.0", "0.5.1"), false);
+  assert.equal(helperOutdated("0.4.9", "0.5.1"), true);
+  assert.equal(helperOutdated("0.5", "0.5.1"), true);
+  assert.equal(helperOutdated("dev", "0.5.1"), true);
+  assert.equal(helperOutdated(null, "0.5.1"), false);
+});
+
+test("跨软件拖拽：helper 回发的 files-copied / finished 只接受约定字段", async () => {
+  const { EXPECTED_HELPER_VERSION, helperOutdated } = await import("../src/core/overlay/protocol.ts");
+  assert.equal(helperOutdated(EXPECTED_HELPER_VERSION), false);
+  assert.equal(helperOutdated("0.6.0"), true);
+  assert.deepEqual(parseOverlayEvent('{"type":"external-drag-files-copied","sessionId":"s1"}'),
+    { type: "external-drag-files-copied", sessionId: "s1" });
+  assert.deepEqual(parseOverlayEvent('{"type":"external-drag-finished","sessionId":"s1","status":"dropped","effect":"copy"}'),
+    { type: "external-drag-finished", sessionId: "s1", status: "dropped", effect: "copy" });
+  for (const status of ["cancelled", "rejected", "error"]) {
+    assert.deepEqual(parseOverlayEvent(JSON.stringify({ type: "external-drag-finished", sessionId: "s2", status, effect: "none" })),
+      { type: "external-drag-finished", sessionId: "s2", status, effect: "none" });
+  }
+  assert.equal(parseOverlayEvent('{"type":"external-drag-files-copied"}'), null);
+  assert.equal(parseOverlayEvent('{"type":"external-drag-files-copied","sessionId":""}'), null);
+  assert.equal(parseOverlayEvent('{"type":"external-drag-finished","sessionId":"s1","status":"moved","effect":"copy"}'), null);
+  assert.equal(parseOverlayEvent('{"type":"external-drag-finished","sessionId":"s1","status":"dropped","effect":"move"}'), null);
+  assert.equal(parseOverlayEvent('{"type":"external-drag-finished","sessionId":"s1","status":"dropped"}'), null);
+});
+
+test("跨软件拖拽：解析 helper 的 external-drag-cached 回复", () => {
+  assert.deepEqual(parseOverlayEvent('{"type":"external-drag-cached","sessionId":"s1","keys":["a","b"]}'),
+    { type: "external-drag-cached", sessionId: "s1", keys: ["a", "b"] });
+  assert.deepEqual(parseOverlayEvent('{"type":"external-drag-cached","sessionId":"s1","keys":[]}'),
+    { type: "external-drag-cached", sessionId: "s1", keys: [] });
+  assert.equal(parseOverlayEvent('{"type":"external-drag-cached","sessionId":"s1","keys":[1]}'), null);
+  assert.equal(parseOverlayEvent('{"type":"external-drag-cached","sessionId":"","keys":[]}'), null);
+});
+
+test("跨软件拖拽：finished 可带目标程序名和文件数", () => {
+  assert.deepEqual(parseOverlayEvent('{"type":"external-drag-finished","sessionId":"s1","status":"dropped","effect":"copy","target":"微信","count":2}'),
+    { type: "external-drag-finished", sessionId: "s1", status: "dropped", effect: "copy", target: "微信", count: 2 });
 });

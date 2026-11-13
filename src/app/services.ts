@@ -18,9 +18,11 @@ export interface Services {
   pickJson(): Promise<{ name: string; text: string } | null>;
   pickImage(): Promise<PickedImage | null>;
   saveImage(png: Uint8Array, suggested: string): Promise<boolean>;
+  /** Saves a text file where the user chooses (the diagnostic report); false when cancelled. */
+  saveText?(text: string, suggested: string): Promise<boolean>;
   /** Tries every transport against the ComfyUI address; one human-readable line per check. */
   diagnose?(base: string): Promise<string[]>;
-  /** Saves an exchanged image next to the diagnostic log (F:\\waveplug\\studio\\reports\\debug_*). */
+  /** Saves an exchanged image next to the diagnostic log (G:\\waveplug\\studio\\reports\\debug_*). */
   debugSave?(name: string, png: Uint8Array): void;
   /** Lets the user pick the ComfyUI start script/exe; returns its native path. */
   pickLauncher?(): Promise<string | null>;

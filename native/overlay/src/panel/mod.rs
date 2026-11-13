@@ -20,6 +20,8 @@ use serde_json::{Map, Value};
 pub struct DraggedLayer {
     pub layer_id: u32,
     pub name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub thumb: Option<String>,
 }
 
 #[derive(Clone, Debug)]
@@ -27,7 +29,6 @@ pub struct ExternalLayerDrag {
     pub doc_id: u32,
     pub layers: Vec<DraggedLayer>,
     pub total_count: usize,
-    pub thumb: Option<String>,
 }
 
 pub trait Surface {
@@ -37,10 +38,16 @@ pub trait Surface {
     fn size(&self) -> egui::Vec2;
     /// takes in sections of state from the plugin (only those that changed)
     fn apply(&mut self, sections: &Map<String, Value>);
-    /// optional external drag source state (e.g. a WaveLayer row dragged over the native panel)
+    /// a WaveLayer reference drag started (Some) or ended (None); while it runs the surface
+    /// publishes its drop targets (crate::drag::targets) and highlights crate::drag::hovered()
     fn set_external_layer_drag(&mut self, _drag: Option<ExternalLayerDrag>) {}
-    /// whether this surface still owns a pending cross-window drag
-    fn has_external_layer_drag(&self) -> bool {
+    /// the drag engine saw the release over this surface's target `target`: the actions to send
+    /// (the same hit test that drew the card decided it, drag/session.rs)
+    fn external_drop(&mut self, _target: u32, _reference: &crate::drag::Reference) -> Vec<Value> {
+        Vec::new()
+    }
+    /// keep a temporarily collapsed surface expanded while it has ongoing work or local UI state
+    fn keep_expanded(&self) -> bool {
         false
     }
     /// draws the surface; returns the user's actions, as the surface's JSON, to send to the plugin

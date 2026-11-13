@@ -74,7 +74,7 @@ export function createHub(send: (m: OverlayCommand) => void) {
       }
     },
     receive(ev: OverlayEvent) {
-      if (ev.type === "ready" || ev.type === "comfy-status") return;
+      if (!("panel" in ev)) return;
       const e = entries.get(ev.panel);
       if (!e) return;
       if (ev.type === "view-request") { if (e.shown) e.surface.onViewRequest?.(); return; }

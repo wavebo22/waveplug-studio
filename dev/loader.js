@@ -1,10 +1,10 @@
 // WavePlug Studio — development loader.
 // Installed once (as a separate plugin, com.waveplug.studio.dev). Every time the panel opens or
-// ⟳ is clicked, it reads the latest build from F:\waveplug\studio\dist\plugin and runs it, so code
+// ⟳ is clicked, it reads the latest build from G:\waveplug\studio\dist\plugin and runs it, so code
 // changes take effect without closing Photoshop or reinstalling.
 (function () {
   "use strict";
-  var ROOT = "F:/waveplug/studio/dist/plugin/";
+  var ROOT = "G:/waveplug/studio/dist/plugin/";
   var storage = require("uxp").storage;
   var fs = storage.localFileSystem;
 

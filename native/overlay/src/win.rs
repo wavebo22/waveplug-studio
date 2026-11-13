@@ -31,10 +31,9 @@ use windows_sys::Win32::System::Threading::{
     OpenProcess, QueryFullProcessImageNameW, WaitForSingleObject,
 };
 use windows_sys::Win32::UI::HiDpi::GetDpiForMonitor;
-use windows_sys::Win32::UI::Input::KeyboardAndMouse::GetAsyncKeyState;
 use windows_sys::Win32::UI::WindowsAndMessaging::{
     CallWindowProcW, DefWindowProcW, EnumWindows, FindWindowW, GetAncestor,
-    GetClientRect, GetCursorPos, GetForegroundWindow, GetWindow, GetWindowLongPtrW, GetWindowRect,
+    GetCursorPos, GetForegroundWindow, GetWindow, GetWindowLongPtrW, GetWindowRect,
     GetWindowThreadProcessId, IsIconic, IsWindow, IsWindowVisible, PostMessageW,
     SetForegroundWindow, SetWindowLongPtrW, SetWindowPos, WindowFromPoint, WNDPROC,
 };
@@ -171,6 +170,24 @@ mod activation_tests {
     use super::*;
 
     #[test]
+    fn helper_windows_and_no_foreground_change_nothing() {
+        assert_eq!(steady_front("helper", "photoshop"), "photoshop");
+        assert_eq!(steady_front("none", "other"), "other");
+        assert_eq!(steady_front("helper", ""), "photoshop");
+        assert_eq!(steady_front("other", "photoshop"), "other");
+        assert_eq!(steady_front("overlay", "photoshop"), "overlay");
+    }
+
+    #[test]
+    fn parks_only_after_staying_away() {
+        let ticks = AtomicU32::new(0);
+        assert!(!idle_long_enough(&ticks));
+        assert!(idle_long_enough(&ticks));
+        ticks.store(0, Ordering::SeqCst);
+        assert!(!idle_long_enough(&ticks));
+    }
+
+    #[test]
     fn ordinary_clicks_do_not_activate_the_overlay() {
         assert_eq!(mouse_activate_result(false), Some(MA_NOACTIVATE));
     }
@@ -264,6 +281,45 @@ mod activation_tests {
     fn drag_position_uses_physical_screen_coordinates_without_scaling() {
         assert_eq!(drag_target((1000, 500), (300, 400), (320, 430)), (1020, 530));
     }
+
+    #[test]
+    fn panel_edges_snap_to_canvas_within_the_magnetic_threshold() {
+        assert_eq!(snap_axis(110, 200, 100, 900, 16), (100, -1));
+        assert_eq!(snap_axis(690, 200, 100, 900, 16), (700, 1));
+        assert_eq!(snap_axis(250, 200, 100, 900, 16), (250, 0));
+        assert_eq!(snap_axis(100, 900, 100, 900, 16), (100, 0));
+        assert_eq!(snap_threshold_px(1.0), 16);
+        assert_eq!(snap_threshold_px(1.5), 24);
+        assert_eq!(snap_threshold_px(2.0), 32);
+    }
+
+    #[test]
+    fn panel_drag_snaps_independently_to_all_four_canvas_edges() {
+        let bounds = RECT { left: 100, top: 200, right: 900, bottom: 800 };
+        assert_eq!(
+            snap_panel_target((110, 210), (0, 0), (0, 0), bounds, (200, 100), 16),
+            (100, 200, -1, -1)
+        );
+        assert_eq!(
+            snap_panel_target((710, 710), (0, 0), (0, 0), bounds, (200, 100), 16),
+            (700, 700, 1, 1)
+        );
+        assert_eq!(
+            snap_panel_target((350, 350), (0, 0), (0, 0), bounds, (200, 100), 16),
+            (350, 350, 0, 0)
+        );
+    }
+
+
+    #[test]
+    fn collapsed_panel_drag_reveal_zone_tracks_the_panel_width_and_top_edge() {
+        let panel = RECT { left: 100, top: 700, right: 440, bottom: 724 };
+        assert!(point_in_panel_reveal_zone(POINT { x: 120, y: 650 }, panel, 72));
+        assert!(point_in_panel_reveal_zone(POINT { x: 120, y: 710 }, panel, 72));
+        assert!(!point_in_panel_reveal_zone(POINT { x: 90, y: 710 }, panel, 72));
+        assert!(!point_in_panel_reveal_zone(POINT { x: 120, y: 627 }, panel, 72));
+        assert!(!point_in_panel_reveal_zone(POINT { x: 120, y: 725 }, panel, 72));
+    }
 }
 
 /// Keep ordinary clicks in the native surface without making it the foreground window.
@@ -339,18 +395,28 @@ struct Placed {
     panel: String,
     /// Photoshop's window when the panel was placed (moved / resized → ask for the canvas again)
     owner: RECT,
+    /// The actual Photoshop canvas/view bounds in physical screen pixels.
+    bounds: RECT,
     /// The desired screen-space geometry, independent of the physical parked window.
     at: (i32, i32),
     size: (i32, i32),
+    /// -1 = left/top, 0 = free, 1 = right/bottom.
+    snap: (i8, i8),
 }
 static PLACED: Mutex<Option<Placed>> = Mutex::new(None);
 /// how far the user dragged the panel from its corner (kept for the session, in physical px)
 static OFFSET: Mutex<(i32, i32)> = Mutex::new((0, 0));
+/// The snapped canvas edges are kept separately from the free-drag offset so they remain
+/// attached if Photoshop's canvas changes size or the panel is hidden and shown again.
+static SNAP: Mutex<(i8, i8)> = Mutex::new((0, 0));
+const SNAP_DISTANCE_LOGICAL: f64 = 16.0;
 
 #[derive(Clone, Copy)]
 struct DragOrigin {
     cursor: (i32, i32),
     window: (i32, i32),
+    bounds: RECT,
+    size: (i32, i32),
 }
 /// Absolute drag origin. Never derive movement from egui's local pointer delta after moving HWND.
 static DRAG_ORIGIN: Mutex<Option<DragOrigin>> = Mutex::new(None);
@@ -360,6 +426,42 @@ fn drag_target(window: (i32, i32), start: (i32, i32), now: (i32, i32)) -> (i32, 
         window.0.saturating_add(now.0.saturating_sub(start.0)),
         window.1.saturating_add(now.1.saturating_sub(start.1)),
     )
+}
+
+/// Snap one panel edge to the corresponding canvas edge when it is within the DPI-scaled
+/// magnetic range. Oversized panels are left free rather than snapping past the canvas.
+fn snap_axis(position: i32, size: i32, min: i32, max: i32, threshold: i32) -> (i32, i8) {
+    if size <= 0 || max <= min || size > max - min {
+        return (position, 0);
+    }
+    let left_distance = position.saturating_sub(min).abs();
+    let right_position = max.saturating_sub(size);
+    let right_distance = position.saturating_sub(right_position).abs();
+    if left_distance <= threshold && left_distance <= right_distance {
+        (min, -1)
+    } else if right_distance <= threshold {
+        (right_position, 1)
+    } else {
+        (position, 0)
+    }
+}
+
+fn snap_panel_target(
+    window: (i32, i32),
+    start: (i32, i32),
+    now: (i32, i32),
+    bounds: RECT,
+    size: (i32, i32),
+    threshold: i32,
+) -> (i32, i32, i8, i8) {
+    let (x, y) = drag_target(window, start, now);
+    let (x, snap_x) = snap_axis(x, size.0, bounds.left, bounds.right, threshold);
+    let (y, snap_y) = snap_axis(y, size.1, bounds.top, bounds.bottom, threshold);
+    (x, y, snap_x, snap_y)
+}
+
+fn snap_threshold_px(dpi_scale: f64) -> i32 {
+    (SNAP_DISTANCE_LOGICAL * dpi_scale.max(0.5)).round() as i32
 }
 
 fn wide(s: &str) -> Vec<u16> {
@@ -450,30 +552,140 @@ fn who(h: HWND) -> &'static str {
         "variants"
     } else if is_photoshop(h) {
         "photoshop"
+    } else if is_own_process(h) {
+        "helper"
     } else {
         "other"
     }
 }
 
-fn is_photoshop(h: HWND) -> bool {
+/// Another window of this helper: a menu (menu.rs), the drag card, a toast, the hover frame.
+/// Having one of them in front is not "the user went to another program".
+fn is_own_process(h: HWND) -> bool {
+    let mut pid = 0u32;
+    unsafe { GetWindowThreadProcessId(h, &mut pid) };
+    pid != 0 && pid == std::process::id()
+}
+
+/// The foreground as the show / park rules should see it: one of the helper's own windows, or
+/// no foreground window at all (Windows reports none for a moment while activation moves),
+/// changes nothing — whatever was in front before still counts.
+fn steady_front(now: &'static str, before: &'static str) -> &'static str {
+    match now {
+        "helper" | "none" => if before.is_empty() { "photoshop" } else { before },
+        other => other,
+    }
+}
+
+/// A surface leaves the desktop only after its Photoshop has been away for this many checks in a
+/// row (250 ms each): a dialog opening, a click on the taskbar's edge or a progress window
+/// taking the foreground for an instant must not flash the panels off and on.
+const PARK_AFTER_TICKS: u32 = 2;
+static LINKED_IDLE_TICKS: AtomicU32 = AtomicU32::new(0);
+static VARIANT_IDLE_TICKS: AtomicU32 = AtomicU32::new(0);
+/// Counts one more check without Photoshop in front; true once it has been long enough to park.
+fn idle_long_enough(ticks: &AtomicU32) -> bool {
+    ticks.fetch_add(1, Ordering::SeqCst) + 1 >= PARK_AFTER_TICKS
+}
+
+/// The full path of the program that owns window `h`.
+pub fn exe_path(h: HWND) -> Option<String> {
     if h.is_null() {
-        return false;
+        return None;
     }
     unsafe {
         let mut pid = 0u32;
         GetWindowThreadProcessId(h, &mut pid);
         let proc = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid);
         if proc.is_null() {
-            return false;
+            return None;
         }
         let mut buf = [0u16; 520];
         let mut len = buf.len() as u32;
         let ok = QueryFullProcessImageNameW(proc, 0, buf.as_mut_ptr(), &mut len) != 0;
         CloseHandle(proc);
-        ok && String::from_utf16_lossy(&buf[..len as usize])
-            .to_lowercase()
-            .ends_with("photoshop.exe")
+        ok.then(|| String::from_utf16_lossy(&buf[..len as usize]))
     }
+}
+
+fn is_photoshop(h: HWND) -> bool {
+    exe_path(h).is_some_and(|p| p.to_lowercase().ends_with("photoshop.exe"))
+}
+
+/// The program (exe file name) owning a top-level window, for the log.
+pub fn describe(root: isize) -> String {
+    exe_path(root as HWND)
+        .and_then(|p| p.rsplit(['\\', '/']).next().map(str::to_string))
+        .unwrap_or_else(|| "?".into())
+}
+
+/// A top-level window for the drag log: its class, rectangle, extended style, and which program
+/// has the foreground (to tell a Photoshop overlay window from Photoshop raising itself).
+pub fn window_info(root: isize) -> String {
+    let h = root as HWND;
+    let mut class = [0u16; 128];
+    let n = unsafe { windows_sys::Win32::UI::WindowsAndMessaging::GetClassNameW(h, class.as_mut_ptr(), class.len() as i32) };
+    let class = String::from_utf16_lossy(&class[..n.max(0) as usize]);
+    let r = window_rect(h).map(|r| format!("{},{},{},{}", r.left, r.top, r.right, r.bottom)).unwrap_or_else(|| "?".into());
+    let ex = unsafe { GetWindowLongPtrW(h, GWL_EXSTYLE) };
+    let front = describe(unsafe { GetForegroundWindow() } as isize);
+    format!("class={class} rect={r} ex=0x{ex:x} front={front}")
+}
+
+/// Every visible top-level window containing (x, y), topmost first (EnumWindows walks the
+/// z-order), up to 8, and both cursor readings with this thread's DPI awareness: evidence for a
+/// release judged to be over Photoshop while the user saw another program there.
+pub fn stack_at(x: i32, y: i32) -> String {
+    struct Found { pt: POINT, list: Vec<HWND> }
+    unsafe extern "system" fn each(h: HWND, l: LPARAM) -> i32 {
+        let f = &mut *(l as *mut Found);
+        if IsWindowVisible(h) != 0 {
+            if let Some(r) = window_rect(h) {
+                if f.pt.x >= r.left && f.pt.x < r.right && f.pt.y >= r.top && f.pt.y < r.bottom {
+                    f.list.push(h);
+                }
+            }
+        }
+        (f.list.len() < 8) as i32
+    }
+    let mut found = Found { pt: POINT { x, y }, list: Vec::new() };
+    unsafe { EnumWindows(Some(each), &mut found as *mut Found as LPARAM) };
+    let windows: Vec<String> = found
+        .list
+        .iter()
+        .map(|&h| {
+            let mut cloaked = 0u32;
+            unsafe {
+                windows_sys::Win32::Graphics::Dwm::DwmGetWindowAttribute(
+                    h,
+                    windows_sys::Win32::Graphics::Dwm::DWMWA_CLOAKED as u32,
+                    &mut cloaked as *mut u32 as *mut core::ffi::c_void,
+                    4,
+                )
+            };
+            format!("[{} {} cloaked={cloaked}]", describe(h as isize), window_info(h as isize))
+        })
+        .collect();
+    let mut logical = POINT { x: 0, y: 0 };
+    let mut physical = POINT { x: 0, y: 0 };
+    let awareness = unsafe {
+        GetCursorPos(&mut logical);
+        windows_sys::Win32::UI::WindowsAndMessaging::GetPhysicalCursorPos(&mut physical);
+        windows_sys::Win32::UI::HiDpi::GetAwarenessFromDpiAwarenessContext(
+            windows_sys::Win32::UI::HiDpi::GetThreadDpiAwarenessContext(),
+        )
+    };
+    format!(
+        "cursor={},{} physical={},{} dpi_awareness={awareness} stack={}",
+        logical.x, logical.y, physical.x, physical.y, windows.join(" ")
+    )
+}
+
+/// Photoshop's UI thread when Photoshop has the foreground (the WaveLayer drag begins there),
+/// else 0. A system drag shares its input state even after Alt+Tab moved the foreground away.
+pub fn photoshop_thread_in_front() -> u32 {
+    let h = unsafe { GetForegroundWindow() };
+    if is_photoshop(h) { unsafe { GetWindowThreadProcessId(h, null_mut()) } } else { 0 }
 }
 
 fn photoshop_window_ready(h: HWND) -> bool {
@@ -569,6 +781,16 @@ pub fn variant_window_exists() -> bool {
 }
 
 fn variant_park(h: HWND) {
+    if let Some(from) = on_screen(h) {
+        VARIANT_PARKED.store(true, Ordering::SeqCst);
+        crate::anim::slide(h as isize, &VARIANT_SLIDE, crate::anim::Place::Fixed(from), (-crate::anim::SLIDE_PX, 0), false, crate::anim::SLIDE_OUT_MS, Some(|h| variant_park_now(h as HWND)));
+        return;
+    }
+    VARIANT_SLIDE.fetch_add(1, Ordering::SeqCst);
+    variant_park_now(h);
+}
+
+fn variant_park_now(h: HWND) {
     let ok = unsafe {
         SetWindowPos(
             h,
@@ -593,7 +815,7 @@ fn variant_restore(h: HWND) {
         SetWindowPos(
             h,
             HWND_TOPMOST,
-            geom.x,
+            geom.x - crate::anim::SLIDE_PX,
             geom.y,
             geom.w,
             geom.h,
@@ -601,6 +823,8 @@ fn variant_restore(h: HWND) {
         )
     } != 0;
     if ok {
+        // in from the left edge of the canvas (anim.rs)
+        crate::anim::slide(h as isize, &VARIANT_SLIDE, crate::anim::Place::Live(variant_place_now), (-crate::anim::SLIDE_PX, 0), true, crate::anim::SLIDE_IN_MS, None);
         VARIANT_PARKED.store(false, Ordering::SeqCst);
         log::line(format!(
             "variants restored at {},{} size {}x{}",
@@ -885,6 +1109,9 @@ fn watch_variant(foreground: &str) {
     let active =
         photoshop_window_ready(owner) && matches!(foreground, "photoshop" | "variants" | "overlay");
     if !active {
+        if !VARIANT_PARKED.load(Ordering::SeqCst) && !idle_long_enough(&VARIANT_IDLE_TICKS) {
+            return;
+        }
         if !VARIANT_PARKED.load(Ordering::SeqCst) {
             // Record the resized dimensions before parking; never save the -32000 location.
             if let Some(r) = window_rect(hwnd) {
@@ -899,6 +1126,7 @@ fn watch_variant(foreground: &str) {
         }
         return;
     }
+    VARIANT_IDLE_TICKS.store(0, Ordering::SeqCst);
     if VARIANT_PARKED.load(Ordering::SeqCst) {
         variant_restore(hwnd);
     } else if let Some(r) = window_rect(hwnd) {
@@ -919,9 +1147,35 @@ fn window_rect(h: HWND) -> Option<RECT> {
     (!h.is_null() && unsafe { GetWindowRect(h, &mut r) } != 0).then_some(r)
 }
 
-/// Current cursor in the overlay's egui point coordinates. Uses the actual client origin,
-/// not the outer window rect, so DPI and the non-client frame cannot shift drop hit-testing.
-pub fn cursor_local(pixels_per_point: f32) -> Option<(f32, f32)> {
+pub fn cursor_screen() -> Option<(i32, i32)> {
+    let mut p = POINT { x: 0, y: 0 };
+    (unsafe { GetCursorPos(&mut p) } != 0).then_some((p.x, p.y))
+}
+
+fn point_in_panel_reveal_zone(cursor: POINT, panel: RECT, reveal_height_px: i32) -> bool {
+    cursor.x >= panel.left
+        && cursor.x < panel.right
+        && cursor.y >= panel.top.saturating_sub(reveal_height_px.max(0))
+        && cursor.y <= panel.bottom
+}
+
+/// During a WaveLayer drag, expand the collapsed bar when the cursor approaches the panel
+/// from the canvas above it. The extra hit zone is scaled using the monitor under the cursor.
+pub fn cursor_in_panel_reveal_zone(logical_height: f32) -> bool {
+    if !SHOWN.load(Ordering::SeqCst) || PARKED.load(Ordering::SeqCst) {
+        return false;
+    }
+    let hwnd = own_window();
+    let Some(panel) = window_rect(hwnd) else { return false };
+    let Some((x, y)) = cursor_screen() else { return false };
+    let scale = dpi_at(POINT { x, y }) / 96.0;
+    let reveal_height = (logical_height.max(0.0) as f64 * scale).ceil() as i32;
+    point_in_panel_reveal_zone(POINT { x, y }, panel, reveal_height)
+}
+
+/// The host window's client origin in screen px, while it is on screen: where the drag engine's
+/// targets (published in egui points × pixels_per_point) sit.
+pub fn client_origin() -> Option<(i32, i32)> {
     if !SHOWN.load(Ordering::SeqCst) || PARKED.load(Ordering::SeqCst) {
         return None;
     }
@@ -930,36 +1184,55 @@ pub fn cursor_local(pixels_per_point: f32) -> Option<(f32, f32)> {
         return None;
     }
     let mut origin = POINT { x: 0, y: 0 };
-    let mut client = RECT { left: 0, top: 0, right: 0, bottom: 0 };
-    let mut cursor = POINT { x: 0, y: 0 };
-    unsafe {
-        if GetClientRect(hwnd, &mut client) == 0
-            || ClientToScreen(hwnd, &mut origin) == 0
-            || GetCursorPos(&mut cursor) == 0
-        {
-            return None;
-        }
-    }
-    let x = cursor.x - origin.x;
-    let y = cursor.y - origin.y;
-    if x < 0 || y < 0 || x >= client.right || y >= client.bottom {
-        return None;
-    }
-    let scale = pixels_per_point.max(0.5);
-    Some((x as f32 / scale, y as f32 / scale))
+    (unsafe { ClientToScreen(hwnd, &mut origin) } != 0).then_some((origin.x, origin.y))
 }
 
-/// The WaveLayer panel owns the mouse capture; the native helper only polls the OS button state.
-pub fn left_button_down() -> bool {
-    unsafe { GetAsyncKeyState(0x01) < 0 }
+/// The top-level window under (x, y) (click-through layered windows, like the drag card, are
+/// skipped by WindowFromPoint), as an id for caching.
+pub fn root_at(x: i32, y: i32) -> isize {
+    unsafe { GetAncestor(WindowFromPoint(POINT { x, y }), GA_ROOT) as isize }
 }
 
-/// Escape is also polled natively because the pointer can be over this no-activate window.
-pub fn escape_down() -> bool {
-    unsafe { GetAsyncKeyState(0x1B) < 0 }
+/// Whether a top-level window belongs to another program: neither Photoshop nor this helper.
+/// Only over such a window does a WaveLayer drag become a drag to another program (OLE).
+pub fn is_foreign(root: isize) -> bool {
+    let h = root as HWND;
+    if h.is_null() {
+        return false;
+    }
+    let mut pid = 0u32;
+    unsafe { GetWindowThreadProcessId(h, &mut pid) };
+    pid != 0 && pid != std::process::id() && !is_photoshop(h)
+}
+
+/// The generate panel slides down a little before it is put away, and up into place when it
+/// comes back; the variant rail does the same sideways (anim.rs). One counter per window: a newer
+/// move of that window stops the slide that is running.
+static LINKED_SLIDE: AtomicU32 = AtomicU32::new(0);
+static VARIANT_SLIDE: AtomicU32 = AtomicU32::new(0);
+/// off screen: nothing to slide
+fn on_screen(h: HWND) -> Option<(i32, i32)> {
+    window_rect(h).filter(|r| r.left > PARK.0 + 1000 && r.top > PARK.1 + 1000).map(|r| (r.left, r.top))
+}
+fn linked_place() -> Option<(i32, i32)> {
+    PLACED.lock().ok().and_then(|p| p.as_ref().map(|p| (p.at.0, p.at.1)))
+}
+fn variant_place_now() -> Option<(i32, i32)> {
+    VARIANT_GEOMETRY.lock().ok().map(|g| (g.x, g.y))
 }
 
 fn park(me: HWND) {
+    // on screen: slide out first, then off screen (park_now); logically it is away already
+    if let Some(from) = on_screen(me) {
+        PARKED.store(true, Ordering::SeqCst);
+        crate::anim::slide(me as isize, &LINKED_SLIDE, crate::anim::Place::Fixed(from), (0, crate::anim::SLIDE_PX), false, crate::anim::SLIDE_OUT_MS, Some(|h| park_now(h as HWND)));
+        return;
+    }
+    LINKED_SLIDE.fetch_add(1, Ordering::SeqCst);
+    park_now(me);
+}
+
+fn park_now(me: HWND) {
     let ok = unsafe {
         SetWindowPos(
             me,
@@ -987,18 +1260,20 @@ fn restore_parked(me: HWND) {
     let Some((x, y, w, h)) = desired else {
         return;
     };
+    // it comes up from a little below its place (anim.rs); the slide ends on PLACED as it is then
     let ok = unsafe {
         SetWindowPos(
             me,
             HWND_TOPMOST,
             x,
-            y,
+            y + crate::anim::SLIDE_PX,
             w,
             h,
             SWP_NOACTIVATE | SWP_ASYNCWINDOWPOS,
         )
     } != 0;
     if ok {
+        crate::anim::slide(me as isize, &LINKED_SLIDE, crate::anim::Place::Live(linked_place), (0, crate::anim::SLIDE_PX), true, crate::anim::SLIDE_IN_MS, None);
         PARKED.store(false, Ordering::SeqCst);
         IS_TOPMOST.store(true, Ordering::SeqCst);
         log::line(format!("linked surface restored at {x},{y}"));
@@ -1061,7 +1336,11 @@ pub fn fit_height(height: f32) {
         if (pl.size.1 - h).abs() <= 1 {
             return;
         }
-        pl.at.1 = bottom_anchored_top(pl.at.1, pl.size.1, h);
+        pl.at.1 = if pl.snap.1 == -1 {
+            pl.at.1
+        } else {
+            bottom_anchored_top(pl.at.1, pl.size.1, h)
+        };
         pl.size.1 = h;
         (pl.at.0, pl.at.1, pl.size.0, h)
     };
@@ -1141,7 +1420,7 @@ pub fn show(panel: &str, view: Option<ScreenRect>, size: Vec2) {
     if let Ok(mut current) = CURRENT_PANEL.lock() {
         *current = Some(panel.to_string());
     }
-    let (x, y, w, h, owner_rect) = unsafe {
+    let (x, y, w, h, owner_rect, bounds, snap) = unsafe {
         let pt = match view {
             Some(v) => POINT {
                 x: ((v.left + v.right) / 2.0) as i32,
@@ -1199,11 +1478,32 @@ pub fn show(panel: &str, view: Option<ScreenRect>, size: Vec2) {
         let m = MARGIN * k;
         let w = size.x as f64 * k;
         let h = (size.y as f64 * k).min((area.3 - area.1 - 2.0 * m).max(200.0 * k));
-        // bottom-left corner of the canvas, moved by the user's drag, kept on the canvas
+        let bounds = RECT {
+            left: area.0.round() as i32,
+            top: area.1.round() as i32,
+            right: area.2.round() as i32,
+            bottom: area.3.round() as i32,
+        };
+        // Free positions retain the existing bottom-left-relative offset. When an edge was
+        // magnetically attached, recompute that edge from the latest canvas dimensions.
         let (ox, oy) = OFFSET.lock().map(|o| *o).unwrap_or((0, 0));
-        let x = (area.0 + m + ox as f64).clamp(area.0, (area.2 - w).max(area.0));
-        let y = (area.3 - h - m + oy as f64).clamp(area.1, (area.3 - h).max(area.1));
-        (x as i32, y as i32, w as i32, h as i32, window_rect(ps))
+        let mut snap = SNAP.lock().map(|s| *s).unwrap_or((0, 0));
+        if w > area.2 - area.0 { snap.0 = 0; }
+        if h > area.3 - area.1 { snap.1 = 0; }
+        if let Ok(mut saved) = SNAP.lock() { *saved = snap; }
+        let free_x = (area.0 + m + ox as f64).clamp(area.0, (area.2 - w).max(area.0));
+        let free_y = (area.3 - h - m + oy as f64).clamp(area.1, (area.3 - h).max(area.1));
+        let x = match snap.0 {
+            -1 => area.0,
+            1 => (area.2 - w).max(area.0),
+            _ => free_x,
+        };
+        let y = match snap.1 {
+            -1 => area.1,
+            1 => (area.3 - h).max(area.1),
+            _ => free_y,
+        };
+        (x as i32, y as i32, w as i32, h as i32, window_rect(ps), bounds, snap)
     };
     // Store the desired geometry before any parking; the physical parked HWND is never the
     // source of truth for restore, resizing, or user dragging.
@@ -1211,8 +1511,10 @@ pub fn show(panel: &str, view: Option<ScreenRect>, size: Vec2) {
         *p = owner_rect.map(|owner| Placed {
             panel: panel.to_string(),
             owner,
+            bounds,
             at: (x, y),
             size: (w, h),
+            snap,
         });
     }
     VIEW_REQUESTED.store(false, Ordering::SeqCst);
@@ -1288,10 +1590,17 @@ pub fn drag_started() {
         log::line("generate grip GetCursorPos failed at drag start");
         return;
     }
+    let Some((bounds, size)) = PLACED.lock().ok().and_then(|placed| {
+        placed.as_ref().map(|p| (p.bounds, p.size))
+    }) else {
+        return;
+    };
     if let Ok(mut origin) = DRAG_ORIGIN.lock() {
         *origin = Some(DragOrigin {
             cursor: (cursor.x, cursor.y),
             window: (rect.left, rect.top),
+            bounds,
+            size,
         });
     }
     log::line(format!(
@@ -1313,7 +1622,24 @@ pub fn drag_to_cursor() {
     if unsafe { GetCursorPos(&mut cursor) } == 0 {
         return;
     }
-    let (x, y) = drag_target(origin.window, origin.cursor, (cursor.x, cursor.y));
+    let threshold = snap_threshold_px(dpi_at(cursor) / 96.0);
+    let (x, y, snap_x, snap_y) = snap_panel_target(
+        origin.window,
+        origin.cursor,
+        (cursor.x, cursor.y),
+        origin.bounds,
+        origin.size,
+        threshold,
+    );
+    if let Ok(mut snap) = SNAP.lock() {
+        *snap = (snap_x, snap_y);
+    }
+    if let Ok(mut placed) = PLACED.lock() {
+        if let Some(p) = placed.as_mut() {
+            p.at = (x, y);
+            p.snap = (snap_x, snap_y);
+        }
+    }
     let ok = unsafe {
         SetWindowPos(
             own_window(),
@@ -1345,14 +1671,20 @@ pub fn drag_finished() {
     };
     if let (Ok(mut placed), Ok(mut offset)) = (PLACED.lock(), OFFSET.lock()) {
         if let Some(p) = placed.as_mut() {
-            let delta = (now.left - p.at.0, now.top - p.at.1);
-            offset.0 = offset.0.saturating_add(delta.0);
-            offset.1 = offset.1.saturating_add(delta.1);
+            let k = dpi_at(POINT { x: now.left, y: now.top }) / 96.0;
+            let margin = (MARGIN * k).round() as i32;
+            let free_origin = (
+                p.bounds.left.saturating_add(margin),
+                p.bounds.bottom.saturating_sub(p.size.1).saturating_sub(margin),
+            );
+            offset.0 = now.left.saturating_sub(free_origin.0);
+            offset.1 = now.top.saturating_sub(free_origin.1);
             p.at = (now.left, now.top);
             p.size = (now.right - now.left, now.bottom - now.top);
+            p.snap = SNAP.lock().map(|s| *s).unwrap_or(p.snap);
             log::line(format!(
-                "generate grip drag finished at {},{} delta={},{} offset={},{}",
-                now.left, now.top, delta.0, delta.1, offset.0, offset.1
+                "generate grip drag finished at {},{} snap={:?} offset={},{}",
+                now.left, now.top, p.snap, offset.0, offset.1
             ));
         }
     }
@@ -1398,7 +1730,7 @@ pub fn watch() {
 
             // Track the actual foreground HWND, not only the window's reported typing state.
             let foreground_hwnd = unsafe { GetForegroundWindow() };
-            let now_front = who(foreground_hwnd);
+            let now_front = steady_front(who(foreground_hwnd), front);
             let mut linked_front = now_front;
 
             // eframe/winit may overwrite extended styles after init() returns. Re-assert
@@ -1462,6 +1794,7 @@ pub fn watch() {
                 TYPING.load(Ordering::SeqCst),
             );
             if active {
+                LINKED_IDLE_TICKS.store(0, Ordering::SeqCst);
                 let has_placement = PLACED.lock().ok().is_some_and(|p| p.is_some());
                 if !has_placement {
                     // If the EXE started while Photoshop was minimised, no valid canvas rect
@@ -1481,7 +1814,11 @@ pub fn watch() {
                 }
             } else {
                 // A real logical attachment: another application, minimised Photoshop, or a
-                // closed Photoshop window must remove this panel from the visible desktop.
+                // closed Photoshop window must remove this panel from the visible desktop —
+                // once that has lasted (PARK_AFTER_TICKS), not for a foreground blink.
+                if !PARKED.load(Ordering::SeqCst) && !idle_long_enough(&LINKED_IDLE_TICKS) {
+                    continue;
+                }
                 if !PARKED.load(Ordering::SeqCst) {
                     set_topmost(me, false);
                     park(me);

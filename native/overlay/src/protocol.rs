@@ -65,10 +65,25 @@ pub enum Command {
         #[serde(default)]
         name: Option<String>,
         #[serde(default)]
+        #[allow(dead_code)] // legacy single-thumbnail field from older UXP bundles
         thumb: Option<String>,
     },
     /// Cancel a pending cross-panel drop (Escape or source panel cancellation).
     LayerDragCancel,
+    /// Show the independent cursor-following card for any WaveLayer drag.
+    LayerDragPreviewStart {
+        #[serde(default)]
+        layers: Vec<DraggedLayer>,
+        #[serde(rename = "totalCount", default)]
+        total_count: usize,
+    },
+    /// Update the action label and colour without rebuilding the preview thumbnails.
+    LayerDragPreviewUpdate {
+        action: String,
+        tone: String,
+    },
+    /// Hide the independent cursor-following drag card.
+    LayerDragPreviewEnd,
     /// A WaveLayer row is hovered: a thin click-through frame around `rect`, cut to `clip`
     /// (Photoshop's canvas view); `rect: null` takes it away. Drawn by frame.rs.
     HoverFrame {
@@ -95,6 +110,57 @@ pub enum Command {
     },
     /// Settings → 重启外置框架: start this exe again and quit, keeping the managed ComfyUI.
     RestartHelper,
+    /// A WaveLayer drag left the panel: the plugin is exporting `totalCount` layers as PNG for a
+    /// possible drag to another program (docs/CROSS_APP_DRAG_DROP_SPEC.md 7.3).
+    ExternalDragPrepare {
+        #[serde(rename = "sessionId")]
+        session_id: String,
+        #[serde(rename = "docId", default)]
+        #[allow(dead_code)] // logged by the plugin; the helper only needs the files
+        doc_id: u32,
+        #[serde(rename = "totalCount", default)]
+        total_count: usize,
+        /// each layer's version key, for reusing earlier exports (answered by external-drag-cached)
+        #[serde(default)]
+        keys: Vec<String>,
+    },
+    /// The exported files (paths in the plugin's temporary folder, layer order in `order`).
+    ExternalDragReady {
+        #[serde(rename = "sessionId")]
+        session_id: String,
+        files: Vec<crate::drag::transfer::SourceFile>,
+    },
+    /// One more layer is exported (`done` of `total`): the card shows how far it is.
+    ExternalDragProgress {
+        #[serde(rename = "sessionId")]
+        session_id: String,
+        done: usize,
+        #[serde(default)]
+        #[allow(dead_code)] // the helper already knows the total from prepare
+        total: usize,
+    },
+    /// WaveLayer's right-click menu: shown as a native menu at the cursor (menu.rs); the row
+    /// picked comes back as `menu-result`.
+    MenuOpen {
+        #[serde(rename = "menuId")]
+        menu_id: String,
+        #[serde(default)]
+        title: String,
+        items: Vec<crate::menu::MenuNode>,
+    },
+    /// Take the menu away (Esc in the plugin, the document changed); no id: whatever is open.
+    MenuClose {
+        #[serde(rename = "menuId", default)]
+        menu_id: Option<String>,
+    },
+    /// The drag ended in the plugin (or the export failed) before any system drag.
+    ExternalDragCancel {
+        #[serde(rename = "sessionId")]
+        session_id: String,
+        #[serde(default)]
+        #[allow(dead_code)]
+        reason: String,
+    },
 }
 
 fn default_close_comfy() -> bool {
@@ -128,6 +194,33 @@ pub enum Event {
         message: String,
         owned: bool,
     },
+    /// Which of prepare's `keys` the helper already has exported: the plugin skips those.
+    ExternalDragCached {
+        #[serde(rename = "sessionId")]
+        session_id: String,
+        keys: Vec<String>,
+    },
+    /// The exported files are in the helper's cache: the plugin may delete its copies.
+    ExternalDragFilesCopied {
+        #[serde(rename = "sessionId")]
+        session_id: String,
+    },
+    /// The drag to another program ended: dropped / cancelled / rejected / error; effect copy / none.
+    /// `target` is the program it was let go over by name ("微信", "文件夹"…), `count` the files.
+    ExternalDragFinished {
+        #[serde(rename = "sessionId")]
+        session_id: String,
+        status: &'static str,
+        effect: &'static str,
+        target: String,
+        count: usize,
+    },
+    /// The row picked in the menu `menu_id` (its id), or none when it was closed.
+    MenuResult {
+        #[serde(rename = "menuId")]
+        menu_id: String,
+        item: Option<String>,
+    },
 }
 
 pub fn parse(text: &str) -> Option<Command> {
@@ -136,6 +229,51 @@ pub fn parse(text: &str) -> Option<Command> {
 
 pub fn encode(ev: &Event) -> String {
     serde_json::to_string(ev).unwrap_or_default()
+}
+
+#[cfg(test)]
+mod external_drag_tests {
+    use super::*;
+
+    #[test]
+    fn parses_the_external_drag_commands() {
+        assert!(matches!(
+            parse(r#"{"type":"external-drag-prepare","sessionId":"d1","docId":7,"totalCount":2}"#),
+            Some(Command::ExternalDragPrepare { session_id, total_count: 2, .. }) if session_id == "d1"
+        ));
+        match parse(r#"{"type":"external-drag-ready","sessionId":"d1","files":[{"layerId":42,"name":"标题","path":"C:/t/a.png","order":0}]}"#) {
+            Some(Command::ExternalDragReady { session_id, files }) => {
+                assert_eq!(session_id, "d1");
+                assert_eq!(files[0].layer_id, 42);
+                assert_eq!(files[0].path, "C:/t/a.png");
+            }
+            other => panic!("{other:?}"),
+        }
+        assert!(matches!(
+            parse(r#"{"type":"external-drag-progress","sessionId":"d1","done":2,"total":5}"#),
+            Some(Command::ExternalDragProgress { done: 2, .. })
+        ));
+        assert!(matches!(
+            parse(r#"{"type":"external-drag-cancel","sessionId":"d1","reason":"internal-drop"}"#),
+            Some(Command::ExternalDragCancel { .. })
+        ));
+    }
+
+    #[test]
+    fn encodes_the_external_drag_events() {
+        assert_eq!(
+            encode(&Event::ExternalDragFilesCopied { session_id: "d1".into() }),
+            r#"{"type":"external-drag-files-copied","sessionId":"d1"}"#
+        );
+        assert_eq!(
+            encode(&Event::ExternalDragCached { session_id: "d1".into(), keys: vec!["k1".into()] }),
+            r#"{"type":"external-drag-cached","sessionId":"d1","keys":["k1"]}"#
+        );
+        assert_eq!(
+            encode(&Event::ExternalDragFinished { session_id: "d1".into(), status: "dropped", effect: "copy", target: "微信".into(), count: 2 }),
+            r#"{"type":"external-drag-finished","sessionId":"d1","status":"dropped","effect":"copy","target":"微信","count":2}"#
+        );
+    }
 }
 
 #[cfg(test)]
@@ -200,6 +338,26 @@ mod tests {
         assert!(matches!(
             parse(r#"{"type":"layer-drag-cancel"}"#),
             Some(Command::LayerDragCancel)
+        ));
+        match parse(r#"{"type":"layer-drag-preview-start","layers":[{"layerId":42,"name":"产品","thumb":"data:image/png;base64,AAAA"}],"totalCount":1}"#) {
+            Some(Command::LayerDragPreviewStart { layers, total_count: 1 }) => {
+                assert_eq!(layers[0].layer_id, 42);
+                assert_eq!(layers[0].thumb.as_deref(), Some("data:image/png;base64,AAAA"));
+            }
+            other => panic!("{other:?}"),
+        }
+        // Older UXP bundles may still include the now-ignored anchor fields.
+        assert!(matches!(
+            parse(r#"{"type":"layer-drag-preview-start","layers":[],"totalCount":0,"anchorX":0.1,"anchorY":0.9}"#),
+            Some(Command::LayerDragPreviewStart { total_count: 0, .. })
+        ));
+        assert!(matches!(
+            parse(r#"{"type":"layer-drag-preview-update","action":"删除","tone":"delete"}"#),
+            Some(Command::LayerDragPreviewUpdate { tone, .. }) if tone == "delete"
+        ));
+        assert!(matches!(
+            parse(r#"{"type":"layer-drag-preview-end"}"#),
+            Some(Command::LayerDragPreviewEnd)
         ));
         match parse(
             r#"{"type":"hover-frame","rect":{"left":10,"top":20,"right":110,"bottom":70},"clip":{"left":0,"top":0,"right":500,"bottom":400}}"#,

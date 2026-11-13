@@ -1,4 +1,5 @@
-// 文档瘦身: from a scan of the document, what can be removed and roughly how much it weighs.
+// 文档优化 (was 文档瘦身): from a scan of the document, what can be removed and roughly how much it
+// weighs, split into what never changes the picture (safe) and what is a trade-off (review).
 // Pure, so it's tested without Photoshop. Sizes are uncompressed estimates (PSD compresses), only
 // meant to rank the items.
 
@@ -33,6 +34,10 @@ export interface ScanLayer {
   /** groups: number of child layers */
   children?: number;
   smart?: ScanSmart;
+  /** the group it is in (null at the top); absent in scans that didn't read it */
+  parentId?: number | null;
+  /** 0–100; absent when not read */
+  opacity?: number;
 }
 
 export interface DocScan {
@@ -48,7 +53,14 @@ export interface DocScan {
   maxCompatibility?: boolean;
 }
 
-export type SlimKind = "variations" | "bigSmart" | "offCanvas" | "empty" | "hidden" | "channels";
+export type SlimKind = "variations" | "bigSmart" | "offCanvas" | "empty" | "hidden" | "transparent" | "channels";
+
+/** `safe`: the picture and everything editable stay as they are. `review`: something is given up
+ *  (a hidden backup, the resolution kept for scaling up later, saved selections). */
+export type SlimRisk = "safe" | "review";
+export const SLIM_RISK: Record<SlimKind, SlimRisk> = {
+  variations: "safe", offCanvas: "safe", empty: "safe", bigSmart: "review", hidden: "review", transparent: "review", channels: "review",
+};
 
 export interface SlimItem {
   kind: SlimKind;
@@ -63,6 +75,7 @@ export interface SlimItem {
   on: boolean;
   /** layers of this kind left alone, with the reason */
   skipped: string[];
+  risk: SlimRisk;
 }
 
 /** A smart object is "oversized" when shown at less than this fraction of its content's size. */
@@ -79,7 +92,7 @@ export function shownSize(q: Quad): { width: number; height: number } {
 }
 
 export function planSlim(scan: DocScan): SlimItem[] {
-  const bpp = scan.bytesPerPixel, items: SlimItem[] = [];
+  const bpp = scan.bytesPerPixel, items: Omit<SlimItem, "risk">[] = [];
   const canvas: Rect = { left: 0, top: 0, right: scan.width, bottom: scan.height };
   const inAi = (l: ScanLayer) => l.variationOf !== undefined;
 
@@ -119,21 +132,56 @@ export function planSlim(scan: DocScan): SlimItem[] {
   const empty = scan.layers.filter(l => !inAi(l) && (l.kind === "group" ? l.children === 0 : (l.kind === "pixel" && !area(l.bounds))));
   if (empty.length) items.push({ kind: "empty", label: "删除空图层和空组", detail: `${empty.length} 个`, bytes: 0, ids: empty.map(l => l.id), on: true, skipped: [] });
 
-  // hidden layers (off by default: often kept on purpose)
-  const hidden = scan.layers.filter(l => !inAi(l) && !l.visible && l.kind !== "group" && area(l.bounds) > 0);
-  if (hidden.length) items.push({ kind: "hidden", label: "删除隐藏图层", detail: `${hidden.length} 个（可能是你留着的备份，默认不勾）`,
-    bytes: hidden.reduce((n, l) => n + area(l.bounds) * bpp, 0), ids: hidden.map(l => l.id), on: false, skipped: [] });
+  // hidden layers and groups (off by default: often kept on purpose). A hidden group stands for
+  // everything in it; a layer inside one isn't listed again.
+  const byId = new Map(scan.layers.map(l => [l.id, l]));
+  const chain = (l: ScanLayer) => {
+    const out: ScanLayer[] = [];
+    for (let p = l.parentId == null ? undefined : byId.get(l.parentId); p && out.length < 64; p = p.parentId == null ? undefined : byId.get(p.parentId)) out.push(p);
+    return out;
+  };
+  const inside = new Map<number, ScanLayer[]>();
+  for (const l of scan.layers) for (const g of chain(l)) { const a = inside.get(g.id); if (a) a.push(l); else inside.set(g.id, [l]); }
+  /** pixels a layer, or a group with all it holds, takes */
+  const weight = (l: ScanLayer) => (l.kind === "group" ? inside.get(l.id) ?? [] : [l]).reduce((n, x) => n + (x.kind === "group" ? 0 : area(x.bounds)), 0);
+  const aiPart = (l: ScanLayer) => inAi(l) || chain(l).some(inAi);
+  const unseen = (l: ScanLayer) => !l.visible || chain(l).some(g => !g.visible);
+  const hidden = scan.layers.filter(l => !aiPart(l) && !l.visible && !chain(l).some(g => !g.visible) && weight(l) > 0);
+  if (hidden.length) {
+    const groups = hidden.filter(l => l.kind === "group").length;
+    items.push({ kind: "hidden", label: "删除隐藏的图层和组", detail: `${hidden.length} 个${groups ? `（其中 ${groups} 个组连同里面的图层）` : ""}，可能是你留着的备份，默认不勾`,
+      bytes: hidden.reduce((n, l) => n + weight(l) * bpp, 0), ids: hidden.map(l => l.id), on: false, skipped: [] });
+  }
+
+  // shown but with 不透明度 0: nothing of them is seen
+  const clear = scan.layers.filter(l => !aiPart(l) && !unseen(l) && l.opacity === 0 && weight(l) > 0 && !chain(l).some(g => g.opacity === 0));
+  if (clear.length) items.push({ kind: "transparent", label: "删除不透明度为 0 的图层", detail: `${clear.length} 个：开着眼睛但完全透明，画面里看不到`,
+    bytes: clear.reduce((n, l) => n + weight(l) * bpp, 0), ids: clear.map(l => l.id), on: false, skipped: [] });
 
   if (scan.alphaChannels.length) items.push({ kind: "channels", label: "删除 Alpha 通道", detail: `${scan.alphaChannels.length} 个存储的选区：${scan.alphaChannels.slice(0, 3).join("、")}${scan.alphaChannels.length > 3 ? "…" : ""}`,
     bytes: scan.alphaChannels.length * scan.width * scan.height * scan.bits / 8, ids: [], on: false, skipped: [] });
 
-  return items.sort((a, b) => b.bytes - a.bytes);
+  return items.sort((a, b) => b.bytes - a.bytes).map(i => ({ ...i, risk: SLIM_RISK[i.kind] }));
+}
+
+/** What the document holds, for the report's first line. `bytes`: its layers' pixels, uncompressed. */
+export function docStats(scan: DocScan): { layers: number; groups: number; smart: number; bytes: number } {
+  let layers = 0, groups = 0, smart = 0, px = 0;
+  for (const l of scan.layers) {
+    if (l.kind === "group") { groups++; continue; }
+    layers++;
+    if (l.smart) { smart++; px += Math.max(l.smart.width * l.smart.height, area(l.bounds)); } else px += area(l.bounds);
+  }
+  return { layers, groups, smart, bytes: px * scan.bytesPerPixel };
 }
 
 /** Things the tool can't change, worth knowing. */
 export function slimWarnings(scan: DocScan): string[] {
   const w: string[] = [];
   if (scan.maxCompatibility) w.push("PS 首选项「文件处理 → 最大兼容 PSD 和 PSB 文件」是开着的，会让文件大将近一倍；不需要给旧软件打开的话可以改成「询问」或「从不」");
+  const n = scan.layers.length;
+  if (n >= 800) w.push(`图层很多（${n} 个）：图层面板和保存都会变慢，定稿的部分可以合并或转成智能对象`);
+  if (scan.width * scan.height >= 120_000_000) w.push(`画布很大（${scan.width} × ${scan.height}）：每个铺满的图层约 ${Math.round(scan.width * scan.height * scan.bytesPerPixel / 1024 / 1024)} MB`);
   if (scan.bits > 8) w.push(`文档是 ${scan.bits} 位，比 8 位大一倍；不需要的话可以「图像 → 模式 → 8 位/通道」`);
   return w;
 }

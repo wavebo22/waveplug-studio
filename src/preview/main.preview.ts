@@ -68,6 +68,9 @@ class MockHost implements PsHost {
   activeLayer(): ActiveLayer | null { return this.docOpen ? { id: 7, name: "产品参考", kind: "pixel", rect: { left: 300, top: 200, right: 700, bottom: 650 } } : null; }
   activeLayers(): ActiveLayer[] { return this.docOpen ? [this.activeLayer()!, { id: 8, name: "瓶子", kind: "smartObject", rect: { left: 900, top: 300, right: 1300, bottom: 900 } }, { id: 9, name: "装饰组", kind: "group", rect: { left: 0, top: 0, right: 100, bottom: 100 } }] : []; }
   async layerImage() { const w = 400, h = 450, data = new Uint8Array(w * h * 4); for (let i = 0; i < w * h; i++) { data[i * 4] = 200; data[i * 4 + 1] = 120; data[i * 4 + 2] = 60; data[i * 4 + 3] = (i % w) > 40 ? 255 : 0; } await sleep(100); return { pixels: { width: w, height: h, channels: 4 as const, data }, rect: { left: 300, top: 200, right: 700, bottom: 650 } }; }
+  docVersion(_d: number) { return "1"; }
+  async exportLayerPng(_d: number, layerId: number, sessionId: string, order: number) { await sleep(80); const path = `/tmp/waveplug_drag_${sessionId}_${order}.png`; console.log("exported drag png", layerId, path); return { path, rect: { left: 0, top: 0, right: 10, bottom: 10 }, remove: async () => {} }; }
+  async layerDragInfo() { return { rect: { left: 0, top: 0, right: 10, bottom: 10 }, vector: null, res: 72 }; }
   async placeUpscaledLayer(_d: number, _l: number, _png: Uint8Array, _r: Rect, name: string) { console.log("placed smart object", name); await sleep(150); return 99; }
   listLayers(): LayerInfo[] { return [{ id: 1, name: "标题文字", depth: 0, kind: "text" }, { id: 42, name: "AI填充 · 橘子汁", depth: 0, kind: "group" }, { id: 7, name: "产品参考", depth: 0, kind: "pixel" }, { id: 3, name: "背景", depth: 0, kind: "pixel" }]; }
   async layerPixels(): Promise<Pixels> { return { width: 8, height: 8, channels: 3, data: new Uint8Array(192) }; }
@@ -139,6 +142,10 @@ class MockTools implements LayerTools {
   }
   async slim(kinds: SlimKind[]) { this.slimmed = true; return this.done({ done: kinds.length, skipped: [], unit: "项", note: "约 180 MB，保存后文件才会变小" }); }
   async purgeMemory() { await sleep(200); }
+  async renameLayers(names: { id: number; name: string }[]) {
+    for (const n of names) { const l = this.layers.find(x => x.id === n.id); if (l) l.name = n.name; }
+    return this.done({ done: names.length, skipped: [] });
+  }
   async splitIslands() { const so = this.layers.filter(l => l.selected && l.kind === "smartObject").length; return this.done({ done: this.pixels().done + so, skipped: [], note: so ? `${so} 个智能对象已栅格化` : undefined }); }
 }
 
@@ -404,6 +411,8 @@ async function boot() {
     async pickJson() { return null; },
     async pickImage() { return { name: "参考.png", bytes: new Uint8Array(), url: swatch(3, 80, 80) }; },
     async saveImage() { return true; },
+    // the preview keeps the report where a test (or the console) can read it
+    async saveText(text: string, suggested: string) { (window as any).__lastReport = { text, suggested }; console.info("[mock] saveText", suggested, text.length); return true; },
     async pickLauncher() { return "J:\\AI things\\ComfyUI\\ComfyUI_windows_portable\\run_nvidia_gpu.bat"; },
     async launch() { setTimeout(() => { comfy.online = true; }, 5000); return null; },
     version: "0.1.0 preview",

@@ -4,20 +4,42 @@
 import { encodePng, type Pixels, withPlacementHints } from "../core/image/png.ts";
 import { type Rect, nonZeroBounds, rectH, rectW } from "../core/image/region.ts";
 import { placeGray } from "../core/image/compose.ts";
-import { flushLog, log } from "../app/log.ts";
+import { crumb, flushLog, log } from "../app/log.ts";
 import type { CanvasView } from "../core/overlay/protocol.ts";
+import type { VectorInput } from "../core/overlay/svgFragment.ts";
 import { type ActiveLayer, type Capture, type DocInfo, BLEND_PREFIX, EXPAND_PREFIX, EXTRACT_PREFIX, FILL_PREFIX, GENERATE_PREFIX, UPSCALE_PREFIX, type FillGroup, type LayerInfo, type Pads, type PsHost, type Variation, type VariationMask, padsLabel, parsePads } from "./host.ts";
 
 declare const require: (m: string) => any;
 
 const ps = () => require("photoshop");
 const uxpStorage = () => require("uxp").storage;
-const DONT = { dialogOptions: "dontDisplay" };
+// "silent", not "dontDisplay": with dontDisplay Photoshop still puts up its own alert for every
+// command it refuses (「WavePlug Studio: 命令“删除”当前不可用」), also for the ones the plugin only
+// tries and has a fallback for. The refusal still comes back as an error result; the plugin
+// reports what matters in its own status line.
+const DONT = { dialogOptions: "silent" };
 const SRGB = "sRGB IEC61966-2.1";
 const VARIATION = /^v(\d+)(?:\s*·\s*(.*))?$/;
 
+/**
+ * batchPlay without Photoshop's error alerts: every command runs "silent" unless it asks for its
+ * dialog (`dialogOptions: "display"`). A refused command comes back as `{ _obj: "error" }` as
+ * before; refusals of anything but a read are logged, so the log shows what Photoshop turned down
+ * even where the caller had a fallback.
+ */
 export async function play(descriptors: object[]): Promise<any[]> {
-  return ps().action.batchPlay(descriptors, {});
+  const quiet = descriptors.map(d => {
+    const o = (d as any)._options;
+    return o?.dialogOptions === "display" ? d : { ...d, _options: { ...o, dialogOptions: "silent" } };
+  });
+  const out: any[] = await ps().action.batchPlay(quiet, {});
+  out?.forEach?.((r, i) => {
+    const d = descriptors[i] as any;
+    if (r?._obj === "error" && d?._obj !== "get" && r.result !== -128) {
+      log("warn", "photoshop refused", d?._obj, JSON.stringify({ message: r.message, result: r.result, target: d?._target }).slice(0, 400));
+    }
+  });
+  return out;
 }
 
 const modalDone: ((name: string) => void)[] = [];
@@ -30,6 +52,8 @@ export function onModalDone(cb: (name: string) => void): () => void {
 
 /** `interactive`: Photoshop dialogs (图层样式) may open while it runs */
 export async function modal<T>(name: string, fn: (ctx: any) => Promise<T>, opts: { interactive?: boolean } = {}): Promise<T> {
+  // every Photoshop command the plugin runs, for the report (not the constant thumbnail / selection ones)
+  if (!/缩略图|选择图层/.test(name)) crumb("PS：" + name.replace(/^WavePlug\s*/, ""));
   try { return await ps().core.executeAsModal(fn, { commandName: name, ...opts }); }
   finally { for (const cb of modalDone) { try { cb(name); } catch (e) { log("warn", "modal done", e); } } }
 }
@@ -366,6 +390,40 @@ export class UxpHost implements PsHost {
         return { pixels, rect: { left: b.left, top: b.top, right: b.left + d.width, bottom: b.top + d.height } };
       } finally { r.imageData.dispose(); }
     });
+  }
+
+  docVersion(docId: number): string | null {
+    try {
+      const h = docById(docId)?.activeHistoryState;
+      return h && h.id != null ? String(h.id) : null;
+    } catch { return null; }
+  }
+
+  async layerDragInfo(docId: number, layerId: number, kind: string): Promise<{ rect: Rect | null; vector: VectorInput | null; res: number }> {
+    const doc = docById(docId);
+    const ref = [{ _ref: "layer", _id: layerId }, { _ref: "document", _id: docId }];
+    const [layer] = await play([{ _obj: "get", _target: ref, _options: DONT }]);
+    const b = layer?.boundsNoEffects ?? layer?.bounds;
+    const rect = b ? boundsOf(b, { left: 0, top: 0, right: 0, bottom: 0 }) : null;
+    const res = Number(doc?.resolution) || 72;
+    if (kind !== "text" && kind !== "shape") return { rect, vector: null, res };
+    let path: any;
+    if (kind === "shape") {
+      [path] = await play([{ _obj: "get", _target: [{ _ref: "path", _enum: "path", _value: "vectorMask" }, ...ref], _options: DONT }]);
+    }
+    return { rect, res, vector: { kind, layer, path, res, docW: Number(doc?.width) || 0, docH: Number(doc?.height) || 0 } };
+  }
+
+  async exportLayerPng(docId: number, layerId: number, sessionId: string, order: number): Promise<{ path: string; rect: Rect; remove(): Promise<void> }> {
+    const { pixels, rect } = await this.layerImage(docId, layerId);
+    const fs = uxpStorage().localFileSystem;
+    const folder = await fs.getTemporaryFolder();
+    const file = await folder.createFile(`waveplug_drag_${sessionId}_${order}.png`, { overwrite: true });
+    await file.write(encodePng(pixels), { format: uxpStorage().formats.binary });
+    const path = String(file?.nativePath ?? "");
+    const remove = async () => { try { await file.delete(); } catch (e) { log("warn", "drag png not deleted", e); } };
+    if (!path) { await remove(); throw new Error("临时文件没有原生路径"); }
+    return { path, rect, remove };
   }
 
   async placeUpscaledLayer(docId: number, layerId: number, png: Uint8Array, rect: Rect, name: string): Promise<number> {

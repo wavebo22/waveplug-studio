@@ -2,13 +2,13 @@
 
 > 接手开发先读 [`HANDOFF.md`](HANDOFF.md)：架构、协议、怎么新增一个外附介面。
 
-UXP 插件面板里的东西画不出面板边界。这个 Windows 小程序和插件通过本机 WebSocket 通信，在面板外面显示插件的界面（外附介面）。现在只有一个：**外置生成面板**——Photoshop 文档有选区时出现在画布右下角，内容和插件的生成页一样。
+UXP 插件面板里的东西画不出面板边界。这个 Windows 小程序和插件通过本机 WebSocket 通信，在面板外面显示插件的界面（外附介面）。现在只有一个：**外置生成面板**——Photoshop 文档有选区时出现在画布左下角，内容和插件的生成页一样。
 
 ## 怎么用
 
 1. **编译**（Windows 主机）：装好 Rust（<https://rustup.rs>，按提示装 Visual Studio C++ 生成工具），双击 `build.cmd`。它先跑测试，再编译，把新的 exe 放进 `dist`、`dist\plugin`、`dist\dev`（正在运行的旧 exe 先改名为 `waveplug-overlay.old-*.exe`，不结束它）。正在运行的外置框架几秒内会自动换成新版本，它启动的 ComfyUI 不会被关闭。
-2. **插件**：在 PS 开发版面板点 ⟳。日志 `reports/uxp_runtime.log` 里出现 `overlay connected` / `overlay ready 0.2.0` 就连上了。
-3. 在 PS 里画一个选区：画布右下角出现外置生成面板；取消选区就消失。
+2. **插件**：在 PS 开发版面板点 ⟳。日志 `reports/uxp_runtime.log` 里出现 `overlay connected` / `overlay ready <版本号>`（应与 `Cargo.toml` 的 version 一致）就连上了。
+3. 在 PS 里画一个选区：画布左下角出现外置生成面板；取消选区就消失。
 
 小程序没有窗口、没有托盘图标，平时在后台等插件；再双击一次不会开第二个。不运行它时插件和以前完全一样。退出：任务管理器结束 `waveplug-overlay.exe`。
 

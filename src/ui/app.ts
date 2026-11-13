@@ -5,16 +5,16 @@ import { type Comfy, ComfyError } from "../core/comfy/client.ts";
 import type { Rect } from "../core/image/region.ts";
 import { asApiGraph } from "../core/workflow/api.ts";
 import { MAX_SEED, randomSeed } from "../core/workflow/inject.ts";
-import { normalizeVariationCount } from "../core/workflow/variationCount.ts";
+import { normalizeVariationCount, stepVariationCountByWheel } from "../core/workflow/variationCount.ts";
 import { type Binding, type Profile, type TaskType, ROLE_LABEL, carryOver, inpaintLike, newProfile, validateProfile } from "../core/workflow/profile.ts";
 import { isBlendGraph, recognize } from "../core/workflow/recognize.ts";
 import { uiToApi } from "../core/workflow/uiToApi.ts";
 import { findLocalMaskLinks } from "../core/workflow/localMask.ts";
 import { MAX_REFERENCES, findReferenceSlots, planLayerReferenceDrop, type LayerReferenceCandidate } from "../core/workflow/references.ts";
-import { MAX_UPSCALE_EDGE, type RefSource, StashedResult, runInpaint } from "../app/generate.ts";
+import { MAX_UPSCALE_EDGE, type RefSource, type RunResult, StashedResult, runInpaint } from "../app/generate.ts";
 import { type ProfileState, type Services, type Settings, store } from "../app/services.ts";
 import type { DocInfo, FillGroup, Pads, Variation } from "../ps/host.ts";
-import { log, withTimeout } from "../app/log.ts";
+import { crumb, diagnosticReport, log, logProblems, withTimeout } from "../app/log.ts";
 import { openCalibration } from "./calibrate.ts";
 import { h, icon, listen, replace } from "./dom.ts";
 import { encodePng } from "../core/image/png.ts";
@@ -24,6 +24,7 @@ import { RATIOS, createExpandEditor } from "./expandEditor.ts";
 import { createToolsView } from "./tools.ts";
 import { type Overlay, connectOverlay } from "../app/overlay.ts";
 import type { PanelParam } from "../core/overlay/generatePanel.ts";
+import { EXPECTED_HELPER_VERSION, helperOutdated } from "../core/overlay/protocol.ts";
 import { attachGenerateSurface } from "./generateSurface.ts";
 import { attachVariantsSurface } from "./variantsSurface.ts";
 
@@ -74,6 +75,18 @@ type RefSlot = RefSource & { thumb?: string };
 
 export function mountApp(root: HTMLElement, svc: Services) {
   let settings: Settings = store.settings();
+  // One-time lifecycle defaults for the design-only development installation.
+  // Keep these user-editable after migration; do not reset them on every panel reload.
+  const DEV_LIFECYCLE_KEY = "wp.dev.lifecycleConfigured.v1";
+  if (svc.devReload && localStorage.getItem(DEV_LIFECYCLE_KEY) !== "1") {
+    settings.helperAutoStart = true;
+    settings.comfyAutoStartWithPhotoshop = true;
+    settings.comfyCloseWithPhotoshop = true;
+    settings.comfyNoBrowser = true;
+    settings.debugFiles = false;
+    store.saveSettings(settings);
+    localStorage.setItem(DEV_LIFECYCLE_KEY, "1");
+  }
   let profiles: Profile[] = store.profiles();
   // Each mode (局部重绘 / 融图 / 扩图 / 文生图 / 放大) has its own current workflow.
   const modeOf = (p: Profile): TaskType => p.taskType ?? "inpaint";
@@ -87,6 +100,9 @@ export function mountApp(root: HTMLElement, svc: Services) {
     return profiles.find(p => p.id === id && modeOf(p) === m) ?? profiles.find(p => modeOf(p) === m) ?? null;
   };
   let mode: TaskType = settings.mode ?? "inpaint";
+  // Explicit mode/workflow choices must win over an in-flight Photoshop selection refresh.
+  let modeIntentRevision = 0;
+  let hasObservedFillState = false;
   let profile: Profile | null = pickFor(mode);
   let pstate: ProfileState | null = profile ? store.state(profile.id) : null;
   let comfy: Comfy = svc.comfy(settings.comfyUrl);
@@ -112,7 +128,10 @@ export function mountApp(root: HTMLElement, svc: Services) {
   const refs: Record<number, RefSlot | undefined> = {};
   let layerReferenceDropInProgress = false;
   let run: null | { stage: string; progress: number | null; detail: string; promptId?: string; signal: { aborted: boolean } } = null;
+  let lastCutout: { group: FillGroup; cutout: NonNullable<RunResult["cutout"]> } | null = null;
   let status: { text: string; kind: "info" | "ok" | "error" } = { text: "就绪", kind: "info" };
+  let connectionCheckSeq = 0;
+  let lastConnectionError: string | null = null;
   let stash: Uint8Array | null = null;
   let pads: Pads = { left: 0, right: 0, top: 0, bottom: 0 };
   const padTotal = () => pads.left + pads.right + pads.top + pads.bottom;
@@ -120,22 +139,25 @@ export function mountApp(root: HTMLElement, svc: Services) {
   // ── skeleton ──
   const connEl = h("button", { class: "conn", title: "ComfyUI 连接设置", onClick: () => openSettings() });
   const targetEl = h("span", { class: "target" });
-  const historyEl = h("div", { class: "history vars" });
-  const varPromptEl = h("div", { class: "var-prompt" });
-  const varCountEl = h("span", { class: "hint" });
-  const regenBtn = h("button", { class: "regen", onClick: () => void regenerate() }, icon("refresh", 12), h("span", null, "再生成"));
   const flowName = h("span", { class: "flow-name" });
   const flowBtn = h("button", { class: "flow-btn", title: "切换、导入或校准工作流", onClick: () => openWorkflows() }, icon("flow", 14), flowName, icon("chevron", 12));
   // UXP's native select can fail to commit a new choice during panel refreshes.
   // A numeric field commits on input and change, without being reset while focused.
-  const countLabel = h("span", { class: "count-label", title: "本次生成数量" }, "×");
+  const countLabel = h("button", { class: "count-reset", title: "重置数量为 1", "aria-label": "重置数量为 1" }, "×");
   const countInput = h("input", { class: "field count-input", type: "number", min: "1", max: "4", step: "1",
-    value: "1", title: "本次生成数量（1～4）", "aria-label": "生成数量" }) as HTMLInputElement;
+    value: "1", title: "本次生成数量（1～4）；鼠标滚轮可增减", "aria-label": "生成数量" }) as HTMLInputElement;
   let countEditing = false, countEditingProfile: string | null = null;
   const saveCount = (n: number) => {
     if (!pstate || !profile || pstate.count === n) return;
     pstate.count = n;
     store.saveState(profile.id, pstate);
+  };
+  const resetCount = () => {
+    countInput.value = "1";
+    countEditing = false;
+    countEditingProfile = profile?.id ?? null;
+    saveCount(1);
+    renderAction();
   };
   const commitCount = () => {
     // A mode/profile switch during an edit must not save the old digit to the new workflow.
@@ -149,6 +171,7 @@ export function mountApp(root: HTMLElement, svc: Services) {
     countInput.value = String(n);
     saveCount(n);
   };
+  countLabel.addEventListener("click", resetCount);
   countInput.addEventListener("focus", () => { countEditing = true; countEditingProfile = profile?.id ?? null; });
   countInput.addEventListener("input", () => {
     // Store a valid single digit immediately; partial values wait for change/blur.
@@ -156,7 +179,17 @@ export function mountApp(root: HTMLElement, svc: Services) {
   });
   countInput.addEventListener("change", commitCount);
   countInput.addEventListener("blur", () => { commitCount(); countEditing = false; });
-  const compareBtn = h("button", { class: "icon-btn sm compare", title: "按住查看原图（隐藏当前填充）" }, icon("eye", 14));
+  countInput.addEventListener("wheel", e => {
+    const wheel = e as WheelEvent;
+    if (!Number.isFinite(wheel.deltaY) || wheel.deltaY === 0) return;
+    wheel.preventDefault();
+    const current = normalizeVariationCount(countInput.value);
+    const next = stepVariationCountByWheel(countInput.value, wheel.deltaY);
+    if (next === current) return;
+    countInput.value = String(next);
+    saveCount(next);
+    renderAction();
+  });
   const prompt = h("textarea", { class: "prompt", rows: 4 }) as HTMLTextAreaElement;
   const refsEl = h("div", { class: "refs" });
   const promptHint = h("div", { class: "prompt-hint" });
@@ -235,8 +268,10 @@ export function mountApp(root: HTMLElement, svc: Services) {
 
   // 抠图 → 拆图: remove the cut-out object from the original afterwards (局部重绘's removal)
   const exRemoveBox = h("input", { type: "checkbox", onChange: (e: Event) => { settings.extractRemove = (e.target as HTMLInputElement).checked; store.saveSettings(settings); } }) as HTMLInputElement;
-  const exRemoveRow = h("label", { class: "param check-row ex-remove", title: "抠出来之后，用「局部重绘」模式里的移除工作流（提示词留空 = 移除）把原图里的这个物件去掉，结果放在抠图下面一层，相当于把它拆成单独的一层" },
+  const exRemoveLabel = h("label", { class: "check-row ex-remove", title: "抠出来之后，用「局部重绘」模式里的移除工作流（提示词留空 = 移除）把原图里的这个物件去掉，结果放在抠图下面一层，相当于把它拆成单独的一层" },
     exRemoveBox, h("span", null, "抠完后从原图移除（拆图）"));
+  const exBackgroundBtn = h("button", { class: "btn ex-background", type: "button", title: "完成一次抠图后可手动补充原背景", onClick: () => void supplementBackground() }, "补充背景") as HTMLButtonElement;
+  const exRemoveRow = h("div", { class: "param ex-remove-row" }, exRemoveLabel, exBackgroundBtn);
 
   const mainEl = h("main", { class: "scroll" });
   const footEl = h("footer", { class: "foot" });
@@ -261,7 +296,7 @@ export function mountApp(root: HTMLElement, svc: Services) {
   root.append(
     h("header", { class: "top" },
       h("div", { class: "brand" }, h("span", { class: "mark" }, "W"), h("span", { class: "brand-name" }, "WavePlug"),
-        svc.devReload ? h("button", { class: "icon-btn dev-reload", title: "重新加载开发版代码（F:\\waveplug\\studio\\dist\\plugin）", onClick: () => svc.devReload!() }, icon("refresh", 13)) : null),
+        svc.devReload ? h("button", { class: "icon-btn dev-reload", title: "重新加载开发版代码（G:\\waveplug\\studio\\dist\\plugin）", onClick: () => svc.devReload!() }, icon("refresh", 13)) : null),
       h("div", { class: "top-right" }, flowBtn, connEl)),
     (mainEl.append(viewEl, (genView.append(
       modeEl,
@@ -273,9 +308,6 @@ export function mountApp(root: HTMLElement, svc: Services) {
         h("div", { class: "ctx-row" }, targetEl, selEl),
         h("div", { class: "gen-row" }, countLabel, countInput, genBtn),
         progEl),
-      h("section", { class: "card" },
-        h("div", { class: "card-head" }, h("span", { class: "label" }, "变体"), varCountEl, h("span", { class: "grow" }), compareBtn, regenBtn),
-        historyEl, varPromptEl),
       h("section", { class: "card adv" }, advHead, advBody)), genView), toolsView.el), mainEl),
     (footEl.append(statusEl, h("span", { class: "ver" }, svc.version)), footEl),
     sheetHost);
@@ -283,11 +315,6 @@ export function mountApp(root: HTMLElement, svc: Services) {
   // re-check the 生成 button as the user types (a required prompt enables it)
   prompt.addEventListener("input", () => { promptHint.hidden = !!prompt.value; renderFav(); if (!run) renderAction(); });
   prompt.addEventListener("input", () => { if (pstate && profile) { pstate.prompt = prompt.value; store.saveState(profile.id, pstate); } });
-  // compare: hold to see the original (the fill group hidden), release to restore
-  const showOriginal = (hide: boolean) => { if (group && !run) void svc.host.setFillVisible(group, !hide).catch(e => log("warn", "compare", e)); compareBtn.classList.toggle("on", hide); };
-  compareBtn.addEventListener("mousedown", () => showOriginal(true));
-  compareBtn.addEventListener("mouseup", () => showOriginal(false));
-  compareBtn.addEventListener("mouseleave", () => { if (compareBtn.classList.contains("on")) showOriginal(false); });
   genBtn.addEventListener("click", () => { if (run) cancel(); else if (conn.state !== "ok") void launchComfy(); else void generate(); });
   advHead.addEventListener("click", () => { settings.advancedOpen = !settings.advancedOpen; store.saveSettings(settings); renderAdvanced(); });
 
@@ -332,31 +359,8 @@ export function mountApp(root: HTMLElement, svc: Services) {
     targetEl.title = selectionBased ? "仅当选区蒙版与当前 AI 图层逐像素相同时增加变体，否则新建 AI 图层"
       : add ? "沿用当前选中 AI 图层的蒙版继续生成变体" : "新建 AI 图层；选择其他 AI 图层即可查看对应变体";
     targetEl.className = "target " + (add && !selectionBased ? "cont" : "new");
-    const ratio = group ? (group.rect.bottom - group.rect.top) / Math.max(1, group.rect.right - group.rect.left) : 1;
-    const h0 = Math.round(Math.max(56, Math.min(132, 96 * ratio)));
-    const tiles: HTMLElement[] = variations.map(v => {
-      const thumb = thumbs.get(`${group!.docId}:${v.layerId}`);
-      return h("div", { class: "var" + (v.visible ? " on" : ""), title: v.prompt || "（无提示词）" },
-        h("button", { class: "var-img", style: `height:${h0}px`, onClick: () => showVariation(v) },
-          thumb ? h("img", { src: thumb }) : h("span", { class: "tile-ph" }, icon("image", 16))),
-        h("span", { class: "var-badge" }, String(v.number)),
-        h("button", { class: "var-del", title: "删除这个变体", onClick: () => deleteVariation(v) }, icon("close", 10)));
-    });
-    if (run) tiles.push(h("div", { class: "var pending" },
-      h("div", { class: "var-img", style: `height:${h0}px` },
-        h("span", { class: "var-fill", style: `width:${Math.round((run.progress ?? 0) * 100)}%` }),
-        h("span", { class: "var-wait" }, `${Math.round((run.progress ?? 0) * 100)}%`))));
-    if (!tiles.length) tiles.push(h("div", { class: "history-empty" }, group ? "这个填充还没有变体" : "生成的结果会以变体出现在这里，点击即可切换"));
-    varCountEl.textContent = variations.length ? `${variations.length} 个` : "";
-    const shown = variations.find(x => x.visible) ?? variations[variations.length - 1];
-    regenBtn.hidden = !group || !shown || group.kind === "upscale";
-    regenBtn.disabled = !!run;
-    regenBtn.title = !shown ? "" : group?.kind === "outpaint"
-      ? `用变体 ${shown.number} 的提示词和原来的扩展尺寸，再生成新的变体`
-      : `用变体 ${shown.number} 的提示词「${shown.prompt || "移除"}」和原来的遮罩，再生成新的变体（不读取当前选区和输入框）`;
-    replace(historyEl, ...tiles);
-    const active = variations.find(v => v.visible);
-    replace(varPromptEl, active ? h("span", null, h("span", { class: "muted" }, `变体 ${active.number}：`), active.prompt || "（无提示词）") : null);
+    // Keep variant thumbnails for the separate native variant rail; the main generate page
+    // no longer renders its own variation card.
     void loadThumbs();
     // Keep the independent native variant rail synced even while the generate panel is hidden.
     variantSurface?.refresh();
@@ -522,7 +526,7 @@ export function mountApp(root: HTMLElement, svc: Services) {
     selEl.className = "sel-state" + (!sel && !group ? " warn" : "");
   }
 
-  function blockedReason(text = prompt.value, regenerating = false): string | null {
+  function blockedReason(text = prompt.value): string | null {
     if (!profile) return mode === "outpaint" ? "请先导入扩图工作流（含「外补画板」节点）" : mode === "txt2img" ? "请先导入文生图工作流" : mode === "upscale" ? "请先导入放大工作流" : mode === "blend" ? "请先导入融图工作流（含融图 LoRA）" : mode === "extract" ? "请先导入抠图工作流（如心宝强化抠图）" : "请先导入工作流";
     const problems = validateProfile(profile);
     if (problems.length) return "工作流需要校准：" + problems[0];
@@ -538,8 +542,8 @@ export function mountApp(root: HTMLElement, svc: Services) {
       return Math.max(r.right - r.left, r.bottom - r.top) * upScale() <= MAX_UPSCALE_EDGE ? null
         : upLayerMode() ? `图层「${upLargest()!.name}」放大后超过 ${MAX_UPSCALE_EDGE} 像素，请降低倍数或不选它` : `放大后超过 ${MAX_UPSCALE_EDGE} 像素，请框选一部分或降低倍数`;
     }
-    if (mode === "outpaint" && !regenerating && !willAdd() && !padTotal()) return "拖动上面画布的边缘，设定要扩展的尺寸";
-    if (inpaintLike(mode) && !regenerating && !sel && !willAdd()) return mode === "blend" ? "请先框选要融合的产品和它周围一圈" : mode === "extract" ? "请先框选要抠的东西" : "请先建立选区";
+    if (mode === "outpaint" && !willAdd() && !padTotal()) return "拖动上面画布的边缘，设定要扩展的尺寸";
+    if (inpaintLike(mode) && !sel && !willAdd()) return mode === "blend" ? "请先框选要融合的产品和它周围一圈" : mode === "extract" ? "请先框选要抠的东西" : "请先建立选区";
     if (inpaintLike(modeOf(profile)) && !profile.options.allowEmptyPrompt && profile.bindings.some(b => b.role === "prompt") && !text.trim()) return "请输入提示词（留空移除可在「接口校准」里开启）";
     return null;
   }
@@ -549,6 +553,12 @@ export function mountApp(root: HTMLElement, svc: Services) {
 
   function renderAction() {
     outSync();
+    const canSupplement = !!lastCutout && !!doc && doc.id === lastCutout.group.docId && !run;
+    exBackgroundBtn.disabled = !canSupplement;
+    exBackgroundBtn.title = !lastCutout ? "完成一次抠图后可手动补充原背景"
+      : !doc || doc.id !== lastCutout.group.docId ? "上一次抠图不在当前文档中"
+      : run ? "当前任务结束后可补充背景"
+      : "根据最近一次抠图结果移除原主体并补全背景，结果放在抠图图层下方";
     if (run) {
       genBtn.className = "generate running";
       replace(genBtn, icon("stop"), h("span", null, "取消"));
@@ -635,19 +645,32 @@ export function mountApp(root: HTMLElement, svc: Services) {
   async function refresh() {
     if (refreshing) { again = true; return; }
     refreshing = true;
+    const intentAtStart = modeIntentRevision;
     let switchTo: TaskType | null = null;
     try {
+      const previousDocId = doc?.id ?? null;
       doc = svc.host.activeDoc();
+      if (previousDocId !== doc?.id) lastCutout = null;
       sel = doc ? await svc.host.selectionBounds(doc.id) : null;
       const active = doc ? await svc.host.activeFillGroup() : null;
       group = active;
-      if (active && active.kind !== mode && !run) switchTo = active.kind;
       variations = group ? await svc.host.variations(group) : [];
       const now = group ? String(group.docId) + ":" + String(group.layerId) : "";
-      if (now !== lastGroupKey) { log("info", "current fill", now || "none", active ? "(selected)" : ""); lastGroupKey = now; }
+      const firstObservation = !hasObservedFillState;
+      const groupChanged = now !== lastGroupKey;
+      // Only follow Photoshop's selected AI group when the selection actually changes.
+      // Re-reading the same selected AI upscale group must not undo the user's explicit switch
+      // back to 局部重绘. On first observation, honor a mode choice made while refresh was pending.
+      if (groupChanged && active && active.kind !== mode && !run
+        && (!firstObservation || intentAtStart === 0)) switchTo = active.kind;
+      if (groupChanged) {
+        log("info", "current fill", now || "none", active ? "(selected)" : "");
+        lastGroupKey = now;
+      }
+      hasObservedFillState = true;
     } catch (e) { log("warn", "refresh failed", e); }
     finally { refreshing = false; }
-    if (switchTo) setMode(switchTo);
+    if (switchTo && modeIntentRevision === intentAtStart) setMode(switchTo, "refresh");
     void loadDocThumb();
     renderHistory(); renderSelection(); renderAction();
     genSurface?.refresh();
@@ -698,7 +721,11 @@ export function mountApp(root: HTMLElement, svc: Services) {
     overlay = connectOverlay({
       launch: svc.launchOverlay,
       autoLaunch: () => settings.helperAutoStart !== false,
-      onAutoLaunchFailed: error => setStatus("WavePlug 外置框架没有随 Photoshop 启动：" + error + "。可在「ComfyUI 连接」里点「启动」", "error"),
+      onAutoLaunchFailed: error => {
+        conn = { state: "down", text: "未连接" };
+        renderConn(); renderAction();
+        setStatus("WavePlug 外置框架没有随 Photoshop 启动：" + error + "。可在「ComfyUI 连接」里点「启动」", "error");
+      },
     });
     svc.overlay = overlay;
     overlay.onConnected(() => {
@@ -748,7 +775,7 @@ export function mountApp(root: HTMLElement, svc: Services) {
       }),
       where: () => ({ docId: doc?.id ?? null, sel }),
       canvasView: id => svc.host.canvasView?.(id) ?? Promise.resolve(null),
-      setMode: m => { if (MODES.some(([x]) => x === m) && m !== mode) setMode(m as TaskType); },
+      setMode: m => { if (MODES.some(([x]) => x === m)) setMode(m as TaskType); },
       setPrompt: text => setPromptText(text),
       setCount: n => { countInput.value = String(n); saveCount(n); renderAction(); },
       setNumber: (key, value) => setParam((_, ps) => { ps.params[key] = value; }),
@@ -820,9 +847,15 @@ export function mountApp(root: HTMLElement, svc: Services) {
     flowBtn.hidden = toolsMode();
   }
 
-  function setMode(m: TaskType) {
-    if (m === mode || run) return;
+  function setMode(m: TaskType, source: "user" | "refresh" = "user") {
+    if (run) return;
+    // Even clicking the already-active mode is an explicit choice that can dismiss a pending
+    // automatic switch from the first Photoshop state read.
+    if (source === "user") modeIntentRevision++;
+    if (m === mode) return;
+    const previous = mode;
     mode = m; settings.mode = m; store.saveSettings(settings);
+    log("info", "generate mode changed", JSON.stringify({ from: previous, to: m, source, selectedGroup: lastGroupKey }));
     profile = pickFor(m);
     pstate = profile ? store.state(profile.id) : null;
     for (const k of Object.keys(refs)) delete refs[Number(k)];
@@ -841,25 +874,29 @@ export function mountApp(root: HTMLElement, svc: Services) {
     catch (e) { setStatus("切换失败：" + (e as Error).message, "error"); }
   }
 
-  async function deleteVariation(v: Variation) {
-    if (!group || run) return;
-    try { await svc.host.deleteVariation(group, v.layerId); await refresh(); setStatus(`已删除变体 ${v.number}`, "ok"); }
-    catch (e) { setStatus("删除失败：" + (e as Error).message, "error"); }
-  }
-
   // ── connection ──
   /** Returns null on success, else the raw error text (also logged). */
   async function checkConn(): Promise<string | null> {
+    const checkId = ++connectionCheckSeq;
     conn = { state: "checking", text: "连接中…" }; renderConn();
     let error: string | null = null;
     try {
       const s = await withTimeout(comfy.systemStats(), 6000, "连接 ComfyUI ");
+      if (checkId !== connectionCheckSeq) return conn.state === "ok" ? null : "连接状态已更新，正在重新检查";
       conn = { state: "ok", text: "ComfyUI " + (s.system?.comfyui_version ?? "") };
       log("info", "connected", comfy.base, s.system?.comfyui_version);
+      // A cold-start probe can fail before the native manager has finished launching ComfyUI.
+      // Clear only that exact stale connection error; never erase an unrelated generation error.
+      if (lastConnectionError && status.kind === "error" && status.text === lastConnectionError) {
+        setStatus("ComfyUI 已连接", "ok");
+      }
+      lastConnectionError = null;
     } catch (e) {
+      if (checkId !== connectionCheckSeq) return conn.state === "ok" ? null : "连接状态已更新，正在重新检查";
       const err = e as Error;
       error = `${err.name && err.name !== "Error" ? err.name + "：" : ""}${err.message}`;
       conn = { state: "down", text: "未连接" };
+      lastConnectionError = error;
       log("error", "connect failed", comfy.base, err);
       setStatus(error, "error");
     }
@@ -958,7 +995,9 @@ export function mountApp(root: HTMLElement, svc: Services) {
     }) }, "启动");
     function renderLife() {
       const up = !!overlay?.connected;
-      replace(helperState, "外置框架：" + (up ? `运行中 · ${overlay?.helperVersion ?? ""}` : "未运行"));
+      const stale = up && helperOutdated(overlay?.helperVersion ?? null);
+      replace(helperState, "外置框架：" + (up ? `运行中 · ${overlay?.helperVersion ?? ""}` : "未运行")
+        + (stale ? `（需要 ${EXPECTED_HELPER_VERSION}：在 Windows 运行 native/overlay/build.cmd）` : ""));
       replace(helperBtn, up ? "重启" : "启动");
       replace(comfyState, "ComfyUI：" + (conn.state === "ok" ? conn.text : conn.state === "checking" ? conn.text : "未连接"));
       replace(comfyBtn, conn.state === "ok" ? "重启" : "启动");
@@ -1009,8 +1048,19 @@ export function mountApp(root: HTMLElement, svc: Services) {
             store.saveSettings(settings);
             show("info", on ? "下次启动 ComfyUI 时将不自动打开网页。" : "已允许 ComfyUI 按其启动脚本设置打开网页，下次启动生效。");
           }) : null,
-        svc.debugSave ? h("div", { class: "group-label" }, "排查问题") : null,
-        svc.debugSave && h("label", { class: "check-row", title: "每次生成时把发送的图片、返回的图片和提交的工作流保存到 F:\\waveplug\\studio\\reports\\debug_*。大图一张可达几十 MB，排查完请关闭" },
+        h("div", { class: "group-label" }, "排查问题"),
+        h("div", { class: "muted small", title: "错误和警告会连同可能的原因、出错前的操作一起记录" }, (() => {
+          const p = logProblems(), e = p.filter(x => x.level === "error").length;
+          return p.length ? `本次运行记录到 ${e} 种错误、${p.length - e} 种警告` : "本次运行没有记录到错误或警告";
+        })()),
+        svc.saveText ? h("button", { class: "btn", title: "把环境信息、每个错误（次数、可能的原因、出错前的操作）和最近的日志存成一个文本文件，发给开发者。\n里面会有图层名、文件名和提示词，不含图片", onClick: async () => {
+          try {
+            const stamp = new Date().toISOString().slice(0, 16).replace(/[-:T]/g, "");
+            const ok = await svc.saveText!(diagnosticReport(), `waveplug-report-${stamp}.txt`);
+            if (ok) show("ok", "诊断报告已保存，把这个文件发给开发者");
+          } catch (e) { log("warn", "save report", e); show("error", "保存诊断报告失败：" + (e as Error).message); }
+        } }, "导出诊断报告…") : null,
+        svc.debugSave && h("label", { class: "check-row", title: "每次生成时把发送的图片、返回的图片和提交的工作流保存到 G:\\waveplug\\studio\\reports\\debug_*。大图一张可达几十 MB，排查完请关闭" },
           h("input", { type: "checkbox", checked: settings.debugFiles, onChange: (e: Event) => { settings.debugFiles = (e.target as HTMLInputElement).checked; store.saveSettings(settings); } }),
           h("span", null, "保存调试文件（图片较大，仅排查时打开）"))),
       h("div", { class: "sheet-foot" },
@@ -1028,6 +1078,8 @@ export function mountApp(root: HTMLElement, svc: Services) {
 
   // ── workflows ──
   function selectProfile(id: string) {
+    // Selecting a workflow is an explicit user choice even when its task type is unchanged.
+    modeIntentRevision++;
     profile = profiles.find(p => p.id === id) ?? null;
     pstate = profile ? store.state(profile.id) : null;
     if (profile) {
@@ -1525,26 +1577,36 @@ export function mountApp(root: HTMLElement, svc: Services) {
     if (links.length && !was) { log("info", "local mask links", JSON.stringify(links)); renderAdvanced(); }
   }
 
-  /** 再生成: same fill area (the group's mask) and the shown variation's prompt, one more variation set. */
-  async function regenerate() {
-    const v = variations.find(x => x.visible) ?? variations[variations.length - 1];
-    if (!group || !v || run) return;
-    // a fill is regenerated with a workflow of its own kind
-    if (group.kind !== mode) setMode(group.kind);
-    if (!profile) { setStatus(group.kind === "outpaint" ? "请先导入扩图工作流" : group.kind === "txt2img" ? "请先导入文生图工作流" : group.kind === "upscale" ? "请先导入放大工作流" : group.kind === "blend" ? "请先导入融图工作流" : group.kind === "extract" ? "请先导入抠图工作流" : "请先导入局部重绘工作流", "error"); return; }
-    await generate({ addTo: group, prompt: v.prompt === "移除" ? "" : v.prompt });
-  }
-
-  async function generate(again?: { addTo: FillGroup; prompt: string }) {
+  async function generate() {
     if (!profile || !pstate || run) return;
+    // Pin the intended mode/profile before any async connection, Photoshop or ComfyUI work.
+    // A selection refresh must never silently replace an inpaint request with an upscale profile.
+    const requestedMode = mode, requestedProfile = profile, requestedState = pstate;
+    const intentAtStart = modeIntentRevision;
+    const changedDuringPrepare = () => modeIntentRevision !== intentAtStart
+      || mode !== requestedMode || profile?.id !== requestedProfile.id
+      || modeOf(requestedProfile) !== requestedMode;
+    const abortForModeChange = () => {
+      log("warn", "generate preparation aborted: mode/profile changed", JSON.stringify({
+        requestedMode, requestedProfile: requestedProfile.name, requestedProfileMode: modeOf(requestedProfile),
+        currentMode: mode, currentProfile: profile?.name ?? null,
+      }));
+      setStatus("生成准备期间模式或工作流发生变化，本次任务已停止；请确认当前模式和工作流后重新生成", "error");
+    };
+    if (modeOf(requestedProfile) !== requestedMode) { abortForModeChange(); return; }
     await checkConn();
     await refresh();
-    const why = again ? blockedReason(again.prompt, true) : blockedReason();
+    if (changedDuringPrepare()) { abortForModeChange(); return; }
+    const why = blockedReason();
     if (why) { setStatus(why, "error"); return; }
-    const syncError = await syncProfile(profile);
+    const syncError = await syncProfile(requestedProfile);
     if (syncError) { setStatus(syncError, "error"); return; }
+    if (changedDuringPrepare()) { abortForModeChange(); return; }
     setStatus("生成中…");
-    const p = profile, ps = pstate;
+    const p = requestedProfile, ps = requestedState;
+    crumb("生成：" + requestedMode);
+    log("info", "generate dispatch", JSON.stringify({ mode: requestedMode, profileMode: modeOf(p), profile: p.name, profileId: p.id }));
+    if (modeOf(p) === "extract") lastCutout = null;
     run = { stage: "准备中…", progress: null, detail: "", signal: { aborted: false } };
     const current = run;
     // Remember the actual group written to the PSD, including a partially successful run.
@@ -1554,9 +1616,8 @@ export function mountApp(root: HTMLElement, svc: Services) {
     renderAll();
     try {
       const res = await runInpaint(svc.host, comfy, {
-        profile: p, prompt: again ? again.prompt : cleanPrompt(prompt.value), seed: ps.seedMode === "fixed" ? ps.seed : null, params: effectiveParams(p, ps),
-        addTo: again ? again.addTo : willAdd() ? group ?? undefined : undefined,
-        reuseMask: !!again,
+        profile: p, prompt: cleanPrompt(prompt.value), seed: ps.seedMode === "fixed" ? ps.seed : null, params: effectiveParams(p, ps),
+        addTo: willAdd() ? group ?? undefined : undefined,
         pads: modeOf(p) === "outpaint" ? { ...pads } : undefined,
         size: modeOf(p) === "txt2img" ? t2iSize() : undefined,
         scale: modeOf(p) === "upscale" ? upScale() : undefined,
@@ -1582,11 +1643,16 @@ export function mountApp(root: HTMLElement, svc: Services) {
         debug: settings.debugFiles ? svc.debugSave : undefined,
       });
       if (ps.seedMode === "random") { ps.seed = res.seeds[res.seeds.length - 1]; store.saveState(p.id, ps); }
-      if (modeOf(p) === "extract" && !res.continued && res.cutout && res.group && settings.extractRemove !== false) {
-        const removed = await removeCutout(res.group, res.cutout, current);
-        if (removed !== true) { setStatus(`已抠出，变体 ${res.variations.map(v => v.number).join("、")}；${removed}`, removed.startsWith("从原图移除失败") ? "error" : "info"); return; }
-        setStatus(`已抠出并从原图移除（拆图），变体 ${res.variations.map(v => v.number).join("、")}`, "ok");
-        return;
+      if (modeOf(p) === "extract" && res.cutout && res.group) {
+        lastCutout = { group: res.group, cutout: res.cutout };
+        renderAction();
+        if (!res.continued && settings.extractRemove !== false) {
+          const removed = await removeCutout(res.group, res.cutout, current);
+          if (removed !== true) { setStatus(`已抠出，变体 ${res.variations.map(v => v.number).join("、")}；${removed}`, removed.startsWith("从原图移除失败") ? "error" : "info"); return; }
+          lastCutout = null;
+          setStatus(`已抠出并从原图移除（拆图），变体 ${res.variations.map(v => v.number).join("、")}`, "ok");
+          return;
+        }
       }
       if (!res.group) setStatus(`已放大 ${res.upscaled ?? 1} 个图层，结果是上方的智能对象，原图层已隐藏` + (res.failed?.length ? `；${res.failed.length} 个失败（${res.failed[0]}${res.failed.length > 1 ? " 等" : ""}）` : ""), res.failed?.length ? "error" : "ok");
       else setStatus(`${res.continued ? "已加入" : modeOf(p) === "outpaint" ? "已扩展画布，" : modeOf(p) === "txt2img" ? "已生成，" : modeOf(p) === "upscale" ? "已放大到新文档，" : modeOf(p) === "blend" ? "已新建 AI 融图，" : modeOf(p) === "extract" ? "已抠出，" : "已新建 AI 填充，"}变体 ${res.variations.map(v => v.number).join("、")} · seed ${res.seeds.join("、")}`, "ok");
@@ -1612,14 +1678,45 @@ export function mountApp(root: HTMLElement, svc: Services) {
     }
   }
 
-  /** 拆图: the 局部重绘 workflow removes the cut-out from the original (prompt left empty), its result
-   *  goes directly below the cut-out. Returns true, or why it didn't run. */
-  async function removeCutout(cut: FillGroup, mask: { pixels: import("../core/image/png.ts").Pixels; rect: Rect }, current: NonNullable<typeof run>): Promise<true | string> {
+  async function supplementBackground() {
+    const saved = lastCutout;
+    if (!saved || run) return;
+    const activeDoc = svc.host.activeDoc();
+    if (!activeDoc || activeDoc.id !== saved.group.docId) {
+      doc = activeDoc; lastCutout = null; renderAction();
+      setStatus("上一次抠图不在当前文档中，请重新抠图后再补充背景", "error");
+      return;
+    }
+    doc = activeDoc;
+    const current = { stage: "补充背景准备中…", progress: null as number | null, detail: "", signal: { aborted: false } };
+    run = current; stash = null; setStatus("正在补充背景…"); renderAll();
+    try {
+      const result = await removeCutout(saved.group, saved.cutout, current, "补充背景");
+      if (result === true) {
+        if (lastCutout === saved) lastCutout = null;
+        setStatus("背景已补充，结果已放在抠图图层下方", "ok");
+      } else setStatus(result, "error");
+    } catch (e) {
+      log("error", "extract background supplement failed", e);
+      setStatus(current.signal.aborted ? "已取消补充背景" : "补充背景失败：" + (e as Error).message, current.signal.aborted ? "info" : "error");
+    } finally {
+      if (run === current) run = null;
+      renderAll();
+      await refresh();
+      void loadDocThumb(true);
+    }
+  }
+
+  /** The inpaint workflow removes the cut-out object from the original (prompt left empty), then
+   *  places the reconstructed background directly below the cut-out. Returns true, or why it didn't run. */
+  async function removeCutout(cut: FillGroup, mask: NonNullable<RunResult["cutout"]>, current: NonNullable<typeof run>, purpose = "拆图"): Promise<true | string> {
     const rp = pickFor("inpaint");
-    if (!rp) return "要从原图移除，先在「局部重绘」模式导入移除工作流（留空提示词 = 移除）";
-    if (!rp.options.allowEmptyPrompt) return `「局部重绘」当前的工作流「${rp.name}」不支持留空移除，换成移除工作流后再试`;
+    if (!rp) return purpose === "拆图" ? "要从原图移除，先在「局部重绘」模式导入移除工作流（留空提示词 = 移除）" : "要补充背景，先在「局部重绘」模式导入移除工作流（留空提示词 = 移除）";
+    if (!rp.options.allowEmptyPrompt) return purpose === "拆图"
+      ? `「局部重绘」当前的工作流「${rp.name}」不支持留空移除，换成移除工作流后再试`
+      : `「局部重绘」当前的工作流「${rp.name}」不支持留空补背景，换成支持空提示词的移除工作流后再试`;
     const err = await syncProfile(rp);
-    if (err) return "从原图移除失败：" + err;
+    if (err) return (purpose === "拆图" ? "从原图移除失败：" : "补充背景失败：") + err;
     try {
       const rps = store.state(rp.id);
       const res = await runInpaint(svc.host, comfy, {
@@ -1627,19 +1724,20 @@ export function mountApp(root: HTMLElement, svc: Services) {
         selectionMask: mask, hide: cut,
       }, {
         signal: current.signal,
-        stage: t => { current.stage = "拆图 · " + t; current.detail = ""; renderAction(); },
+        stage: t => { current.stage = purpose + " · " + t; current.detail = ""; renderAction(); },
         progress: (f, t) => { current.progress = f; current.detail = t ?? ""; renderAction(); },
         promptQueued: id => { current.promptId = id; },
         debug: settings.debugFiles ? svc.debugSave : undefined,
       });
-      if (res.group) await svc.host.placeBelow(cut.docId, res.group.layerId, cut.layerId);
-      log("info", "extract removed", res.group?.layerId ?? "");
+      if (!res.group) return purpose === "拆图" ? "从原图移除失败：局部重绘没有返回结果图层" : "补充背景失败：局部重绘没有返回结果图层";
+      await svc.host.placeBelow(cut.docId, res.group.layerId, cut.layerId);
+      log("info", purpose === "拆图" ? "extract removed" : "extract background supplemented", res.group.layerId);
       return true;
     } catch (e) {
       if (current.signal.aborted) throw e;
-      log("error", "extract remove failed", e);
+      log("error", purpose === "拆图" ? "extract remove failed" : "extract background supplement failed", e);
       if (e instanceof StashedResult) stash = e.png;
-      return "从原图移除失败：" + (e as Error).message;
+      return (purpose === "拆图" ? "从原图移除失败：" : "补充背景失败：") + (e as Error).message;
     }
   }
 
@@ -1671,8 +1769,13 @@ export function mountApp(root: HTMLElement, svc: Services) {
   log("info", "start", svc.version, svc.host.kind, settings.comfyUrl);
   renderAll();
   svc.host.onChange(() => { void refresh(); if (toolsMode()) void toolsView.refresh(); });
+  const managedColdStart = svc.host.kind === "uxp"
+    && settings.helperAutoStart !== false
+    && settings.comfyAutoStartWithPhotoshop !== false;
   if (svc.host.kind === "uxp") startOverlay();
   void refresh();
   if (toolsMode()) void toolsView.refresh();
-  void checkConn();
+  // When both helpers are configured to autostart, wait for the native manager's
+  // starting/ready event instead of probing 127.0.0.1 before ComfyUI has bound its port.
+  if (!managedColdStart) void checkConn();
 }

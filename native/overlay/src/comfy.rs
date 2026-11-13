@@ -413,13 +413,18 @@ mod platform {
         }
         let mut cmd = command_for(path, disable_browser)?;
 
+        // pid + time alone repeat when two spawns land in the same millisecond (the parallel unit
+        // tests did): CreateJobObjectW then OPENS the other job, whose lifetime flag the second
+        // caller rewrites. The sequence number makes each name unique; an existing name is refused.
+        static JOB_SEQ: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
         let job_name = format!(
-            "Local\\WavePlugComfyUI-{}-{}",
+            "Local\\WavePlugComfyUI-{}-{}-{}",
             std::process::id(),
             std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .map(|d| d.as_millis())
-                .unwrap_or(0)
+                .unwrap_or(0),
+            JOB_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
         );
         let job_wide: Vec<u16> = job_name.encode_utf16().chain(Some(0)).collect();
         let job = unsafe { CreateJobObjectW(null(), job_wide.as_ptr()) };
@@ -428,6 +433,14 @@ mod platform {
                 "无法创建 ComfyUI 进程组（Windows 错误 {}）",
                 unsafe { windows_sys::Win32::Foundation::GetLastError() }
             ));
+        }
+        if unsafe { windows_sys::Win32::Foundation::GetLastError() }
+            == windows_sys::Win32::Foundation::ERROR_ALREADY_EXISTS
+        {
+            unsafe {
+                CloseHandle(job);
+            }
+            return Err(format!("ComfyUI 进程组名称冲突：{job_name}"));
         }
         let job_id = job as isize;
         if let Err(e) = set_job_lifetime(job_id, close_with_photoshop) {

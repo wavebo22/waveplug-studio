@@ -9,6 +9,10 @@ import type { Overlay } from "../app/overlay.ts";
 import type { Rect } from "../core/image/region.ts";
 import { GENERATE_PANEL, type GenerateAction, type GenerateSections, parseGenerateAction } from "../core/overlay/generatePanel.ts";
 import type { CanvasView } from "../core/overlay/protocol.ts";
+import { NOT_SHOWN, type Shown, decide } from "../core/overlay/visibility.ts";
+
+/** How long the panel stays after it stops being wanted (core/overlay/visibility.ts). */
+const HIDE_DELAY_MS = 450;
 
 /** What the external panel needs from the generate page. */
 export interface GeneratePage {
@@ -38,8 +42,13 @@ export interface GeneratePage {
 
 export function attachGenerateSurface(overlay: Overlay, page: GeneratePage) {
   const { hub } = overlay;
-  /** the document the panel was last put up for (a new one asks Photoshop for its view again) */
-  let shownFor: number | null = null, asking = 0;
+  /** what is up (core/overlay/visibility.ts decides); `asking`: the latest request for the canvas */
+  let vis: Shown = NOT_SHOWN, asking = 0;
+  let again: ReturnType<typeof setTimeout> | null = null;
+  /** The panel stays for as long as a document is open (user, 11-12): without a selection it is
+   *  simply collapsed to its bar — the helper folds it whenever the pointer isn't on it and
+   *  nothing runs (host.rs) — instead of leaving and coming back. Only "no document" takes it away. */
+  const wish = () => { const { docId } = page.where(); return { docId, wanted: docId !== null }; };
   /** the canvas the panel was last put up against (kept after it goes away, for the notice) */
   let lastView: import("../core/overlay/protocol.ts").ScreenRect | null = null;
 
@@ -47,9 +56,8 @@ export function attachGenerateSurface(overlay: Overlay, page: GeneratePage) {
     const ask = ++asking, t0 = Date.now();
     const view = await page.canvasView(docId).catch(() => null);
     if (ask !== asking) return; // a newer selection change already
-    const now = page.where();
-    if (now.docId !== docId || !now.sel) return;
-    shownFor = docId;
+    const now = wish();
+    if (now.docId !== docId || !now.wanted) return;
     lastView = view?.view ?? lastView;
     // how long reading the canvas from Photoshop took (to tell this apart from other stalls)
     log("info", "overlay panel show", JSON.stringify(view?.view ?? null), `${Date.now() - t0} ms`);
@@ -100,19 +108,24 @@ export function attachGenerateSurface(overlay: Overlay, page: GeneratePage) {
     },
   });
 
-  return {
+  const surface = {
     /** The page's state or Photoshop's may have changed: show / hide, and send what changed. */
     refresh() {
-      const { docId, sel } = page.where();
-      if (docId === null || !sel) {
+      if (again) { clearTimeout(again); again = null; }
+      const w = wish(), v = decide(vis, w, Date.now(), HIDE_DELAY_MS);
+      vis = v.state;
+      if (v.do === "hide") {
         asking++;
-        shownFor = null;
-        if (hub.isShown(GENERATE_PANEL)) log("info", "overlay panel hide", docId === null ? "no document" : "no selection");
+        if (hub.isShown(GENERATE_PANEL)) log("info", "overlay panel hide", v.why);
         hub.hide(GENERATE_PANEL);
-      } else if (!hub.isShown(GENERATE_PANEL) || shownFor !== docId) {
-        void putUp(docId);
+      } else if (v.do === "show" || (w.wanted && !hub.isShown(GENERATE_PANEL))) {
+        void putUp(w.docId!);
+      } else if (v.againInMs !== undefined) {
+        // a hide is waiting: look again when it is due (Photoshop may send nothing meanwhile)
+        again = setTimeout(() => { again = null; surface.refresh(); }, v.againInMs + 10);
       }
       overlay.queueSync();
     },
   };
+  return surface;
 }

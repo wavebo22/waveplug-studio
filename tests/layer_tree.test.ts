@@ -158,7 +158,7 @@ test("删除画板：嵌套锁定组提前跳过，其他图层仍可删除，�
   assert.deepEqual(planLayerDeletion(info.map(l => l.id === 50 ? { ...l, artboard: false } : l), [50]).targets, [50]);
 });
 
-test("左侧删除区仅对当前可删的拖拽内容显示", () => {
+test("侧边删除区拖拽时保持显示，但只允许删除当前可删内容", () => {
   const layers = buildTree(doc());
   assert.equal(canDropToDelete(layers, [1]), true);
   assert.equal(canDropToDelete(layers, [30]), false); // locked Background
@@ -447,7 +447,10 @@ test("锁定: one lock on or off, the others kept; groups only lock as a whole",
   assert.deepEqual(lockPlan(t, [2], "pixels", true)[0].locks, { protectAll: true, protectPosition: false, protectComposite: false, protectTransparency: false });
   // a fully locked layer losing one lock keeps the other two
   assert.deepEqual(lockPlan(t, [4], "pixels", false)[0].locks, { protectAll: false, protectPosition: true, protectComposite: false, protectTransparency: true });
-  assert.deepEqual(ids(lockPlan(t, [4, 5], "all", false)), [4]);
+  // 背景 joins only 解除锁定全部 (it becomes a normal layer); no single lock, and never locking
+  assert.deepEqual(ids(lockPlan(t, [4, 5], "all", false)), [4, 5]);
+  assert.deepEqual(ids(lockPlan(t, [3, 5], "all", true)), [3]);
+  assert.deepEqual(ids(lockPlan(t, [4, 5], "pixels", false)), [4]);
 });
 
 test("智能滤镜: one row under their smart object (each filter a chip on it), foldable, and a status icon", () => {

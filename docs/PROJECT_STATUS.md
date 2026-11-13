@@ -10,7 +10,7 @@ Photoshop UXP 插件，连接本地 ComfyUI，把 AI 结果像 PS「创成式填
 
 ## 2. 版本与 git
 
-- 代码在用户 Windows 机 mainpc 的 `F:\waveplug\studio`，这台 Mac 上挂载为 `/Volumes/wavebobo/waveplug/studio`。
+- 代码在用户 Windows 机 mainpc 的 `G:\waveplug\studio`，这台 Mac 上挂载为 `/Volumes/wavebobo/waveplug/studio`。
 - 分支 `local-test`。最后一个正式版是 **1.1.0**（标签 `v1.1.0`，`main` 也在那里）。
 - 1.1.0 之后**已提交、未发布**：`5e21588`，包括融图、抠图模式、文档瘦身、批量放大、上传压缩。
 - 图层面板 2026-11-03 已提交（「feat: WavePlug 图层 panel」，未发布）。`reports/` 下的日志没有提交。

@@ -72,7 +72,7 @@ src/ui/app.ts  startOverlay()      生成页提供状态和     src/panel/genera
 
 **11-06 随 PS 启动失效的原因与改法**（源码，PS 待实测）：
 - 原因：开发版 `launchOverlay` 启动的是 `dist\waveplug-overlay-dev.cmd`，这个文件在悬停 POC 回滚时被删掉；`openPath` 的失败只写日志、界面不提示，且每次只试一次。日志里 11-05 22:44 之后 PS 重启了三次，外置框架一次都没连上。另外 `.cmd` 会弹终端，`build.cmd` 用 `taskkill` 更新会连带杀掉 ComfyUI。
-- 现在：直接启动 exe（开发版 `F:\waveplug\studio\dist\waveplug-overlay.exe`，发行版插件文件夹里的 exe），路径固定不变；失败时状态栏提示原因。设置「ComfyUI 连接 › 启动与关闭」：外置框架 / ComfyUI 的运行状态和「启动 / 重启」按钮，开关「随 Photoshop 启动外置框架」（`helperAutoStart`，默认开）、「随 Photoshop 启动 ComfyUI」（原「不随…」反向开关，字段不变）、「随 Photoshop 一同关闭 ComfyUI」、「启动时不自动打开网页」。
+- 现在：直接启动 exe（开发版 `G:\waveplug\studio\dist\waveplug-overlay.exe`，发行版插件文件夹里的 exe），路径固定不变；失败时状态栏提示原因。设置「ComfyUI 连接 › 启动与关闭」：外置框架 / ComfyUI 的运行状态和「启动 / 重启」按钮，开关「随 Photoshop 启动外置框架」（`helperAutoStart`，默认开）、「随 Photoshop 启动 ComfyUI」（原「不随…」反向开关，字段不变）、「随 Photoshop 一同关闭 ComfyUI」、「启动时不自动打开网页」。
 - 更新不失效：exe 原地替换（改名 + 复制），helper 每 2 秒看一次自己 exe 的大小和时间，连续两次是同一个新文件就重启成新版（`src/life.rs`）。插件端在本会话连上过 helper 之后不再自动启动第二份，避免和正在重启的那份抢端口。
 - 重启不关 ComfyUI：受管 ComfyUI 的 Job Object 有名字（`Local\WavePlugComfyUI-…`），信息写在 `%LOCALAPPDATA%\WavePlug\comfy_managed.json`。旧 helper 先关掉 kill-on-close、写状态，带 `--replace` 启动新 exe，等新 exe 按名字打开 Job（命名对象在最后一个句柄关闭时就会消失，所以必须在旧进程退出前打开）并通过事件 `Local\WavePlugHelperHandover` 确认，再退出；新 helper 恢复 kill-on-close 设置，等端口空出后监听。没接上时 ComfyUI 继续运行，按「已有实例」连接。
 - 协议：`{"type":"restart-helper"}`；`manage-comfy` 增加 `restart`（只重启 WavePlug 启动的 ComfyUI；外部实例回 `external-running`，正在生成时回 `restart-required`）。
@@ -85,6 +85,10 @@ src/ui/app.ts  startOverlay()      生成页提供状态和     src/panel/genera
 - 回归：Rust `cargo test --release --offline` 包含受管进程树终止/保留测试；UXP `npm run typecheck`、`npm test`。真实 ComfyUI 自动启动需在 PS 开发版 ⟳ 载入新脚本后现场验证。不得为测试直接关闭用户现有 Photoshop 文档或工作流。
 
 外置生成面板的区块（`GenerateSections`）：`mode`、`prompt`、`hint`、`favorites`、`refs`、`count`、`action`（按钮文字）、`blocked`（不能生成的原因）、`params`（高级参数：`number` / `toggle` / `seed`）、`run`（进度）、`status`。操作（`GenerateAction`）：`set-mode`、`set-prompt`、`set-count`、`set-number`、`reset-number`、`set-toggle`、`set-seed`、`new-seed`、`toggle-favorite`、`pick-favorite`、`remove-favorite`、`add-ref`、`drop-ref`、`remove-ref`、`finish-layer-drag`、`generate`、`cancel`。
+
+### 3.2 右键菜单（2026-11-12，0.8.0，未实测）
+
+`src/menu.rs`，不是一个 `Surface`：独立线程上的 Win32 弹出菜单，和 `frame.rs` 一样不经过 UI 线程。`menu-open` 带整棵菜单树（插件 `src/core/layers/contextMenu.ts` 生成），helper 只负责显示和回报选了哪一行的 id（`menu-result`）。不抢前台、靠低级鼠标钩子关菜单的原因和实测要点见 `docs/README.md` 11-12 条目。`plan()`（树 → 弹出菜单和命令编号）是纯函数，有测试；改菜单外观（自绘、图标）从这里的 `build()` 入手。
 
 ## 4. 新增一个外附介面（步骤）
 
@@ -126,7 +130,7 @@ src/ui/app.ts  startOverlay()      生成页提供状态和     src/panel/genera
   - **释放路由**：mouseup 在 WaveLayer 面板外时交给原生 helper，不再进入 UXP 普通图层排序 / Alt 复制路径；在 WaveLayer 面板内释放仍保留普通排序和编辑工作台投放。面板隐藏时，helper 在鼠标释放 / Escape 后发送一次 `finish-layer-drag`；WebSocket 断线时 UXP 结束源拖动态。避免重复移动和拖动态残留。
   - **虚影范围**：分别在 WaveLayer 面板和外置面板内部跟随鼠标；不创建全屏透明顶层窗口，避免影响 PS 点击、快捷键和焦点。
   - **验证与部署（2026-11-06 重启切换）**：TypeScript 类型检查通过、npm 177/177、Rust 34/34、UXP Release 构建和 Rust Release 构建通过，`git diff --check` 通过。Helper 0.3.0 已部署到 `dist/waveplug-overlay.exe`、`dist/plugin/waveplug-overlay.exe`、`dist/dev/waveplug-overlay.exe`，pending 文件保留；四份 SHA-256 均为 `97C12488F65D0B07ED3CC98BB87CF3CA6E427FBA568252FF97820F5458200E51`。旧 0.2.0 备份：`dist/waveplug-overlay.pre-0.3.0-20261106-014837.exe`。新版 Helper PID 38768，由 Windows MCP 独立托管；WebSocket 47821 正常监听。Photoshop PID 12708 已退出，测试文档 `测试.psd` 在保存提示中选择「否」丢弃修改；Photoshop 重启为 PID 19332。UXP 开发加载器重新读取 `dist/plugin/index.js`，日志确认 `overlay connected`、`overlay ready 0.3.0`。ComfyUI 已按 `close_with_photoshop=true` 重启，启动器 PID 14424、Python PID 13380；`127.0.0.1:8188/system_stats` 返回 HTTP 200，版本 0.37.0，队列 0/0。
-  - **UXP 加载**：Photoshop 重启后开发加载器自动读取 `F:\waveplug\studio\dist\plugin` 最新 `index.js` 和 `styles.css`；无需再点橙色 `⟳`。本轮 bundle 构建后需在开发面板点橙色 `⟳`，加载八槽位逻辑。悬停定位仍维持旧功能默认关闭，新的交互尚未确定。
+  - **UXP 加载**：Photoshop 重启后开发加载器自动读取 `G:\waveplug\studio\dist\plugin` 最新 `index.js` 和 `styles.css`；无需再点橙色 `⟳`。本轮 bundle 构建后需在开发面板点橙色 `⟳`，加载八槽位逻辑。悬停定位仍维持旧功能默认关闭，新的交互尚未确定。
   - **现场验收**：Photoshop 当前无打开文档（`photoshop_get_state`：0 documents），测试 PSD 已按用户要求不保存关闭，未触发真实生图。仍需打开专用 `WavePlug_TEST_` PSD 验证 2–8 层拖放、普通排序、Alt 复制、工作台、无效释放、Escape 和快速连续拖动。Helper 在其他应用前台时会按设计停靠；切回 Photoshop 前台后恢复。
 - **多图层批量参考图（2026-11-06，helper 协议 0.4.0）**：一次拖动多选普通图层时，UXP 按 WaveLayer 当前图层顺序收集有效图层 ID / 名称，最多发送 8 个候选；native preview 显示缩略图与「N 个图层 / 依次放入空槽位」。松开某个参考图槽位后，helper 发送 `drop-refs`，UXP 从该槽位起向后分配空槽位，逐个读取各图层 128 px 缩略图并保存 `{kind:"layer",docId,layerId}`；生图时仍从原 Photoshop 图层读取像素。已有参考图不覆盖，跳过已占用槽位；空位不足时部分放入，并提示未放入数量。拖入的组 / AI 结果组仍不作为参考图。
   - **参考图上限（2026-11-06 扩展）**：`MAX_REFERENCES=8` / `MAX_REFERENCE_SLOTS=8`；自动识别的工作流最多使用 8 个可用 IMAGE 输入；显式 reference bindings 也只处理 1–8 槽。UXP 和 native 槽位布局均支持最多 8 张，均使用可换行布局。提示词编号：画布图1，参考图图2～图9。

@@ -18,7 +18,8 @@ declare const require: (m: string) => any;
 
 const ps = () => require("photoshop");
 const fs = () => require("uxp").storage.localFileSystem;
-const DONT = { dialogOptions: "dontDisplay" };
+// see uxpHost.ts play(): "silent" keeps Photoshop from alerting for a refused command
+const DONT = { dialogOptions: "silent" };
 const layerRef = (id: number) => ({ _ref: "layer", _id: id });
 
 /** Runs one action; batchPlay reports most failures as an "error" result instead of throwing. */
@@ -608,6 +609,23 @@ export class UxpTools implements LayerTools {
     return { done, skipped, note: mixed ? `${mixed} 个图层原来混用了多种样式，拆分后每行统一成该行开头的样式` : undefined };
   }
 
+  async renameLayers(names: { id: number; name: string }[]): Promise<ToolResult> {
+    const doc = activeDoc(), skipped: string[] = [];
+    if (!names.length) return { done: 0, skipped };
+    const done = await step("WavePlug 批量重命名", doc.id, async () => {
+      let n = 0;
+      for (const { id, name } of names) {
+        const layer = findLayer(doc.layers, id);
+        if (!layer) { skipped.push(`#${id}：图层已不存在`); continue; }
+        try { await act({ _obj: "set", _target: [layerRef(id)], to: { _obj: "layer", name } }); n++; }
+        catch (e) { skipped.push(`${layer.name}：${message(e)}`); }
+      }
+      return n;
+    });
+    log("info", "batch rename", done, "of", names.length);
+    return { done, skipped };
+  }
+
   async scanDoc(): Promise<DocScan | null> {
     const d = ps().app.activeDocument;
     if (!d) return null;
@@ -619,7 +637,9 @@ export class UxpTools implements LayerTools {
       for (const l of ls) {
         const b = l.boundsNoEffects ?? l.bounds, kind = String(l.kind);
         const rect = b && b.right > b.left && b.bottom > b.top ? layerRect(l) : null;
-        const s: ScanLayer = { id: l.id, name: String(l.name), kind, visible: !!l.visible, bounds: rect };
+        const opacity = Number(l.opacity);
+        const s: ScanLayer = { id: l.id, name: String(l.name), kind, visible: !!l.visible, bounds: rect,
+          parentId: typeof l.parent?.id === "number" ? l.parent.id : null, ...(Number.isFinite(opacity) ? { opacity } : {}) };
         if (aiGroup(l.parent) && /^v\d+/.test(String(l.name))) s.variationOf = l.parent.id;
         if (kind === "group") s.children = l.layers?.length ?? 0;
         layers.push(s);
@@ -658,8 +678,8 @@ export class UxpTools implements LayerTools {
     const items = planSlim(scan).filter(i => kinds.includes(i.kind));
     const skipped: string[] = [];
     let saved = 0;
-    const order: SlimKind[] = ["variations", "hidden", "bigSmart", "empty", "offCanvas", "channels"];
-    const done = await step("WavePlug 文档瘦身", doc.id, async () => {
+    const order: SlimKind[] = ["variations", "hidden", "transparent", "bigSmart", "empty", "offCanvas", "channels"];
+    const done = await step("WavePlug 文档优化", doc.id, async () => {
       const restore = await saveSelection(doc.id);
       let n = 0;
       try {
@@ -680,7 +700,7 @@ export class UxpTools implements LayerTools {
 
   private async slimItem(doc: any, kind: SlimKind, ids: number[], skipped: string[]): Promise<void> {
     const del = (id: number) => act({ _obj: "delete", _target: [layerRef(id)] });
-    if (kind === "variations" || kind === "hidden" || kind === "empty") {
+    if (kind === "variations" || kind === "hidden" || kind === "transparent" || kind === "empty") {
       for (const id of ids) if (findLayer(doc.layers, id)) await del(id).catch(e => skipped.push(`#${id}：${message(e)}`));
     } else if (kind === "bigSmart") {
       // rasterized at the size it's shown, then made a smart object again (content = what's on screen)

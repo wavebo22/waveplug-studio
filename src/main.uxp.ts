@@ -5,7 +5,7 @@ import type { Services } from "./app/services.ts";
 import { UxpHost } from "./ps/uxpHost.ts";
 import { UxpTools } from "./ps/uxpTools.ts";
 import { UxpLayerTree } from "./ps/uxpLayers.ts";
-import { log, setLogSink } from "./app/log.ts";
+import { log, setLogContext, setLogSink } from "./app/log.ts";
 import { mountApp } from "./ui/app.ts";
 import { mountLayersPanel } from "./ui/layersPanel.ts";
 import { disposeGlobals } from "./ui/dom.ts";
@@ -19,27 +19,65 @@ declare const __BUILT_AT__: string;
 const VERSION = "1.1.0";
 const DEV = typeof (globalThis as any).__waveplugDevReload === "function";
 
-// Diagnostic log: plugin data folder, mirrored into the project's reports folder on F: when that
+// Diagnostic log: plugin data folder, mirrored into the project's reports folder on G: when that
 // drive is reachable, so it can be read without the UXP developer console.
-const MIRROR = ["file:F:/waveplug/studio/reports/uxp_runtime.log", "file:///F:/waveplug/studio/reports/uxp_runtime.log"];
-async function openLog(): Promise<any[]> {
-  const files: any[] = [];
+const MIRROR = ["file:G:/waveplug/studio/reports/uxp_runtime.log", "file:///G:/waveplug/studio/reports/uxp_runtime.log"];
+/** A log file past this size is set aside as *.prev.log when the plugin starts (one generation kept). */
+const LOG_MAX_BYTES = 4 * 1024 * 1024;
+/** The data folder's file `name`, started afresh when it has grown past LOG_MAX_BYTES. */
+async function dataLog(dir: any, name: string): Promise<any> {
+  let f: any;
+  try { f = await dir.getEntry(name); } catch { return dir.createFile(name, { overwrite: false }); }
+  try {
+    const size = Number((await f.getMetadata())?.size ?? 0);
+    if (size > LOG_MAX_BYTES) {
+      await f.moveTo(dir, { newName: name.replace(/\.log$/, ".prev.log"), overwrite: true });
+      return dir.createFile(name, { overwrite: true });
+    }
+  } catch (e) { console.warn("log rotation", name, e); }
+  return f;
+}
+/** `all`: every line; `problems`: warnings and errors only (waveplug-errors.log, short enough to read) */
+async function openLog(): Promise<{ all: any[]; problems: any[] }> {
+  const all: any[] = [], problems: any[] = [];
   try {
     const dir = await fs.getDataFolder();
-    try { files.push(await dir.getEntry("waveplug.log")); } catch { files.push(await dir.createFile("waveplug.log", { overwrite: false })); }
+    all.push(await dataLog(dir, "waveplug.log"));
+    problems.push(await dataLog(dir, "waveplug-errors.log"));
   } catch (e) { console.warn("data-folder log unavailable", e); }
   for (const url of DEV ? MIRROR : []) {
-    try { files.push(await fs.getEntryWithUrl(url)); break; } catch { /* not there yet */ }
-    try { files.push(await fs.createEntryWithUrl(url, { overwrite: false })); break; } catch { /* try next form */ }
+    try { all.push(await fs.getEntryWithUrl(url)); break; } catch { /* not there yet */ }
+    try { all.push(await fs.createEntryWithUrl(url, { overwrite: false })); break; } catch { /* try next form */ }
   }
-  return files;
+  for (const url of DEV ? MIRROR.map(u => u.replace("uxp_runtime.log", "uxp_errors.log")) : []) {
+    try { problems.push(await fs.getEntryWithUrl(url)); break; } catch { /* not there yet */ }
+    try { problems.push(await fs.createEntryWithUrl(url, { overwrite: false })); break; } catch { /* try next form */ }
+  }
+  return { all, problems };
 }
-let logFiles: Promise<any[]> | null = null;
-setLogSink(async line => {
+let logFiles: ReturnType<typeof openLog> | null = null;
+setLogSink(async (line, level) => {
   logFiles ??= openLog();
-  for (const f of await logFiles) { try { await f.write(line, { append: true, format: formats.utf8 }); } catch { /* keep going */ } }
+  const files = await logFiles;
+  for (const f of files.all) { try { await f.write(line, { append: true, format: formats.utf8 }); } catch { /* keep going */ } }
+  if (level !== "info") for (const f of files.problems) { try { await f.write(line, { append: true, format: formats.utf8 }); } catch { /* keep going */ } }
 });
+// what a report needs to say about where it ran
+{
+  let photoshop = "", os = "";
+  try { const h = uxp.host ?? {}; photoshop = `${h.name ?? "Photoshop"} ${h.version ?? ""} ${h.uiLocale ?? ""}`.trim(); } catch { /* unknown */ }
+  try { const o = require("os"); os = `${o.platform?.() ?? ""} ${o.release?.() ?? ""} ${o.arch?.() ?? ""}`.trim(); } catch { /* unknown */ }
+  setLogContext({ 插件版本: DEV ? `dev · ${__BUILT_AT__}` : VERSION, 构建时间: __BUILT_AT__, Photoshop: photoshop, 系统: os, UXP: uxp.versions ?? {}, 外置框架: "未连接" });
+}
+log("info", "==== session start ====", DEV ? `dev · ${__BUILT_AT__}` : VERSION);
 log("info", "uxp", JSON.stringify(uxp.versions ?? {}), "host", JSON.stringify(uxp.host ?? {}));
+// errors nothing caught: without these they only reach the developer console
+try {
+  const onError = (e: any) => log("error", "uncaught", e?.error ?? e?.message ?? e, e?.filename ? `${e.filename}:${e.lineno}:${e.colno}` : "");
+  const onRejection = (e: any) => log("error", "unhandled rejection", e?.reason ?? e);
+  window.addEventListener("error", onError);
+  window.addEventListener("unhandledrejection", onRejection);
+} catch (e) { console.warn("global error handlers", e); }
 
 const host = new UxpHost();
 
@@ -59,7 +97,7 @@ const services: Services = {
   diagnose,
   debugSave: DEV ? (name, png) => {
     void (async () => {
-      for (const url of [`file:F:/waveplug/studio/reports/debug_${name}`, `file:///F:/waveplug/studio/reports/debug_${name}`]) {
+      for (const url of [`file:G:/waveplug/studio/reports/debug_${name}`, `file:///G:/waveplug/studio/reports/debug_${name}`]) {
         try { const f = await fs.createEntryWithUrl(url, { overwrite: true }); await f.write(png, { format: formats.binary }); return; } catch { /* next form */ }
       }
     })();
@@ -82,7 +120,7 @@ const services: Services = {
     // in place (see native/overlay/src/life.rs), so Photoshop's launch permission keeps applying.
     let path = "";
     try {
-      if (DEV) path = "F:\\waveplug\\studio\\dist\\waveplug-overlay.exe";
+      if (DEV) path = "G:\\waveplug\\studio\\dist\\waveplug-overlay.exe";
       else path = (await (await fs.getPluginFolder()).getEntry("waveplug-overlay.exe")).nativePath;
     } catch (e) { return "插件文件夹里没有 waveplug-overlay.exe：" + (e as Error).message; }
     try {
@@ -107,6 +145,12 @@ const services: Services = {
       log("warn", "reference thumbnail", f.name, e);
     }
     return { name: f.name, bytes, url };
+  },
+  async saveText(text, suggested) {
+    const f = await fs.getFileForSaving(suggested, { types: ["txt"] });
+    if (!f) return false;
+    await f.write(text, { format: formats.utf8 });
+    return true;
   },
   async saveImage(png, suggested) {
     const f = await fs.getFileForSaving(suggested, { types: ["png"] });
