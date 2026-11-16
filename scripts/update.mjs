@@ -1,5 +1,8 @@
-// 一键更新 (update.cmd): everything a code change needs on the Windows machine, in order, doing
-// only what is out of date:
+// 一键更新 (update.cmd, WavePlug › 开发者 › 从源码更新): everything a code change needs on the
+// Windows machine, in order, doing only what is out of date:
+//   0. the newest code from GitHub (git pull --ff-only, when the folder has an origin): the Mac
+//      pushes every change, so this machine doesn't need the shared folder. The first time Git's
+//      own sign-in window asks for the GitHub account (the repository is private).
 //   1. the overlay helper (native/overlay/build.cmd) when its source is newer than the built exe;
 //      the running helper switches to the new exe by itself
 //   2. npm run build: the Photoshop plugin, the Illustrator panel; both panels see the new
@@ -31,7 +34,7 @@ function newest(paths) {
   return t;
 }
 const hash = p => existsSync(p) ? createHash("sha1").update(readFileSync(p)).digest("hex") : "";
-const step = (n, text) => console.log(`\n[${n}/3] ${text}`);
+const step = (n, text) => console.log(`\n[${n}/4] ${text}`);
 /** runs a .cmd with "nopause"; false when it failed */
 function cmd(file) {
   const r = spawnSync("cmd.exe", ["/c", file, "nopause"], { stdio: "inherit" });
@@ -47,8 +50,33 @@ try { state = JSON.parse(readFileSync(STATE, "utf8")); } catch { /* first run */
 const notes = [];
 let failed = false;
 
-// 1. 外置框架
-step(1, "外置框架");
+// 1. 最新代码
+step(1, "从 GitHub 取最新代码");
+const git = (...args) => spawnSync("git", args, { encoding: "utf8" });
+const remote = existsSync(".git") ? git("remote", "get-url", "origin") : null;
+if (!remote || remote.status !== 0) console.log("  不是从 GitHub 克隆的文件夹，跳过");
+else {
+  const before = git("rev-parse", "HEAD").stdout.trim();
+  // inherit: Git's sign-in window and its messages reach the user
+  const r = spawnSync("git", ["pull", "--ff-only"], { stdio: "inherit" });
+  if (r.error) console.log("  没找到 git：安装 Git for Windows（https://git-scm.com），跳过");
+  else if (r.status !== 0) {
+    failed = true;
+    console.log("  [失败] 没取到最新代码（上面是 Git 的说明）：没登录 GitHub 时按弹出的窗口登录后再点一次；"
+      + "本机改过的文件挡住了更新时，把它们发给 Claude 或先删掉。下面照旧用现有代码构建");
+  } else {
+    const after = git("rev-parse", "HEAD").stdout.trim();
+    if (after === before) console.log("  已经是最新");
+    else {
+      console.log(`  [OK] 已更新到 ${after.slice(0, 7)}：${git("log", "-1", "--format=%s").stdout.trim()}`);
+      if (git("diff", "--name-only", before, after, "--", "scripts/update.mjs").stdout.trim())
+        notes.push("更新脚本本身也变了：再点一次「从源码更新」，用新脚本跑一遍");
+    }
+  }
+}
+
+// 2. 外置框架
+step(2, "外置框架");
 const exe = "dist/waveplug-overlay.exe";
 const src = newest(["native/overlay/src", "native/overlay/Cargo.toml", "native/overlay/Cargo.lock"]);
 const built = existsSync(exe) ? statSync(exe).mtimeMs : 0;
@@ -59,8 +87,8 @@ else {
   if (!(await buildHelper(ROOT, t => console.log(t)))) { failed = true; console.log("  [失败] 外置框架没有编译成功：把上面的错误发给 Claude。插件照样继续构建"); }
 }
 
-// 2. 插件和 Illustrator 面板
-step(2, "构建 Photoshop 插件和 Illustrator 面板");
+// 3. 插件和 Illustrator 面板
+step(3, "构建 Photoshop 插件和 Illustrator 面板");
 try {
   execFileSync(process.execPath, ["scripts/build.mjs"], { stdio: ["ignore", "ignore", "inherit"] });
   console.log("  [OK] 已构建：打开着的 WavePlug 面板和 WaveLayer 面板 2 秒内自动载入新版本");
@@ -69,8 +97,8 @@ try {
   console.log("  [失败] 构建出错：把上面的错误发给 Claude");
 }
 
-// 3. Illustrator 面板的安装
-step(3, "Illustrator 面板");
+// 4. Illustrator 面板的安装
+step(4, "Illustrator 面板");
 const appdata = process.env.APPDATA ?? "";
 const installed = appdata && existsSync(join(appdata, "Adobe/CEP/extensions/com.waveplug.ai.wavelayer/CSXS/manifest.xml"));
 if (!win) console.log("  不是 Windows，跳过");
