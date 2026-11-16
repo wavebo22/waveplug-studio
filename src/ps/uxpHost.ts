@@ -7,6 +7,7 @@ import { placeGray } from "../core/image/compose.ts";
 import { crumb, flushLog, log } from "../app/log.ts";
 import type { CanvasView } from "../core/overlay/protocol.ts";
 import type { VectorInput } from "../core/overlay/svgFragment.ts";
+import { type FileDropItem, type FileDropResult, pageImage, webImageExt, webImageName } from "../core/layers/fileDrop.ts";
 import { type ActiveLayer, type Capture, type DocInfo, BLEND_PREFIX, EXPAND_PREFIX, EXTRACT_PREFIX, FILL_PREFIX, GENERATE_PREFIX, UPSCALE_PREFIX, type FillGroup, type LayerInfo, type Pads, type PsHost, type Variation, type VariationMask, padsLabel, parsePads } from "./host.ts";
 
 declare const require: (m: string) => any;
@@ -153,6 +154,68 @@ export async function grayInto(r: any, want: Rect, fill: number): Promise<Pixels
     const got = boundsOf(r.sourceBounds, { left: want.left, top: want.top, right: want.left + d.width, bottom: want.top + d.height });
     return placeGray(px, got, want, fill);
   } finally { r.imageData.dispose(); }
+}
+
+/** A layer's pixels (sRGB, 8 bit) and where they are on the canvas. */
+export async function readLayerImage(docId: number, layerId: number): Promise<{ pixels: Pixels; rect: Rect }> {
+  const layer = findLayer(docById(docId).layers, layerId);
+  if (!layer) throw new Error("图层已不存在");
+  return modal("WavePlug 读取图层", async () => {
+    const r = await ps().imaging.getPixels({ documentID: docId, layerID: layerId, componentSize: 8, colorSpace: "RGB", colorProfile: SRGB });
+    try {
+      const d = r.imageData;
+      const pixels: Pixels = { width: d.width, height: d.height, channels: d.components, data: new Uint8Array(await d.getData({ chunky: true })) };
+      const b = boundsOf(r.sourceBounds, boundsRect(layer));
+      return { pixels, rect: { left: b.left, top: b.top, right: b.left + d.width, bottom: b.top + d.height } };
+    } finally { r.imageData.dispose(); }
+  });
+}
+
+/**
+ * A group's merged pixels (what it shows: its children, their visibility, masks, blend modes and the
+ * group's own opacity / mask) and where they are. Photoshop has no direct read for a group, so inside
+ * one modal with history suspended: duplicate the group, make the copy visible, Merge Group, read the
+ * merged layer, then resume history *without committing* — the document is exactly as before (no
+ * undo step). The layer selection is put back too.
+ */
+export async function readGroupImage(docId: number, groupId: number, maxEdge = 0): Promise<{ pixels: Pixels; rect: Rect }> {
+  return modal("WavePlug 合并读取图层组", async ctx => {
+    const doc = docById(docId);
+    if (!findLayer(doc.layers, groupId)) throw new Error("图层组已不存在");
+    const before = (doc.activeLayers ?? []).map((l: any) => l.id as number);
+    const hc = ctx.hostControl;
+    const s = await hc.suspendHistory({ documentID: docId, name: "WavePlug 合并读取图层组" });
+    try {
+      await play([{ _obj: "select", _target: [{ _ref: "layer", _id: groupId }], makeVisible: false, _options: DONT }]);
+      await play([{ _obj: "duplicate", _target: [{ _ref: "layer", _enum: "ordinal", _value: "targetEnum" }], version: 5, _options: DONT }]);
+      const copy = doc.activeLayers[0];
+      if (!copy || copy.id === groupId) throw new Error("复制图层组失败");
+      copy.visible = true;
+      await play([{ _obj: "mergeLayersNew", _options: DONT }]);
+      const merged = doc.activeLayers[0];
+      if (!merged || merged.kind === ps().constants.LayerKind.GROUP) throw new Error("合并图层组失败");
+      const mb = boundsRect(merged);
+      const opts: Record<string, unknown> = { documentID: docId, layerID: merged.id, componentSize: 8, colorSpace: "RGB", colorProfile: SRGB };
+      const scaled = maxEdge > 0 && Math.max(rectW(mb), rectH(mb)) > maxEdge;
+      if (scaled) opts.targetSize = rectW(mb) >= rectH(mb) ? { width: maxEdge } : { height: maxEdge };
+      const r = await ps().imaging.getPixels(opts);
+      try {
+        const d = r.imageData;
+        const pixels: Pixels = { width: d.width, height: d.height, channels: d.components, data: new Uint8Array(await d.getData({ chunky: true })) };
+        const b = boundsOf(r.sourceBounds, mb);
+        return { pixels, rect: scaled ? b : { left: b.left, top: b.top, right: b.left + d.width, bottom: b.top + d.height } };
+      } finally { r.imageData.dispose(); }
+    } finally {
+      await hc.resumeHistory(s, false);
+      try { if (before.length) await play([{ _obj: "select", _target: before.map((id: number) => ({ _ref: "layer", _id: id })), makeVisible: false, _options: DONT }]); }
+      catch (e) { log("warn", "group read: selection not restored", e); }
+    }
+  });
+}
+
+function isGroupId(docId: number, layerId: number): boolean {
+  const l = findLayer(docById(docId).layers, layerId);
+  return !!l && l.kind === ps().constants.LayerKind.GROUP;
 }
 
 /** Writes a temporary PNG for placeEvent; `remove()` deletes it once Photoshop has placed it. */
@@ -361,6 +424,7 @@ export class UxpHost implements PsHost {
   async layerPixels(docId: number, layerId: number, maxEdge = 0): Promise<Pixels> {
     const layer = findLayer(docById(docId).layers, layerId);
     if (!layer) throw new Error("参考图层已不存在");
+    if (layer.kind === ps().constants.LayerKind.GROUP) return (await readGroupImage(docId, layerId, maxEdge)).pixels;
     const b = boundsRect(layer);
     const opts: Record<string, unknown> = { documentID: docId, layerID: layerId };
     if (maxEdge && Math.max(rectW(b), rectH(b)) > maxEdge) opts.targetSize = rectW(b) >= rectH(b) ? { width: maxEdge } : { height: maxEdge };
@@ -379,17 +443,156 @@ export class UxpHost implements PsHost {
   }
 
   async layerImage(docId: number, layerId: number): Promise<{ pixels: Pixels; rect: Rect }> {
-    const layer = findLayer(docById(docId).layers, layerId);
-    if (!layer) throw new Error("要放大的图层已不存在");
-    return modal("WavePlug 读取图层", async () => {
-      const r = await ps().imaging.getPixels({ documentID: docId, layerID: layerId, componentSize: 8, colorSpace: "RGB", colorProfile: SRGB });
+    // a group (a folder, or an AI layer) is read as one merged image of what it shows
+    return isGroupId(docId, layerId) ? readGroupImage(docId, layerId) : readLayerImage(docId, layerId);
+  }
+
+  async placeDroppedFiles(files: FileDropItem[]): Promise<FileDropResult> {
+    const fs = uxpStorage().localFileSystem;
+    const { app } = ps();
+    const out: FileDropResult = { linked: 0, embedded: 0, opened: 0, failed: [] };
+    // what the drop gave is a UXP entry (dataTransfer.uxpEntries) or only a native path
+    const entryOf = async (f: any): Promise<any> => {
+      if (f && (f.isFile === true || typeof f.read === "function")) return f;
+      const path = String(f?.nativePath ?? f?.path ?? "");
+      if (!path) throw new Error("拖入的文件没有路径");
+      // which URL form UXP takes for a Windows path is not confirmed: try the plain one, then file:/C:/…
+      const urls = ["file:" + path, "file:/" + path.replace(/\\/g, "/"), "file:///" + path.replace(/\\/g, "/")];
+      let last: unknown = null;
+      for (const url of urls) {
+        try { return await fs.getEntryWithUrl(url); } catch (e) { last = e; }
+      }
+      log("warn", "file drop entry", path, last);
+      throw last ?? new Error("找不到拖入的文件");
+    };
+    const tokenOf = async (f: any): Promise<string> => {
+      try { return fs.createSessionToken(await entryOf(f)); }
+      catch (e) {
+        // an entry the drop made may not take a token: ask for the file again by its path
+        const path = String(f?.nativePath ?? "");
+        if (!path) throw e;
+        return fs.createSessionToken(await fs.getEntryWithUrl("file:" + path));
+      }
+    };
+    const doc = app.activeDocument;
+    if (!doc) {
+      // nothing open: there is nothing to place into, the files become documents
+      for (const f of files) {
+        try {
+          const entry = await entryOf(f.file);
+          await modal("WavePlug 打开拖入的文件", () => app.open(entry), { interactive: true });
+          out.opened++;
+        } catch (e) { log("warn", "file drop open", f.name, e); out.failed.push(f.name); }
+      }
+      log("info", "file drop opened", JSON.stringify({ opened: out.opened, failed: out.failed }));
+      return out;
+    }
+    const NONE = "没有文件置入";
+    try {
+      await step("WavePlug 置入文件", doc.id, async () => {
+        for (const f of files) {
+          try {
+            const token = await tokenOf(f.file);
+            const before = doc.activeLayers?.[0]?.id ?? null;
+            const [r] = await play([{
+              _obj: "placeEvent", null: { _path: token, _kind: "local" },
+              ...(f.mode === "linked" ? { linked: true } : {}),
+              freeTransformCenterState: { _enum: "quadCenterState", _value: "QCSAverage" },
+              offset: { _obj: "offset", horizontal: { _unit: "pixelsUnit", _value: 0 }, vertical: { _unit: "pixelsUnit", _value: 0 } },
+              _options: DONT,
+            }]);
+            const placed = doc.activeLayers?.[0]?.id ?? null;
+            if (r?._obj === "error" || placed === null || placed === before) throw new Error(String(r?.message ?? "Photoshop 没有置入这个文件"));
+            if (f.mode === "linked") out.linked++; else out.embedded++;
+            log("info", "file drop placed", JSON.stringify({ name: f.name, mode: f.mode, layerId: placed }));
+          } catch (e) { log("warn", "file drop place", f.name, f.mode, e); out.failed.push(f.name); }
+        }
+        // nothing went in: leave no empty history step
+        if (!out.linked && !out.embedded) throw new Error(NONE);
+      });
+    } catch (e) { if ((e as Error)?.message !== NONE) throw e; }
+    return out;
+  }
+
+  async downloadDropImages(urls: string[]): Promise<{ files: FileDropItem[]; failed: string[] }> {
+    const storage = uxpStorage(), folder = await storage.localFileSystem.getTemporaryFolder();
+    const files: FileDropItem[] = [], failed: string[] = [];
+    let n = 0;
+    for (let url of urls) {
+      let name = webImageName(url);
       try {
-        const d = r.imageData;
-        const pixels: Pixels = { width: d.width, height: d.height, channels: d.components, data: new Uint8Array(await d.getData({ chunky: true })) };
-        const b = boundsOf(r.sourceBounds, boundsRect(layer));
-        return { pixels, rect: { left: b.left, top: b.top, right: b.left + d.width, bottom: b.top + d.height } };
-      } finally { r.imageData.dispose(); }
+        let bytes: ArrayBuffer, type = "";
+        if (/^data:/i.test(url)) {
+          const m = /^data:([^;,]*)(;base64)?,(.*)$/is.exec(url);
+          if (!m) throw new Error("data 地址看不懂");
+          type = m[1];
+          const body = m[2] ? atob(m[3]) : decodeURIComponent(m[3]);
+          const u8 = new Uint8Array(body.length);
+          for (let i = 0; i < body.length; i++) u8[i] = body.charCodeAt(i) & 255;
+          bytes = u8.buffer;
+        } else {
+          let res = await fetch(url);
+          if (!res.ok) throw new Error(`HTTP ${res.status}`);
+          type = res.headers.get("content-type") ?? "";
+          if (/html/i.test(type)) {
+            // a page (the image sat inside a link): its own picture (og:image), if it names one
+            const pic = pageImage(await res.text(), url);
+            log("info", "web drop page image", JSON.stringify({ page: url.slice(0, 160), image: pic?.url.slice(0, 160) ?? null }));
+            if (!pic) throw new Error("浏览器只给了图片外面的网页链接，网页没提供封面图。改用：图片上右键「复制图片」后在 PS 里 Ctrl+V，或「在新标签页中打开图片」后从那里拖");
+            if (pic.title) name = pic.title.replace(/[\\/:*?"<>|]/g, "_").slice(0, 60);
+            res = await fetch(pic.url);
+            if (!res.ok) throw new Error(`封面图 HTTP ${res.status}`);
+            type = res.headers.get("content-type") ?? "";
+            url = pic.url;
+          }
+          bytes = await res.arrayBuffer();
+        }
+        const ext = webImageExt(type, url);
+        if (!ext) throw new Error(`不是图片（${type || "未知类型"}）`);
+        if (!bytes.byteLength) throw new Error("下载到的是空文件");
+        const file = await folder.createFile(`waveplug_web_${Date.now()}_${n++}.${ext}`, { overwrite: true });
+        await file.write(bytes, { format: storage.formats.binary });
+        files.push({ file, name, mode: "embedded" });
+        log("info", "web drop downloaded", JSON.stringify({ url: url.slice(0, 160), type, bytes: bytes.byteLength }));
+      } catch (e) {
+        log("warn", "web drop download", url.slice(0, 160), e);
+        failed.push(`${name}：${(e as Error)?.message ?? e}`);
+      }
+    }
+    return { files, failed };
+  }
+
+  async webDropFolder(): Promise<string | null> {
+    const folder = await uxpStorage().localFileSystem.getTemporaryFolder();
+    return String(folder?.nativePath ?? "") || null;
+  }
+
+  async webDropItems(files: { file: string; name: string }[]): Promise<{ items: FileDropItem[]; failed: string[] }> {
+    const folder = await uxpStorage().localFileSystem.getTemporaryFolder();
+    const items: FileDropItem[] = [], failed: string[] = [];
+    for (const f of files) {
+      try { items.push({ file: await folder.getEntry(f.file), name: f.name, mode: "embedded" }); }
+      catch (e) { log("warn", "web drop entry", f.file, e); failed.push(f.name); }
+    }
+    return { items, failed };
+  }
+
+  async addDroppedText(text: string): Promise<void> {
+    const doc = ps().app.activeDocument;
+    if (!doc) throw new Error("没有打开的文档");
+    const pct = (v: number) => ({ _unit: "percentUnit", _value: v });
+    await step("WavePlug 置入网页文字", doc.id, async () => {
+      await play([{
+        _obj: "make", _target: [{ _ref: "textLayer" }],
+        using: {
+          _obj: "textLayer", textKey: text,
+          textClickPoint: { _obj: "paint", horizontal: pct(50), vertical: pct(50) },
+          textStyleRange: [{ _obj: "textStyleRange", from: 0, to: text.length, textStyle: { _obj: "textStyle", size: { _unit: "pointsUnit", _value: 24 } } }],
+          paragraphStyleRange: [{ _obj: "paragraphStyleRange", from: 0, to: text.length, paragraphStyle: { _obj: "paragraphStyle", align: { _enum: "alignmentType", _value: "center" } } }],
+        },
+      }]);
     });
+    log("info", "web drop text", JSON.stringify({ chars: text.length }));
   }
 
   docVersion(docId: number): string | null {
@@ -402,8 +605,15 @@ export class UxpHost implements PsHost {
   async layerDragInfo(docId: number, layerId: number, kind: string): Promise<{ rect: Rect | null; vector: VectorInput | null; res: number }> {
     const doc = docById(docId);
     const ref = [{ _ref: "layer", _id: layerId }, { _ref: "document", _id: docId }];
-    const [layer] = await play([{ _obj: "get", _target: ref, _options: DONT }]);
-    const b = layer?.boundsNoEffects ?? layer?.bounds;
+    // Only the properties needed, one `get` each. A whole-layer `get` of a smart object took ~20 s
+    // (and on a deleted / converted layer it hung Photoshop while a delete waited behind it).
+    const props = ["boundsNoEffects", "bounds",
+      ...(kind === "text" ? ["textKey", "opacity", "fillOpacity"] : kind === "shape" ? ["adjustment", "AGMStrokeStyleInfo", "opacity", "fillOpacity"] : [])];
+    const got = await play(props.map(p => ({ _obj: "get", _target: [{ _property: p }, ...ref], _options: DONT })));
+    const layer: any = {};
+    for (const r of got) if (r && r._obj !== "error") Object.assign(layer, r);
+    // a group is exported merged, with its layers' effects: its bounds with effects
+    const b = kind === "group" ? (layer?.bounds ?? layer?.boundsNoEffects) : (layer?.boundsNoEffects ?? layer?.bounds);
     const rect = b ? boundsOf(b, { left: 0, top: 0, right: 0, bottom: 0 }) : null;
     const res = Number(doc?.resolution) || 72;
     if (kind !== "text" && kind !== "shape") return { rect, vector: null, res };
@@ -415,6 +625,7 @@ export class UxpHost implements PsHost {
   }
 
   async exportLayerPng(docId: number, layerId: number, sessionId: string, order: number): Promise<{ path: string; rect: Rect; remove(): Promise<void> }> {
+    // a group (an AI layer is one too) goes as one merged image of what it shows
     const { pixels, rect } = await this.layerImage(docId, layerId);
     const fs = uxpStorage().localFileSystem;
     const folder = await fs.getTemporaryFolder();

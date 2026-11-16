@@ -3,9 +3,10 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { appendStagedLayers, planWorkbenchCopies, pointInWorkbench, workbenchPlacementAnchor } from "../src/core/layers/workbench.ts";
 import {
-  addToWorkbenchDemo, removeFromWorkbenchDemo, clearWorkbenchDemo,
-  onWorkbenchDemoChange, workbenchDemoState,
+  addToWorkbench, removeFromWorkbench, clearWorkbench,
+  onWorkbenchChange, workbenchState,
 } from "../src/ui/workbenchStore.ts";
+import { stagedKey } from "../src/core/layers/workbench.ts";
 
 const item = (docId: number, layerId: number) =>
   ({ docId, layerId, docKey: "WavePlug_TEST_" + docId + ".psd", name: "Layer " + layerId, kind: "pixel" });
@@ -14,27 +15,27 @@ test("内嵌工作台：跨 PSD 暂存图层 ID 去重，操作清单不影响�
   const a = item(10, 5), b = item(11, 5), c = item(10, 6);
   assert.deepEqual(appendStagedLayers([a], [a, b, c, c]), [a, b, c]);
   assert.deepEqual(appendStagedLayers([a], [item(0, 1), item(1, -9)]), [a]);
-  clearWorkbenchDemo();
-  assert.equal(addToWorkbenchDemo([a, b, b]), 2);
-  assert.equal(addToWorkbenchDemo([a, c]), 1);
-  assert.deepEqual(workbenchDemoState().staged, [a, b, c]);
-  removeFromWorkbenchDemo(b);
-  assert.deepEqual(workbenchDemoState().staged, [a, c]);
-  clearWorkbenchDemo();
-  assert.deepEqual(workbenchDemoState().staged, []);
+  clearWorkbench();
+  assert.equal(addToWorkbench([a, b, b]), 2);
+  assert.equal(addToWorkbench([a, c]), 1);
+  assert.deepEqual(workbenchState().staged, [a, b, c]);
+  removeFromWorkbench(new Set([stagedKey(b)]));
+  assert.deepEqual(workbenchState().staged, [a, c]);
+  clearWorkbench();
+  assert.deepEqual(workbenchState().staged, []);
 });
 
 test("内嵌工作台：清单变化通知观察者，退订后不再通知", () => {
-  clearWorkbenchDemo();
+  clearWorkbench();
   let calls = 0;
-  const dispose = onWorkbenchDemoChange(() => { calls++; });
-  addToWorkbenchDemo([item(3, 4)]);
-  clearWorkbenchDemo();
+  const dispose = onWorkbenchChange(() => { calls++; });
+  addToWorkbench([item(3, 4)]);
+  clearWorkbench();
   assert.equal(calls, 2);
   dispose();
-  addToWorkbenchDemo([item(3, 5)]);
+  addToWorkbench([item(3, 5)]);
   assert.equal(calls, 2);
-  clearWorkbenchDemo();
+  clearWorkbench();
 });
 
 test("内嵌工作台：最终松开位置决定投放，不将列表外误认为重排目标", () => {
@@ -81,15 +82,12 @@ test("工作台默认位置：开启时使用最上方选中图层；关闭、�
   assert.equal(workbenchPlacementAnchor(true, true, layersTopToBottom, new Set([999])), null);
 });
 
-test("工作台默认位置开关：偏好持久化并将目标文档/图层传给置入逻辑", () => {
-  const ui = readFileSync(new URL("../src/ui/workbenchDemo.ts", import.meta.url), "utf8");
+test("工作台设置：置入把目标文档和设置传给置入逻辑；发送到不包组", () => {
+  const ui = readFileSync(new URL("../src/ui/workbench.ts", import.meta.url), "utf8");
+  const tree = readFileSync(new URL("../src/ui/layerTree.ts", import.meta.url), "utf8");
   const host = readFileSync(new URL("../src/ps/uxpWorkbench.ts", import.meta.url), "utf8");
-  assert.match(ui, /wp\.workbench\.defaultPosition/);
-  assert.match(ui, /type: "checkbox"/);
-  assert.match(ui, /defaultPositionInput\.checked = useSelectedPosition/);
-  assert.doesNotMatch(ui, /icon\("target", 12\), "默认位置"/);
-  assert.match(ui, /localStorage\.setItem\(DEFAULT_POSITION_KEY, useSelectedPosition \? "selected" : "top"\)/);
-  assert.match(ui, /tree\.placeStaged\(staged, options\)/);
-  assert.match(host, /options\.targetDocId !== targetId/);
-  assert.match(host, /group\.move\(anchor, ps\(\)\.constants\.ElementPlacement\.PLACEBEFORE\)/);
+  assert.match(ui, /tree\.placeStaged\(ok, \{\s*targetDocId, position: p\.position, wrapGroup: p\.wrapGroup/);
+  assert.match(tree, /targetDocId: target, wrapGroup: false/);
+  assert.match(host, /group\.move\(anchor, constants\.PLACEBEFORE\)/);
+  assert.match(host, /return step\(/);
 });

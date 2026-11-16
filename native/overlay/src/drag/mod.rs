@@ -20,6 +20,7 @@ mod ole;
 pub mod session;
 pub mod targets;
 pub mod transfer;
+pub mod trash;
 #[cfg(windows)]
 mod win;
 
@@ -40,6 +41,9 @@ pub enum Event {
     Finished,
     /// the hovered native target changed: redraw the surfaces
     Hover,
+    /// any drag session ended here: dropped / released / escape / cancelled (the workbench's own
+    /// drags out of its window wait for this)
+    Ended { ending: &'static str },
     /// a drag to another program (OLE) ended: dropped / cancelled / rejected / error
     /// `target`: the program it was let go over, by name; `count`: files offered
     ExternalFinished { session_id: String, status: &'static str, effect: &'static str, target: String, count: usize },
@@ -95,6 +99,10 @@ pub enum Cmd {
     TransferCancel { session_id: String },
     /// the plugin has exported `done` of the layers so far (for the card)
     TransferProgress { session_id: String, done: usize },
+    /// 外置删除区 for this drag (drag/trash.rs): `view` the canvas on screen (left, top, right,
+    /// bottom px), `enabled` whether anything dragged can be deleted, `action` the card's text
+    /// over it. Gone with the drag.
+    Trash { view: Option<(i32, i32, i32, i32)>, enabled: bool, action: String },
 }
 
 /// Which of the plugin's layer keys are already exported in the store (external-drag-cached).
@@ -176,6 +184,6 @@ pub fn send(cmd: Cmd) {
     match cmd {
         Cmd::PreviewStart { .. } => ACTIVE.store(true, Ordering::SeqCst),
         Cmd::End | Cmd::Cancel => ACTIVE.store(false, Ordering::SeqCst),
-        Cmd::Reference(_) | Cmd::Verdict { .. } | Cmd::TransferPrepare { .. } | Cmd::TransferFiles { .. } | Cmd::TransferCancel { .. } | Cmd::TransferProgress { .. } => {}
+        Cmd::Reference(_) | Cmd::Verdict { .. } | Cmd::TransferPrepare { .. } | Cmd::TransferFiles { .. } | Cmd::TransferCancel { .. } | Cmd::TransferProgress { .. } | Cmd::Trash { .. } => {}
     }
 }

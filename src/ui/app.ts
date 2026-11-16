@@ -24,8 +24,9 @@ import { RATIOS, createExpandEditor } from "./expandEditor.ts";
 import { createToolsView } from "./tools.ts";
 import { type Overlay, connectOverlay } from "../app/overlay.ts";
 import type { PanelParam } from "../core/overlay/generatePanel.ts";
-import { EXPECTED_HELPER_VERSION, helperOutdated } from "../core/overlay/protocol.ts";
+import { EXPECTED_HELPER_VERSION, HANG_HELPER_VERSION, HANG_SECONDS, MONITOR_HELPER_VERSION, appSettingsOf, hangDocs, helperOutdated } from "../core/overlay/protocol.ts";
 import { attachGenerateSurface } from "./generateSurface.ts";
+import { attachIllustratorBridge } from "../app/illustratorBridge.ts";
 import { attachVariantsSurface } from "./variantsSurface.ts";
 
 type Conn = { state: "checking" | "ok" | "down"; text: string };
@@ -296,6 +297,7 @@ export function mountApp(root: HTMLElement, svc: Services) {
   root.append(
     h("header", { class: "top" },
       h("div", { class: "brand" }, h("span", { class: "mark" }, "W"), h("span", { class: "brand-name" }, "WavePlug"),
+        h("span", { class: "brand-tag", title: "测试版 1：功能还在打磨，遇到问题请把 reports\\uxp_runtime.log 发给开发者" }, "Beta"),
         svc.devReload ? h("button", { class: "icon-btn dev-reload", title: "重新加载开发版代码（G:\\waveplug\\studio\\dist\\plugin）", onClick: () => svc.devReload!() }, icon("refresh", 13)) : null),
       h("div", { class: "top-right" }, flowBtn, connEl)),
     (mainEl.append(viewEl, (genView.append(
@@ -717,6 +719,23 @@ export function mountApp(root: HTMLElement, svc: Services) {
     });
   }
 
+  /** 性能监视: the helper's box in the canvas's bottom-right corner, as the setting says. */
+  function syncMonitor() {
+    overlay?.setMonitor(settings.perfMonitor !== false, settings.comfyUrl);
+  }
+
+  /** 卡死保护: the switch and the open documents (names and paths, for where backups go). */
+  let hangSyncing = false;
+  async function syncHangGuard() {
+    if (!overlay || hangSyncing) return;
+    hangSyncing = true;
+    try {
+      const docs = settings.hangGuard !== false ? hangDocs(await svc.layers.openDocs()) : [];
+      overlay.setHangGuard(settings.hangGuard !== false, settings.hangAutoBackup !== false, docs);
+    } catch (e) { log("warn", "hang guard docs", e); }
+    finally { hangSyncing = false; }
+  }
+
   function startOverlay() {
     overlay = connectOverlay({
       launch: svc.launchOverlay,
@@ -728,8 +747,27 @@ export function mountApp(root: HTMLElement, svc: Services) {
       },
     });
     svc.overlay = overlay;
+    if (svc.bridgePs) attachIllustratorBridge(overlay, svc.bridgePs, svc.host, (text, kind) => setStatus(text, kind));
+    syncMonitor();
+    void syncHangGuard();
     overlay.onConnected(() => {
       syncComfyManager(settings.comfyAutoStartWithPhotoshop !== false);
+    });
+    // the WavePlug app window's 功能设置: the same settings, shown and edited there
+    const shareAppSettings = () => overlay?.sendAppSettings(appSettingsOf(settings as unknown as Record<string, unknown>));
+    shareAppSettings();
+    setInterval(shareAppSettings, 2000);
+    overlay.onAppSettingsSet(changes => {
+      const keys = Object.keys(changes);
+      if (!keys.length) return;
+      Object.assign(settings, changes);
+      store.saveSettings(settings);
+      log("info", "settings from the WavePlug app", JSON.stringify(changes));
+      if (keys.includes("perfMonitor") || keys.includes("comfyUrl")) syncMonitor();
+      if (keys.includes("hangGuard") || keys.includes("hangAutoBackup")) void syncHangGuard();
+      if (keys.some(k => k.startsWith("comfy"))) syncComfyManager(settings.comfyAutoStartWithPhotoshop !== false);
+      shareAppSettings();
+      setStatus("已按 WavePlug 程序里的修改更新设置", "info");
     });
     overlay.onComfyStatus(status => {
       if (status.state === "starting") {
@@ -957,7 +995,7 @@ export function mountApp(root: HTMLElement, svc: Services) {
     const show = (kind: "ok" | "error" | "info", text: string) => replace(result, h("span", { class: "dot " + kind }), h("span", null, text));
     const connect = async () => {
       show("info", "正在保存…");
-      settings.comfyUrl = normalizeUrl(url.value);
+      settings.comfyUrl = normalizeUrl(url.value); syncMonitor();
       url.value = settings.comfyUrl;
       store.saveSettings(settings);
       comfy = svc.comfy(settings.comfyUrl);
@@ -990,14 +1028,15 @@ export function mountApp(root: HTMLElement, svc: Services) {
     }) }, "启动");
     const comfyBtn = h("button", { class: "btn", title: "用上面的启动文件启动 ComfyUI；在运行时重启它（只能重启 WavePlug 启动的 ComfyUI）", onClick: lifeAction(async () => {
       settings.comfyLaunch = launchPath.value.trim().replace(/^"|"$/g, ""); store.saveSettings(settings);
-      settings.comfyUrl = normalizeUrl(url.value); url.value = settings.comfyUrl; comfy = svc.comfy(settings.comfyUrl);
+      settings.comfyUrl = normalizeUrl(url.value); syncMonitor(); url.value = settings.comfyUrl; comfy = svc.comfy(settings.comfyUrl);
       await launchComfy(show, conn.state === "ok");
     }) }, "启动");
     function renderLife() {
       const up = !!overlay?.connected;
       const stale = up && helperOutdated(overlay?.helperVersion ?? null);
       replace(helperState, "外置框架：" + (up ? `运行中 · ${overlay?.helperVersion ?? ""}` : "未运行")
-        + (stale ? `（需要 ${EXPECTED_HELPER_VERSION}：在 Windows 运行 native/overlay/build.cmd）` : ""));
+        + (stale ? `（需要 ${EXPECTED_HELPER_VERSION}：在 Windows 运行 native/overlay/build.cmd）` : "")
+        + (up && !stale ? (overlay?.illustrator ? " · Illustrator 已连接" : " · Illustrator 未连接") : ""));
       replace(helperBtn, up ? "重启" : "启动");
       replace(comfyState, "ComfyUI：" + (conn.state === "ok" ? conn.text : conn.state === "checking" ? conn.text : "未连接"));
       replace(comfyBtn, conn.state === "ok" ? "重启" : "启动");
@@ -1021,6 +1060,33 @@ export function mountApp(root: HTMLElement, svc: Services) {
             settings.helperAutoStart = on;
             store.saveSettings(settings);
             show("info", on ? "下次启动 Photoshop 时会自动打开外置框架。" : "外置框架不再随 Photoshop 启动；ComfyUI 的自动启动也要等外置框架打开后才会进行。");
+          }) : null,
+        svc.launch ? checkRow("在画布右下角显示性能监视", "由外置框架在 Photoshop 画布右下角显示一个小浮窗：CPU、内存、显卡占用和显存、Photoshop 占用的内存、暂存盘文件大小和剩余空间、ComfyUI 占用的显存。接近上限时数字变黄 / 变红。浮窗不挡鼠标和快捷键，只在 Photoshop 位于前台时显示。显卡数据目前只支持 NVIDIA。",
+          settings.perfMonitor !== false, on => {
+            settings.perfMonitor = on;
+            store.saveSettings(settings);
+            syncMonitor();
+            const old = overlay?.helperVersion ? helperOutdated(overlay.helperVersion, MONITOR_HELPER_VERSION) : false;
+            show("info", !on ? "已关闭性能监视。"
+              : !overlay?.connected ? "已开启；外置框架启动后显示。"
+              : old ? `已开启，但当前外置框架 ${overlay.helperVersion} 不支持（需要 ${MONITOR_HELPER_VERSION}：在 Windows 运行 native/overlay/build.cmd）。`
+              : "已开启性能监视。");
+          }) : null,
+        svc.launch ? checkRow("Photoshop 卡死时提示并备份恢复文件", `Photoshop ${HANG_SECONDS} 秒没有响应时，外置框架弹出提示：继续等待、备份自动恢复文件、或关闭 Photoshop（会先确认）。卡死时插件本身也动不了，没法保存文档；能救回的是 Photoshop 定时写的自动恢复文件（首选项 › 文件处理 › 自动存储恢复信息间隔，建议 5 分钟）。备份放在对应文档旁边，文件名加「_卡死备份_时间」；没保存过的文档放在恢复文件夹旁的 PSAutoRecover_卡死备份 里。`,
+          settings.hangGuard !== false, on => {
+            settings.hangGuard = on;
+            store.saveSettings(settings);
+            void syncHangGuard();
+            const old = overlay?.helperVersion ? helperOutdated(overlay.helperVersion, HANG_HELPER_VERSION) : false;
+            show("info", !on ? "已关闭卡死保护。"
+              : old ? `已开启，但当前外置框架 ${overlay!.helperVersion} 不支持（需要 ${HANG_HELPER_VERSION}：在 Windows 运行 native/overlay/build.cmd）。`
+              : "已开启卡死保护。");
+          }) : null,
+        svc.launch ? checkRow("发现卡死时立即备份", "不等你点按钮，一发现 Photoshop 没有响应就开始复制自动恢复文件。",
+          settings.hangAutoBackup !== false, on => {
+            settings.hangAutoBackup = on;
+            store.saveSettings(settings);
+            void syncHangGuard();
           }) : null,
         svc.launch ? h("div", { class: "row launch-row" }, launchPath,
           h("button", { class: "icon-btn", title: "选择启动文件（.bat / .cmd / .exe）", onClick: async () => {
@@ -1062,10 +1128,19 @@ export function mountApp(root: HTMLElement, svc: Services) {
         } }, "导出诊断报告…") : null,
         svc.debugSave && h("label", { class: "check-row", title: "每次生成时把发送的图片、返回的图片和提交的工作流保存到 G:\\waveplug\\studio\\reports\\debug_*。大图一张可达几十 MB，排查完请关闭" },
           h("input", { type: "checkbox", checked: settings.debugFiles, onChange: (e: Event) => { settings.debugFiles = (e.target as HTMLInputElement).checked; store.saveSettings(settings); } }),
-          h("span", null, "保存调试文件（图片较大，仅排查时打开）"))),
+          h("span", null, "保存调试文件（图片较大，仅排查时打开）")),
+        // one plugin for users and development: only someone who has run it from the development
+        // folder (or turned that off) sees the switch
+        svc.loadFrom && (svc.loadFrom.source === "dev" || (() => { try { return localStorage.getItem("wp.loadFrom") === "bundled"; } catch { return false; } })())
+          ? h("div", null,
+            h("div", { class: "group-label" }, "开发者"),
+            checkRow("从开发文件夹加载代码", `开启时运行 ${svc.loadFrom.devRoot.replace(/\//g, "\\")} 里的最新构建（update.cmd 构建后自动载入，日志写到 reports\\）；关闭时运行插件自带的版本，和用户装到的完全一样。文件夹打不开时自动用自带的版本。`,
+              svc.loadFrom.source === "dev", on => svc.loadFrom!.set(on ? "dev" : "bundled")),
+            svc.loadFrom.source === "bundled" && svc.loadFrom.devMissing ? h("div", { class: "muted small" }, "开发文件夹现在打不开，正在用插件自带的版本") : null)
+          : null),
       h("div", { class: "sheet-foot" },
         svc.diagnose ? h("button", { class: "btn", title: "逐项测试 fetch / XHR / WebSocket，结果同时写入日志", onClick: async () => {
-          settings.comfyUrl = normalizeUrl(url.value); url.value = settings.comfyUrl;
+          settings.comfyUrl = normalizeUrl(url.value); syncMonitor(); url.value = settings.comfyUrl;
           show("info", "诊断中…");
           const lines = await svc.diagnose!(settings.comfyUrl).catch(e => ["诊断失败：" + (e as Error).message]);
           replace(result, h("pre", { class: "diag" }, lines.join("\n")));
@@ -1360,9 +1435,9 @@ export function mountApp(root: HTMLElement, svc: Services) {
       return;
     }
     const layer = svc.host.listLayers(sourceDocId).find(l => l.id === layerId);
-    if (!layer || (_dragName && layer.name !== _dragName) || layer.kind === "group"
-      || [FILL_PREFIX, BLEND_PREFIX, EXTRACT_PREFIX, EXPAND_PREFIX, GENERATE_PREFIX, UPSCALE_PREFIX].some(prefix => layer.name.startsWith(prefix))) {
-      setStatus("图层已变化或不是普通图层，无法拖入参考图", "error");
+    // folders and AI layers are read as one merged image of what they show (uxpHost.readGroupImage)
+    if (!layer || (_dragName && layer.name !== _dragName)) {
+      setStatus("图层已变化，无法拖入参考图", "error");
       return;
     }
     try {
@@ -1401,8 +1476,8 @@ export function mountApp(root: HTMLElement, svc: Services) {
     const unique = [...new Map(candidates.map(layer => [layer.layerId, layer])).values()];
     const valid = unique.filter(candidate => {
       const layer = byId.get(candidate.layerId);
-      return !!layer && layer.name === candidate.name && layer.kind !== "group"
-        && ![FILL_PREFIX, BLEND_PREFIX, EXTRACT_PREFIX, EXPAND_PREFIX, GENERATE_PREFIX, UPSCALE_PREFIX].some(prefix => layer.name.startsWith(prefix));
+      // folders and AI layers too: read as one merged image (uxpHost.readGroupImage)
+      return !!layer && layer.name === candidate.name;
     });
     const plan = planLayerReferenceDrop(
       startSlot,
@@ -1768,7 +1843,7 @@ export function mountApp(root: HTMLElement, svc: Services) {
   listen(window, "unhandledrejection", e => { log("error", "unhandled", (e as PromiseRejectionEvent).reason); setStatus("插件内部错误：" + String((e as PromiseRejectionEvent).reason?.message ?? (e as PromiseRejectionEvent).reason), "error"); });
   log("info", "start", svc.version, svc.host.kind, settings.comfyUrl);
   renderAll();
-  svc.host.onChange(() => { void refresh(); if (toolsMode()) void toolsView.refresh(); });
+  svc.host.onChange(() => { void refresh(); void syncHangGuard(); if (toolsMode()) void toolsView.refresh(); });
   const managedColdStart = svc.host.kind === "uxp"
     && settings.helperAutoStart !== false
     && settings.comfyAutoStartWithPhotoshop !== false;

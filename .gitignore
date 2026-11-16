@@ -3,3 +3,8 @@ dist/
 poc/tmp/
 *.ccx
 .DS_Store
+# built installers (published as GitHub Releases instead)
+releases/
+# logs, test files and screenshots from test runs (AGENTS.md: not committed)
+reports/
+!reports/*.md

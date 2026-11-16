@@ -1,5 +1,5 @@
 // The helper's own log, next to the plugin's: reports/overlay_runtime.log when the exe runs from
-// dist/ (dist/../reports), else beside the exe. For evidence when something misbehaves in
+// dist/ (dist/../reports), else in WavePlug's logs folder (paths.rs: inside the install folder). For evidence when something misbehaves in
 // Photoshop (who has the keyboard, when the panel was placed). Kept under 1 MB.
 
 use std::fs::{File, OpenOptions};
@@ -14,7 +14,9 @@ fn path() -> Option<PathBuf> {
     let exe = std::env::current_exe().ok()?;
     let dir = exe.parent()?;
     let reports = dir.parent().map(|p| p.join("reports")).filter(|p| p.is_dir());
-    Some(reports.unwrap_or_else(|| dir.to_path_buf()).join("overlay_runtime.log"))
+    let dir = reports.unwrap_or_else(crate::paths::logs_dir);
+    let _ = std::fs::create_dir_all(&dir);
+    Some(dir.join("overlay_runtime.log"))
 }
 
 pub fn init() {

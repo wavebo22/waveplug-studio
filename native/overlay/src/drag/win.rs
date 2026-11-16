@@ -47,14 +47,17 @@ use windows_sys::Win32::UI::WindowsAndMessaging::{
 use super::card;
 use super::illustrator;
 use super::ole;
-use super::session::{release_decision, Ending, Out, Release, Session};
-use super::targets::REGISTRY;
+use super::session::{release_decision, Ending, Out, Release, Session, TRASH};
+use super::targets::{self, Target, REGISTRY};
 use super::transfer;
+use super::trash;
 use super::{emit, set_hover, Cmd, Event, ACTIVE};
 use crate::log;
 
 /// The card window's title (unique, for finding it in tools).
 pub const TITLE: &str = "WavePlug 图层拖拽";
+/// The 外置删除区 window's title.
+pub const TRASH_TITLE: &str = "WavePlug 删除区";
 
 const WM_APP_CMD: u32 = 0x8000 + 0x61;
 const WM_APP_UP: u32 = 0x8000 + 0x62;
@@ -133,8 +136,22 @@ struct Transfer {
     svg: Option<PathBuf>,
 }
 
+/// The 外置删除区's window (drag/trash.rs): click-through like the card, placed once per drag.
+struct TrashWin {
+    hwnd: HWND,
+    /// on screen for this drag
+    on: bool,
+    enabled: bool,
+    centre: (i32, i32),
+    scale: f32,
+    look: Option<trash::Look>,
+}
+
 struct Engine {
     hwnd: HWND,
+    trash: TrashWin,
+    /// the cursor when the drag began: where the panel (the grabbed row) is
+    began_at: (i32, i32),
     transfer: Option<Transfer>,
     /// DoDragDrop is running (its modal loop dispatches our messages)
     ole_active: bool,
@@ -222,6 +239,7 @@ impl Engine {
         }
         let (x, y) = cursor();
         self.last = (x, y);
+        self.began_at = (x, y);
         out.extend(self.session.as_mut().map(|s| s.moved(x, y, None)).unwrap_or_default());
         self.apply(out);
     }
@@ -557,6 +575,7 @@ impl Engine {
                 }
             }
             Cmd::PreviewStart { layers, total } => self.start(layers, total),
+            Cmd::Trash { view, enabled, action } => self.show_trash(view, enabled, action),
             Cmd::Verdict { action, tone } => {
                 let out = self.session.as_mut().map(|s| s.plugin_verdict(action, tone)).unwrap_or_default();
                 self.apply(out);
@@ -627,6 +646,7 @@ impl Engine {
             KillTimer(self.hwnd, POLL_TIMER);
             ShowWindow(self.hwnd, SW_HIDE);
         }
+        self.hide_trash();
         if let Some(s) = self.session.take() {
             let ending = match s.ending() {
                 Some(Ending::Dropped) => "dropped",
@@ -642,6 +662,7 @@ impl Engine {
                 s.stats.max_handler_us,
                 if self.polling { "fallback" } else { "ok" },
             ));
+            emit(Event::Ended { ending });
         }
         self.drop_transfer();
         set_hover(None);
@@ -661,6 +682,10 @@ impl Engine {
                 }
                 Out::Place { x, y } => self.place(x, y),
                 Out::Hover(h) => {
+                    if self.trash.on && self.trash.enabled {
+                        let look = if h == Some((TRASH, 0)) { trash::Look::Hot } else { trash::Look::Idle };
+                        unsafe { self.render_trash(look) };
+                    }
                     set_hover(h);
                     emit(Event::Hover);
                 }
@@ -671,6 +696,56 @@ impl Engine {
                 Out::Finished => emit(Event::Finished),
             }
         }
+    }
+
+    /// Put the 外置删除区 up for this drag, next to where it began (trash::centre). Publishes its
+    /// hit box as the TRASH target unless nothing dragged can be deleted.
+    fn show_trash(&mut self, view: Option<(i32, i32, i32, i32)>, enabled: bool, action: String) {
+        if self.trash.hwnd.is_null() || self.session.as_ref().map_or(true, |s| s.ending().is_some()) {
+            return;
+        }
+        let at = self.began_at;
+        let scale = scale_at(at.0, at.1);
+        let centre = trash::centre(at, view, work_area(at.0, at.1), scale);
+        self.trash.on = true;
+        self.trash.enabled = enabled;
+        self.trash.centre = centre;
+        self.trash.scale = scale;
+        self.trash.look = None;
+        unsafe { self.render_trash(if enabled { trash::Look::Idle } else { trash::Look::Disabled }) };
+        let (ox, oy) = trash::origin(centre, scale);
+        unsafe {
+            SetWindowPos(self.trash.hwnd, HWND_TOPMOST, ox, oy, 0, 0, SWP_NOSIZE | SWP_NOACTIVATE | SWP_NOOWNERZORDER | SWP_SHOWWINDOW);
+        }
+        let hit = trash::hit_rect(centre, scale);
+        targets::publish(TRASH, if enabled { vec![Target { surface: TRASH, id: 0, rect: hit, action }] } else { Vec::new() });
+        log::line(format!("trash shown at {},{} enabled={enabled} view={view:?} began={at:?}", centre.0, centre.1));
+        // the cursor may already be over it
+        let (x, y) = cursor();
+        let hit = self.hit(x, y);
+        let out = self.session.as_mut().map(|s| s.moved(x, y, hit.as_ref())).unwrap_or_default();
+        self.apply(out);
+    }
+
+    fn hide_trash(&mut self) {
+        if !self.trash.on {
+            return;
+        }
+        self.trash.on = false;
+        self.trash.look = None;
+        targets::publish(TRASH, Vec::new());
+        unsafe { ShowWindow(self.trash.hwnd, SW_HIDE) };
+    }
+
+    /// Draw the square in `look` (only when it changed); the window keeps its place.
+    unsafe fn render_trash(&mut self, look: trash::Look) {
+        if self.trash.look == Some(look) {
+            return;
+        }
+        self.trash.look = Some(look);
+        let canvas = trash::paint(self.trash.scale, look);
+        let (ox, oy) = trash::origin(self.trash.centre, self.trash.scale);
+        blit(self.trash.hwnd, &canvas, (ox, oy));
     }
 
     /// Centre the card on (x, y); redrawn first only if the monitor's scale changed.
@@ -796,6 +871,43 @@ impl Engine {
         DeleteDC(mem);
         ReleaseDC(null_mut(), screen);
     }
+}
+
+/// Give `canvas` (premultiplied BGRA) to the layered window `hwnd` at `at`.
+unsafe fn blit(hwnd: HWND, canvas: &card::Canvas, at: (i32, i32)) {
+    let screen = GetDC(null_mut());
+    let mem = CreateCompatibleDC(screen);
+    let mut bmi: BITMAPINFO = std::mem::zeroed();
+    bmi.bmiHeader = BITMAPINFOHEADER {
+        biSize: std::mem::size_of::<BITMAPINFOHEADER>() as u32,
+        biWidth: canvas.w as i32,
+        biHeight: -(canvas.h as i32),
+        biPlanes: 1,
+        biBitCount: 32,
+        biCompression: BI_RGB,
+        ..std::mem::zeroed()
+    };
+    let mut bits: *mut core::ffi::c_void = null_mut();
+    let dib = CreateDIBSection(mem, &bmi, DIB_RGB_COLORS, &mut bits, null_mut(), 0);
+    if dib.is_null() || bits.is_null() {
+        log::line("trash: CreateDIBSection failed");
+        DeleteDC(mem);
+        ReleaseDC(null_mut(), screen);
+        return;
+    }
+    let old = SelectObject(mem, dib);
+    std::slice::from_raw_parts_mut(bits as *mut u8, canvas.px.len()).copy_from_slice(&canvas.px);
+    let dst = POINT { x: at.0, y: at.1 };
+    let size = SIZE { cx: canvas.w as i32, cy: canvas.h as i32 };
+    let src = POINT { x: 0, y: 0 };
+    let blend = BLENDFUNCTION { BlendOp: AC_SRC_OVER as u8, BlendFlags: 0, SourceConstantAlpha: 255, AlphaFormat: AC_SRC_ALPHA as u8 };
+    if UpdateLayeredWindow(hwnd, screen, &dst, &size, mem, &src, 0, &blend, ULW_ALPHA) == 0 {
+        log::line("trash: UpdateLayeredWindow failed");
+    }
+    SelectObject(mem, old);
+    DeleteObject(dib);
+    DeleteDC(mem);
+    ReleaseDC(null_mut(), screen);
 }
 
 fn with_engine(f: impl FnOnce(&mut Engine)) -> bool {
@@ -1129,9 +1241,29 @@ fn run() {
             log::line("drag card: window not created");
             return;
         }
+        let trash_title = wide(TRASH_TITLE);
+        let trash_hwnd = CreateWindowExW(
+            WS_EX_LAYERED | WS_EX_TRANSPARENT | WS_EX_NOACTIVATE | WS_EX_TOOLWINDOW | WS_EX_TOPMOST,
+            class.as_ptr(),
+            trash_title.as_ptr(),
+            WS_POPUP,
+            crate::win::PARK.0,
+            crate::win::PARK.1,
+            1,
+            1,
+            null_mut(),
+            null_mut(),
+            inst,
+            null(),
+        );
+        if trash_hwnd.is_null() {
+            log::line("trash: window not created");
+        }
         ENGINE.with(|e| {
             *e.borrow_mut() = Some(Engine {
                 hwnd: h,
+                trash: TrashWin { hwnd: trash_hwnd, on: false, enabled: false, centre: (0, 0), scale: 1.0, look: None },
+                began_at: (0, 0),
                 transfer: None,
                 ole_active: false,
                 ole_native: false,

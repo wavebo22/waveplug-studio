@@ -6,9 +6,8 @@
 npm install
 npm test            # 离线测试
 npm run typecheck
-npm run build       # dist/plugin（正式版）、dist/dev（开发版加载器）、dist/preview（浏览器预览）
+npm run build       # dist/plugin（唯一的插件）、dist/preview（浏览器预览）
 python scripts\package_ccx.py        # → releases\WavePlug_Studio_<版本>_local.ccx
-python scripts\package_ccx.py dev    # → releases\WavePlug_Studio_DEV_<版本>_local.ccx
 ```
 
 `node_modules` 若在另一系统上安装过，需要补装对应平台的 esbuild（`@esbuild/win32-x64` / `@esbuild/darwin-x64`）。
@@ -30,16 +29,18 @@ mainpc 不使用 UXP Developer Tool，而是使用 `D:\App\Adobe-UPIA-Extract\UP
 
 ## 开发版（免重装迭代）
 
-开发版 `WavePlug Studio Dev` 只装一次。它的面板每次打开时都从 `G:\waveplug\studio\dist\plugin` 读取最新构建运行；`npm run build` 之后点标题旁的橙色 ⟳ 即重新加载，不用关闭 Photoshop。
+只有一个插件 `WavePlug Studio`（`com.waveplug.studio`，11-16 起；以前另有 `WavePlug Studio Dev`）。`plugin/loader.js` 注册两个面板，然后：
 
-- 只有改 `plugin/manifest.json`（权限、名称）或 `dev/` 时才需要重新打包开发版并用 UPIA 安装。
-- 开发版的数据（导入的工作流、设置）与正式版分开存放。
-- 开发版额外拥有完整文件访问与动态代码权限；日志会同时写到 `reports\uxp_runtime.log`，并可在「ComfyUI 连接 → 保存调试文件」中保存每次发送/返回的图片和提交的工作流（`reports\debug_*`，文件较大，用完关闭）。
+- `G:\waveplug\studio\dist\plugin` 能读到、并且没有在设置 › 开发者里关掉「从开发文件夹加载代码」（localStorage `wp.loadFrom = bundled`）时，运行那里的构建（`__waveplugSource = "dev"`）：构建后 2 秒内自动载入，标题旁有 ⟳。文件夹可用 localStorage `wp.devRoot` 改。
+- 否则运行插件自带的 `index.js` / `styles.css`（`"bundled"`），和用户装到的完全一样。
+- 只有改 `plugin/manifest.json` 或 `plugin/loader.js` 时才需要重新安装插件（WavePlug 程序 › 安装与更新）。
+- 旧开发版的数据：旧 Dev 插件跑新代码时（老加载器不设 `__waveplugSource`）把 localStorage 写到 `dist\dev-plugin-data.json`；新插件第一次从开发文件夹运行时导入一次（`src/core/storageMove.ts`，标记 `wp.movedFromDev.v1`）。之后在 WavePlug 程序 › 开发者 里「卸载旧开发版插件」。
+- 插件有完整文件访问与动态代码权限（加载器用 eval 运行构建）；从开发文件夹运行时日志会同时写到 `reports\uxp_runtime.log`，并可在「ComfyUI 连接 → 保存调试文件」中保存每次发送/返回的图片和提交的工作流（`reports\debug_*`，文件较大，用完关闭）。
 
 ## 日志
 
-- 正式版：`%APPDATA%\Adobe\UXP\PluginsStorage\PHSP\27\External\com.waveplug.studio\PluginData\waveplug.log`
-- 开发版：同目录的 `com.waveplug.studio.dev\…`，并镜像到 `G:\waveplug\studio\reports\uxp_runtime.log`
+- `%APPDATA%\Adobe\UXP\PluginsStorage\PHSP\27\External\com.waveplug.studio\PluginData\waveplug.log`
+- 从开发文件夹运行时另外镜像到 `G:\waveplug\studio\reports\uxp_runtime.log`
 
 日志包含：每次运行的提示词/种子/选项、ComfyUI 复用缓存的节点、每个执行节点的耗时、发送与返回的尺寸、写回 Photoshop 的每一步、文档色彩模式/配置/分辨率。
 

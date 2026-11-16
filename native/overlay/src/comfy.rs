@@ -94,7 +94,7 @@ mod platform {
     }
 
     fn state_path() -> Option<std::path::PathBuf> {
-        let dir = std::path::PathBuf::from(std::env::var_os("LOCALAPPDATA")?).join("WavePlug");
+        let dir = crate::paths::data_root();
         let _ = std::fs::create_dir_all(&dir);
         Some(dir.join("comfy_managed.json"))
     }
@@ -318,6 +318,11 @@ mod platform {
             return None;
         }
         serde_json::from_slice(&bytes[split + 4..]).ok()
+    }
+
+    /// ComfyUI's /system_stats (local addresses only), for the 性能监视 box (monitor.rs).
+    pub fn system_stats(base: &str) -> Option<serde_json::Value> {
+        http_json(base, "/system_stats")
     }
 
     fn queue_idle(base: &str) -> bool {
@@ -961,7 +966,7 @@ mod platform {
 }
 
 #[cfg(windows)]
-pub use platform::{adopt, handover, manage, photoshop_closed};
+pub use platform::{adopt, handover, manage, photoshop_closed, system_stats};
 
 #[cfg(not(windows))]
 pub fn manage(

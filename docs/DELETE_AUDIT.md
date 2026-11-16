@@ -78,6 +78,10 @@ Adobe 官方 `executeAsModal` 文档说明长任务会呈现原生进度 UI 并�
 
 **验证范围：** 已做 TypeScript、Node 自动化测试与 build；mainpc 的 Photoshop MCP 当前报 `Photoshop info not available`，因此本轮**没有 Photoshop 真机移动 / Alt 复制验证**。特别是矢量蒙版及智能滤镜蒙版的 Action Manager 命令需实际确认，不应视为已完全验证。请使用临时 PSD 测试普通蒙版移动、Alt 复制、矢量蒙版、锁定/已有蒙版目标、左侧红区删除及 Ctrl+Z 撤销。
 
+## 2026-11-13 外置删除区（取代左侧红区，helper ≥ 0.12.0）
+
+拖动时 helper 在拖动起点旁画红色圆角方块（`native/overlay/src/drag/trash.rs`），松手删除；判定在 helper（和拖拽卡片同一次命中测试），删除仍走插件原来的 `run("delete")` / `dropSub(..., "delete")`，所以锁定、背景、组锁、画板、并发删除的保护都不变。helper 旧或没连时回退到下面的左侧红区。详细说明见 `README.md` 11-13 条目。
+
 ## 2026-11-04 左侧拖拽删除区（前一轮）
 
 用户决定：保留底部垃圾桶的单击和拖拽删除；列表左侧增加仅在拖动可删除对象时显示的 32px 红色目标区域。鼠标在红区内松开直接删除，移出即取消，不弹确认（Photoshop Ctrl+Z 可撤销）。不新增固定列，也不改变原有图层排序。

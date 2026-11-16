@@ -69,6 +69,7 @@ class MockHost implements PsHost {
   activeLayers(): ActiveLayer[] { return this.docOpen ? [this.activeLayer()!, { id: 8, name: "瓶子", kind: "smartObject", rect: { left: 900, top: 300, right: 1300, bottom: 900 } }, { id: 9, name: "装饰组", kind: "group", rect: { left: 0, top: 0, right: 100, bottom: 100 } }] : []; }
   async layerImage() { const w = 400, h = 450, data = new Uint8Array(w * h * 4); for (let i = 0; i < w * h; i++) { data[i * 4] = 200; data[i * 4 + 1] = 120; data[i * 4 + 2] = 60; data[i * 4 + 3] = (i % w) > 40 ? 255 : 0; } await sleep(100); return { pixels: { width: w, height: h, channels: 4 as const, data }, rect: { left: 300, top: 200, right: 700, bottom: 650 } }; }
   docVersion(_d: number) { return "1"; }
+  async placeDroppedFiles(files: { name: string; mode: string }[]) { await sleep(300); console.log("placed dropped files", files.map(f => `${f.name}:${f.mode}`).join(", ")); return { linked: files.filter(f => f.mode === "linked").length, embedded: files.filter(f => f.mode !== "linked").length, opened: 0, failed: [] as string[] }; }
   async exportLayerPng(_d: number, layerId: number, sessionId: string, order: number) { await sleep(80); const path = `/tmp/waveplug_drag_${sessionId}_${order}.png`; console.log("exported drag png", layerId, path); return { path, rect: { left: 0, top: 0, right: 10, bottom: 10 }, remove: async () => {} }; }
   async layerDragInfo() { return { rect: { left: 0, top: 0, right: 10, bottom: 10 }, vector: null, res: 72 }; }
   async placeUpscaledLayer(_d: number, _l: number, _png: Uint8Array, _r: Rect, name: string) { console.log("placed smart object", name); await sleep(150); return 99; }
@@ -199,21 +200,39 @@ class MockLayerTree implements LayerTree {
         ...l, id: l.section === "end" ? 0 : this.next++,
       })));
     }
-    const groupId = this.next++, groupName = "工作台素材";
-    const start: RawLayer = { id: groupId, name: groupName, kind: 7, section: "start", visible: true, locked: false, mask: false };
+    // the preview has one real document: 发送到 the other one only reports success
+    if (options?.targetDocId === 2) {
+      await sleep(30);
+      return { docId: 2, groupId: null, groupName: null, count: refs.length, nestedSkipped: 0, placement: "top" as const, restored: refs.length, scale: 1, ids: [] };
+    }
+    const wrap = options?.wrapGroup !== false;
+    const groupId = this.next++, groupName = wrap ? (options?.groupName || "工作台素材") : null;
+    const start: RawLayer = { id: groupId, name: groupName ?? "", kind: 7, section: "start", visible: true, locked: false, mask: false };
     const end: RawLayer = { id: 0, name: "", kind: 13, section: "end", visible: true, locked: false, mask: false };
-    const anchorIndex = options?.targetDocId === 1 && Number.isInteger(options.aboveLayerId)
-      ? this.raw.findIndex(layer => layer.id === options.aboveLayerId && layer.section !== "end") : -1;
+    const anchorIndex = options?.position === "selection" && this.selected.length
+      ? this.raw.findIndex(layer => this.selected.includes(layer.id) && layer.section !== "end") : -1;
     const insertAt = anchorIndex >= 0 ? anchorIndex : 0;
-    this.raw.splice(insertAt, 0, start, ...copies, end);
-    this.selected = [groupId];
+    if (wrap) this.raw.splice(insertAt, 0, start, ...copies, end);
+    else this.raw.splice(insertAt, 0, ...copies);
+    this.selected = wrap ? [groupId] : copies.filter(c => c.id).map(c => c.id);
     await sleep(30);
     this.changed();
     return {
-      docId: 1, groupId, groupName, count: refs.length, nestedSkipped: 0,
+      docId: 1, groupId: wrap ? groupId : null, groupName, count: refs.length, nestedSkipped: 0,
       placement: anchorIndex >= 0 ? "above-selection" as const : "top" as const,
-      anchorName: anchorIndex >= 0 ? this.raw[anchorIndex + copies.length + 2]?.name : undefined,
+      anchorName: anchorIndex >= 0 ? this.raw[anchorIndex + copies.length + (wrap ? 2 : 0)]?.name : undefined,
+      restored: refs.length, scale: 1, ids: this.selected,
     };
+  }
+  async snapshotStaged(_docId: number, docKey: string, layerId: number) { return `wb_preview${docKey.length}_${layerId}.png`; }
+  async dropSnapshots() {}
+  async openDocs() { return [{ docId: 1, docKey: "preview.psd", name: "preview.psd" }, { docId: 2, docKey: "D:/设计/另一份.psd", name: "另一份.psd" }]; }
+  async probeStaged(refs: { docId: number; layerId: number }[]) {
+    return refs.map(r => {
+      if (r.docId !== 1) return null;
+      const l = this.raw.find(x => x.id === r.layerId && x.section !== "end");
+      return l ? { name: l.name } : null;
+    });
   }
   async read(): Promise<{ docId: number; docKey: string; layers: TreeLayer[]; selected: number[]; width: number; height: number }> { return { docId: 1, docKey: "preview.psd", layers: buildTree(this.raw), selected: [...this.selected], width: 1920, height: 1200 }; }
   async pickColor(hex: string) { return hex === "#3fb59f" ? "#e07ad0" : "#3fb59f"; }

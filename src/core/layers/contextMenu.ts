@@ -5,6 +5,7 @@
 // command. Worked out from the tree already read: opening the menu asks Photoshop nothing.
 
 import type { MenuNode } from "../overlay/protocol.ts";
+import { WORKBENCH_ENABLED } from "./workbench.ts";
 import { selectMenu } from "./selectSets.ts";
 import { type MenuItem, type TreeLayer, ALIGNS, DISTRIBUTES, arrangeProblem, arrangeTarget, isVariantLayer, layerMenu, smartQuickMenu } from "./tree.ts";
 
@@ -31,6 +32,37 @@ export interface ContextMenuInput {
   smartTools: boolean;
   /** 图层颜色 labels: Photoshop's key and its name */
   colors: readonly (readonly [string, string])[];
+  /** 发送到: the other open documents, and the settings shown as check rows */
+  send?: {
+    docs: readonly { id: number; name: string }[];
+    prefs: { restore: boolean; scaleLongEdge?: boolean; scaleWithCanvas: boolean; matchParents: boolean; position: "top" | "selection"; switchAfter: boolean };
+    /** the WaveLayer panel in Illustrator is connected (牵手 Illustrator): row "send:ai" */
+    illustrator?: boolean;
+    /** the right-clicked layer came from Illustrator (a link): rows "ai:update" / "ai:reveal" */
+    illustratorLink?: boolean;
+  };
+}
+
+/** 发送到 ▸ documents, then its settings (rows "send:<docId>" / "sendopt:<which>"), and 加入工作台. */
+export function sendMenu(send: NonNullable<ContextMenuInput["send"]>, n: number): MenuNode[] {
+  const p = send.prefs;
+  const docs: MenuNode[] = send.docs.length
+    ? send.docs.map(d => ({ id: "send:" + d.id, label: short(d.name || "文档 " + d.id), enabled: n > 0 }))
+    : [{ id: "send:none", label: "没有其他打开的文档", enabled: false }];
+  return [
+    ...(send.illustrator ? [
+      { id: "send:ai", label: "Illustrator：选中的图层", enabled: n > 0 },
+      { id: "send:aiboard", label: "Illustrator：当前画板全部（新画板，保留可编辑）", enabled: true },
+      { separator: true }] : []),
+    ...docs,
+    { separator: true },
+    { id: "sendopt:restore", label: "还原画面位置", checked: p.restore },
+    { id: "sendopt:longEdge", label: "按长边缩放（当前画面为 100%）", checked: !!p.scaleLongEdge, enabled: p.restore },
+    { id: "sendopt:scale", label: "随画布缩放", checked: p.scaleWithCanvas, enabled: p.restore },
+    { id: "sendopt:parents", label: "放进同名的组 / 画板", checked: p.matchParents },
+    { id: "sendopt:position", label: "否则放在选中图层上方", checked: p.position === "selection" },
+    { id: "sendopt:switch", label: "发送后切到目标文档", checked: p.switchAfter },
+  ];
 }
 
 const sep: MenuNode = { separator: true };
@@ -72,7 +104,9 @@ export function contextMenu(input: ContextMenuInput): { title: string; items: Me
     sep,
     ...(q ? q.actions.map(a => ({ id: "act:" + a.action, label: a.label, enabled: a.enabled })) : []),
     sep,
-    act("smartViaCopy"), act("embedLinked"), act("convertToLinked"), act("relink"),
+    act("smartViaCopy"), act("embedLinked"), act("convertToLinked"),
+    // only for a linked smart object (Photoshop's own item is grayed for an embedded one): 替换内容 does that
+    when("relink"), when("linkToFile"),
   )) : null;
 
   const lockRow = act("unlock") ?? act("lock");
@@ -120,6 +154,10 @@ export function contextMenu(input: ContextMenuInput): { title: string; items: Me
     ]) : null,
     sep,
     sub("选择", sm.map(c => ({ id: "select:" + c.which, label: c.enabled ? `${c.label}（${c.ids.length}）` : c.label, enabled: c.enabled }))),
+    input.send && n > 0 ? { label: "发送到", children: sendMenu(input.send, n), enabled: true } : null,
+    input.send?.illustratorLink ? { id: "ai:update", label: "从 Illustrator 更新", enabled: !!input.send.illustrator } : null,
+    input.send?.illustratorLink ? { id: "ai:reveal", label: "在 Illustrator 中选中", enabled: !!input.send.illustrator } : null,
+    input.send && n > 0 && WORKBENCH_ENABLED ? { id: "wb:add", label: "加入工作台", enabled: true } : null,
     sub("导出", rows(act("quickExport"), act("copyCSS"), act("copySVG"))),
   );
   return { title: contextTitle(sel, users), items: tidy(items) };

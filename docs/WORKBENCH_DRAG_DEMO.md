@@ -1,5 +1,14 @@
 # WaveLayer 内嵌编辑工作台技术 Demo（2026-11-04）
 
+## 2026-11-13：重做一期（工作台 + 右键发送到）与后续规划
+
+一期已实现，内容见 `docs/README.md` 11-13 条目。代码：`core/layers/workbench.ts`（纯模型：去重、持久化、按 docKey 重绑、状态、选择、设置）、`core/layers/placementRestore.ts`（位置还原）、`ui/workbench.ts`、`ui/workbenchStore.ts`、`ps/uxpWorkbench.ts`（置入 / 发送）、`LayerTree.openDocs / probeStaged`。测试：`workbench_model`、`placement_restore`、`workbench_send`，以及原有 `workbench_*`。
+
+二、三期已在同日实现（helper 0.11.0），见 `docs/README.md`。下面是当时的规划：
+- **二期**：helper 原生「工作台」surface（参照外置生成面板），切换文档时一直显示；发布为放置目标，从任意文档拖进去暂存；helper 连接时内嵌区收起。
+- **三期**：从浮窗拖出：到 PS 置入当前文档（精确到图层行要先验证屏幕坐标映射）；到其他软件复用 OLE / Illustrator 通道；暂存时存 PNG 快照，源关闭后按快照置入为智能对象；（可选）从资源管理器拖入文件。
+- 一期没做的：清单内拖动排序、从工作台拖回图层列表定点置入、置入后转智能对象。
+
 ## 2026-11-04：精简工作台 GUI / 确认失败原因的兼容性提示
 
 根据实际用户测试，跨 RGB → CMYK 的色相/饱和度复制目前已经能够成功运行，本轮不再改动核心复制顺序；重点改为**精简控制和可靠提示**。

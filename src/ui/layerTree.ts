@@ -11,10 +11,12 @@ import { ThumbCache, thumbRetryDelay } from "../core/layers/thumbs.ts";
 import { activateLayerDragLifecycle, cancelLayerDragLifecycle, createLayerDragLifecycle, releaseLayerDragLifecycle, routeLayerDragRelease, updateLayerDragLifecycle, type LayerDragLifecycle, type LayerDragRegion } from "../core/layers/drag.ts";
 import { addCalibrationSample, calibrationOffset, clampDropListY, edgeScrollRate, createClientCalibration, plausibleAxisOffset, resolveDragRegion, syntheticOffset, type ClientCalibration, type DragLayout, type DragRect } from "../core/layers/dragGeometry.ts";
 import { MAX_REFERENCES } from "../core/workflow/references.ts";
-import { workbenchPlacementAnchor } from "../core/layers/workbench.ts";
+import { type StagedLayer, WORKBENCH_ENABLED } from "../core/layers/workbench.ts";
+import { trashAction, trashDropTarget } from "../core/layers/dragTrash.ts";
+import { explainWorkbenchError } from "../core/layers/workbenchCompatibility.ts";
 import { clampThumbPercent, legacyThumbPercent, thumbnailMetrics, THUMB_PERCENT_KEY } from "../core/layers/topControls.ts";
 import { MULTI_EFFECTS } from "../core/layers/effects.ts";
-import { type AdvancedFilter, type Filter, type LayerAction, aiStrayMoves, isAiStray, type LayerKind, type LockKey, type MoveStep, type Row, type SmartAction, type TreeLayer, type Where, BLEND_MODES, ancestors, isCompactRow, queryActive, clickSelect, contentUsers, canDropToDelete, canDropMaskOnto, copyPlan, dropPlan, previewMoveTree, dropZone, filterCounts, isVariantLayer, layerMenu, nextLayerAfterDelete, layerTags, linkPeers, lockPlan, packChips, lockedByGroup, sharedColors, selectionAfterLocalClear, visibleRows } from "../core/layers/tree.ts";
+import { type AdvancedFilter, type Filter, type LayerAction, aiStrayMoves, isAiStray, type LayerKind, type LockKey, type MoveStep, type Row, type SmartAction, type TreeLayer, type Where, BLEND_MODES, ancestors, isCompactRow, queryActive, clickSelect, contentUsers, canDropToDelete, type DeleteDragPart, canDropMaskOnto, copyPlan, dropPlan, previewMoveTree, dropZone, filterCounts, isVariantLayer, layerMenu, nextLayerAfterDelete, layerTags, linkPeers, lockPlan, packChips, lockedByGroup, sharedColors, selectionAfterLocalClear, visibleRows } from "../core/layers/tree.ts";
 import { isDuplicateLayerDoubleAction, isLayerDoubleClick, type LayerClickPoint, type LayerDoubleAction } from "../core/layers/clicks.ts";
 import { matchesInlineRenameRow } from "../core/layers/rename.ts";
 import { type LayerTools, type LayerTree, type PsHost, type RunOptions, type TargetPart, ADJUSTMENTS, FILL_PREFIX, BLEND_PREFIX, EXTRACT_PREFIX, EXPAND_PREFIX, GENERATE_PREFIX, UPSCALE_PREFIX } from "../ps/host.ts";
@@ -24,6 +26,7 @@ import { vectorFragment } from "../core/overlay/svgFragment.ts";
 import type { Rect } from "../core/image/region.ts";
 import { type ExternalDragSession, MAX_EXTERNAL_LAYERS, beginExternalExport, capExternalLayers, externalDragKey, externalDragResultText, layersToExport, createExternalDragSession, endExternalDrag, externalDragCandidates, externalDragOver, externalDragSessionId, finishExternalExport, helperCopiedExternalFiles, helperFinishedExternalDrag, recordExportedFile, shouldPrepareExternalDrag } from "../core/overlay/externalDrag.ts";
 import { frameKey, frameOnScreen, layerFrame } from "../core/overlay/hoverFrame.ts";
+import { NATIVE_COMMANDS_KEY } from "../core/layers/nativeCommands.ts";
 import { every, h, icon, isShown, listen, replace, setShown } from "./dom.ts";
 import { type PopItem, createPopup } from "./popupMenu.ts";
 import { selectMenu, selectSet } from "../core/layers/selectSets.ts";
@@ -33,7 +36,9 @@ import type { MenuNode } from "../core/overlay/protocol.ts";
 import { arrangeTarget, neighbourRow } from "../core/layers/tree.ts";
 import { onSmartTarget } from "./smartTarget.ts";
 import { createSlider } from "./slider.ts";
-import { createWorkbenchSection } from "./workbenchDemo.ts";
+import { createWorkbenchSection } from "./workbench.ts";
+import { attachWorkbenchSurface } from "./workbenchSurface.ts";
+import { setWorkbenchPrefs, workbenchState } from "./workbenchStore.ts";
 
 type Status = (text: string, kind?: "info" | "ok" | "error" | "busy") => void;
 
@@ -90,6 +95,8 @@ let frameOn = (() => { try { return localStorage.getItem("wp.layers.hoverFrame")
 /** layers drawn with a picture (an empty layer's is blank, like Photoshop's); hasThumb: one to read */
 const hasPicture = (l: TreeLayer) => thumbsOn && (l.kind === "pixel" || l.kind === "smartObject" || l.kind === "shape" || l.kind === "fill" || l.kind === "background");
 const hasThumb = (l: TreeLayer) => hasPicture(l) && l.width > 0 && l.height > 0;
+/** a drag must stay outside the panel this long before its layers are exported for other programs */
+const EXTERNAL_EXPORT_DELAY = 600;
 /** hovering a closed group this long while dragging opens it */
 const OPEN_DELAY = 600;
 /** an effect chip's press waits this long for a second one (then it edits instead of switching) */
@@ -141,7 +148,7 @@ interface RowEl { index: number; el: HTMLElement; eye: HTMLElement; twisty: HTML
 
 /** The list fills the height it is given (the whole WavePlug 图层 panel); `tools` adds the 智能对象
  *  tools to the right-click menu. */
-export function createLayerTreeView(tree: LayerTree, status: Status, tools?: LayerTools, overlay?: Overlay, canvasView?: (docId: number) => Promise<CanvasView | null>, exportLayerPng?: PsHost["exportLayerPng"], docVersion?: PsHost["docVersion"], layerDragInfo?: PsHost["layerDragInfo"]) {
+export function createLayerTreeView(tree: LayerTree, status: Status, tools?: LayerTools, overlay?: Overlay, canvasView?: (docId: number) => Promise<CanvasView | null>, exportLayerPng?: PsHost["exportLayerPng"], docVersion?: PsHost["docVersion"], layerDragInfo?: PsHost["layerDragInfo"], illustrator?: { ready(): boolean; push(docId: number, ids: number[]): Promise<number>; pushBoard(docId: number, layers: readonly TreeLayer[], selected: readonly number[]): Promise<{ count: number; name: string; notes: string[] }>; linkOf(docId: number, layerId: number): string | null; ask(kind: "update" | "reveal", link: string): void }) {
   let docId: number | null = null, layers: TreeLayer[] = [], users = new Map<string, number>(), canvas = { width: 0, height: 0 };
   /** the layers by id (kept with `layers`): lookups in drawing and dragging, which run for every row */
   let byId = new Map<number, TreeLayer>();
@@ -462,38 +469,52 @@ export function createLayerTreeView(tree: LayerTree, status: Status, tools?: Lay
     if (!frameOn) hideFrame();
   });
   renderFrameBtn();
-  // Expand/collapse actions sit in the search row, right of the search box (11-04 top redesign).
-  const folderExpandIcon = h("span", { class: "lt-action-icon" }, ic("folderOpen", 14));
-  const fxExpandIcon = h("span", { class: "lt-action-icon lt-fx-action" }, h("span", {}, "fx"), icon("chevron", 9));
-  const folderCollapseIcon = h("span", { class: "lt-action-icon" }, ic("folder", 14));
-  const fxCollapseIcon = h("span", { class: "lt-action-icon lt-fx-action" }, h("span", {}, "fx"), icon("chevronRight", 9));
-  const allCollapseIcon = h("span", { class: "lt-action-icon lt-stack-action" }, ic("layers", 14), icon("chevronUp", 8));
-  const expandGroupsBtn = h("button", { class: "lt-expand-btn", title: "展开组：展开所有图层组", "aria-label": "展开组" }, folderExpandIcon);
-  const expandEffectsBtn = h("button", { class: "lt-expand-btn", title: "展开效果：展开所有图层效果", "aria-label": "展开效果" }, fxExpandIcon);
-  const collapseGroupsBtn = h("button", { class: "lt-expand-btn", title: "折叠组：折叠所有图层组", "aria-label": "折叠组" }, folderCollapseIcon);
-  const collapseEffectsBtn = h("button", { class: "lt-expand-btn", title: "折叠效果：折叠所有图层效果", "aria-label": "折叠效果" }, fxCollapseIcon);
-  const collapseAllBtn = h("button", { class: "lt-expand-btn", title: "折叠全部：折叠所有图层组、效果、智能滤镜和变体", "aria-label": "折叠全部" }, allCollapseIcon);
-  const expandCollapseDivider = h("span", { class: "lt-expand-divider", "aria-hidden": "true" });
-  const expandCollapseControls = h("div", { class: "lt-expand-controls" },
-    expandGroupsBtn, expandEffectsBtn, expandCollapseDivider, collapseGroupsBtn, collapseEffectsBtn, collapseAllBtn);
-  expandGroupsBtn.addEventListener("click", () => {
+  // 原版命令（测试）: the commands that have one run as Photoshop's own menu item (uxpLayers.runNative)
+  let nativeOn = (() => { try { return localStorage.getItem(NATIVE_COMMANDS_KEY) === "on"; } catch { return false; } })();
+  const nativeBtn = h("button", { class: "lt-head-btn", title: "原版命令（测试）：删除、编组、合并、转换为智能对象、剪贴蒙版、图层样式等命令改用 Photoshop 自己的菜单命令执行（先在 PS 里选中这些图层）。撤销记录、对话框、能否执行都由 Photoshop 决定；找不到对应菜单的命令仍按插件方式执行" }, "原版命令");
+  const renderNativeBtn = () => nativeBtn.classList.toggle("off", !nativeOn);
+  nativeBtn.addEventListener("click", () => {
+    nativeOn = !nativeOn;
+    try { localStorage.setItem(NATIVE_COMMANDS_KEY, nativeOn ? "on" : "off"); } catch { /* not kept */ }
+    renderNativeBtn();
+    log("info", "native commands", nativeOn ? "on" : "off");
+    status(nativeOn ? "已切换为原版命令（测试）" : "已切换回插件命令", "info");
+  });
+  renderNativeBtn();
+  // Expand/collapse in the search row (1.2 beta: text toggles instead of five icon buttons).
+  // 组 / 效果 each toggle: ▸ = something is folded, click unfolds all; ▾ = all unfolded, click folds all.
+  const expandBtn = (label: string) => {
+    const caret = h("span", { class: "lt-expand-caret" });
+    const btn = h("button", { class: "lt-expand-btn", "aria-label": label }, caret, h("span", {}, label));
+    return { btn, caret };
+  };
+  const groupsToggle = expandBtn("组");
+  const effectsToggle = expandBtn("效果");
+  const collapseAllBtn = h("button", { class: "lt-expand-btn", title: "全部折叠：折叠所有图层组、效果、智能滤镜和变体", "aria-label": "全部折叠" }, "全部折叠");
+  const expandCollapseControls = h("div", { class: "lt-expand-controls" }, groupsToggle.btn, effectsToggle.btn, collapseAllBtn);
+  const groupIds = () => layers.filter(l => l.kind === "group" && !isVariantLayer(l)).map(l => l.id);
+  const effectIds = () => layers.filter(l => l.effectList.length && !isVariantLayer(l)).map(l => l.id);
+  const allGroupsOpen = () => { const ids = groupIds(), e = expanded(); return ids.length > 0 && ids.every(id => e.has(id)); };
+  const allEffectsOpen = () => { const ids = effectIds(), o = openSubs(); return ids.length > 0 && ids.every(id => o.has(id)); };
+  function renderExpandControls(groupsDisabled: boolean) {
+    const g = allGroupsOpen(), fx = allEffectsOpen();
+    replace(groupsToggle.caret, icon(g ? "chevron" : "chevronRight", 10));
+    replace(effectsToggle.caret, icon(fx ? "chevron" : "chevronRight", 10));
+    groupsToggle.btn.title = groupsDisabled && docId !== null ? "筛选时组全部展开，不能折叠" : g ? "折叠所有图层组" : "展开所有图层组";
+    effectsToggle.btn.title = fx ? "折叠所有图层效果" : "展开所有图层效果";
+    (groupsToggle.btn as any).disabled = groupsDisabled || !groupIds().length;
+    (effectsToggle.btn as any).disabled = docId === null || !effectIds().length;
+    (collapseAllBtn as any).disabled = docId === null;
+  }
+  groupsToggle.btn.addEventListener("click", () => {
     if (docId === null) return;
-    for (const l of layers) if (l.kind === "group" && !isVariantLayer(l)) expanded().add(l.id);
+    if (allGroupsOpen()) expanded().clear(); else for (const id of groupIds()) expanded().add(id);
     render();
   });
-  expandEffectsBtn.addEventListener("click", () => {
+  effectsToggle.btn.addEventListener("click", () => {
     if (docId === null) return;
-    for (const l of layers) if (l.effectList.length && !isVariantLayer(l)) openSubs().add(l.id);
-    render();
-  });
-  collapseGroupsBtn.addEventListener("click", () => {
-    if (docId === null) return;
-    expanded().clear();
-    render();
-  });
-  collapseEffectsBtn.addEventListener("click", () => {
-    if (docId === null) return;
-    for (const l of layers) if (l.effectList.length && !isVariantLayer(l)) openSubs().delete(l.id);
+    const close = allEffectsOpen();
+    for (const id of effectIds()) if (close) openSubs().delete(id); else openSubs().add(id);
     render();
   });
   collapseAllBtn.addEventListener("click", () => {
@@ -609,10 +630,67 @@ export function createLayerTreeView(tree: LayerTree, status: Status, tools?: Lay
   renderThumbMetrics();
   // The workbench lives immediately BELOW the layer list in the same UXP panel.
   // At rest it occupies no space; a normal layer drag reveals it automatically.
-  const workbench = createWorkbenchSection(tree, () => ({
-    docId,
-    layerId: workbenchPlacementAnchor(true, docId !== null, layers, selected),
-  }));
+  const workbench = createWorkbenchSection(tree, () => docId);
+  /** References to layers `ids` of the panel's document, with where they are on the canvas and the
+   *  thumbnail already shown (staging and 发送到 ask Photoshop nothing). */
+  const stageRefs = (ids: number[]): StagedLayer[] => docId === null ? [] : ids.flatMap(layerId => {
+    const l = byId.get(layerId);
+    if (!l) return [];
+    const thumb = thumbsOn ? thumbs().get(layerId) : undefined;
+    const bounds = l.width > 0 && l.height > 0 ? { left: l.left, top: l.top, right: l.left + l.width, bottom: l.top + l.height } : null;
+    return [{
+      docId: docId!, docKey, layerId, name: l.name, kind: l.kind,
+      ...(typeof thumb === "string" && thumb.startsWith("data:") && thumb.length < 12000 ? { thumb } : {}),
+      geom: { canvas: { ...canvas }, bounds },
+    }];
+  });
+  /** the last WaveLayer drag let go outside the panel (the native workbench's drop names it) */
+  let lastOutside: { docId: number; ids: number[]; at: number } | null = null;
+  /** a drag out of the native workbench window: its export for other programs */
+  let shelfRun: ExternalRun | null = null;
+  const workbenchWindow = overlay && WORKBENCH_ENABLED ? attachWorkbenchSurface(overlay, {
+    section: workbench,
+    currentDoc: () => docId,
+    canvasView: id => canvasView ? canvasView(id) : Promise.resolve(null),
+    stageDrop(dropDoc, hint) {
+      // the drop can come before or after the panel's own release of that drag
+      const live = drag && !drag.sub ? { docId: drag.sourceDocId, ids: drag.ids } : null;
+      const recent = lastOutside && Date.now() - lastOutside.at < 5000 ? lastOutside : null;
+      const from = live ?? recent ?? (dropDoc === docId && hint.length ? { docId: dropDoc, ids: hint } : null);
+      lastOutside = null;
+      if (!from || from.docId !== docId) { log("warn", "workbench window drop without a known drag", JSON.stringify({ dropDoc, hint: hint.length })); return; }
+      workbench.add(stageRefs(from.ids.filter(id => byId.has(id))));
+      status("已加入工作台 " + from.ids.length + " 个图层；原 PSD 没有修改", "ok");
+    },
+    dragOut(entries) {
+      if (shelfRun) closeExternalRun(shelfRun, "superseded");
+      shelfRun = null;
+      // one document per drag to other programs (its layers are exported from that document)
+      const first = entries.find(e => e.kind !== "group");
+      if (!first || !exportLayerPng || !overlay.connected) return;
+      const layersOut = capExternalLayers(entries.filter(e => e.docId === first.docId && e.kind !== "group")
+        .map(e => ({ layerId: e.layerId, name: e.name, kind: e.kind }))).layers;
+      const version = docVersion?.(first.docId) ?? null;
+      const candidates = layersOut.map(l => ({ ...l, key: externalDragKey(externalLoad, first.docId, version, l.layerId) }));
+      const session = createExternalDragSession(externalDragSessionId(), first.docId, candidates);
+      const run: ExternalRun = { session, removers: [] };
+      shelfRun = run;
+      externalRuns.set(session.sessionId, run);
+      const answer = cachedKeys(session.sessionId);
+      if (!overlay.prepareExternalDrag(session.sessionId, session.docId, candidates.length, candidates.map(l => l.key))) {
+        closeExternalRun(run, "prepare-failed");
+        shelfRun = null;
+        return;
+      }
+      beginExternalExport(session);
+      trackExport(exportExternal(run, answer, () => shelfRun === run));
+    },
+    dragOutEnd(ending) {
+      const run = shelfRun;
+      shelfRun = null;
+      if (run) closeExternalRun(run, "workbench-drag-" + (ending || "ended"));
+    },
+  }) : null;
   // No scrolling box: UXP didn't paint the content of a scrolled list (rows complete and in place in
   // the log, blank on screen until hovered). The list is a fixed box holding just the rows that fit;
   // scrolling (wheel, our own scrollbar) changes which layers those rows show, whole rows at a time,
@@ -1407,8 +1485,7 @@ export function createLayerTreeView(tree: LayerTree, status: Status, tools?: Lay
     });
     replace(countEl, docId === null ? "" : `${layers.length} 个` + (selected.size ? ` · 已选 ${selected.size}` : ""));
     const groupsDisabled = docId === null || (filterEnabled && (filter !== "all" || queryActive(query)));
-    (expandGroupsBtn as any).disabled = (collapseGroupsBtn as any).disabled = groupsDisabled;
-    (expandEffectsBtn as any).disabled = (collapseEffectsBtn as any).disabled = (collapseAllBtn as any).disabled = docId === null;
+    renderExpandControls(groupsDisabled);
     setShown(empty, !rows.length);
     replace(empty, docId === null ? "未打开文档" : !layers.length ? "文档里没有图层" : "没有符合筛选的图层");
     renderBar();
@@ -1536,6 +1613,7 @@ export function createLayerTreeView(tree: LayerTree, status: Status, tools?: Lay
           const seen = r.docId === docId ? new Set(layers.map(l => l.id)) : null;
           const strays = aiStrayMoves(seen, r.layers);
           if (strays.length) void rescueAiStrays(r.docId, strays);
+          if (r.docId !== docId) queueMicrotask(() => workbenchWindow?.docChanged());
           docId = r.docId; layers = r.layers; byId = new Map(layers.map(l => [l.id, l])); users = contentUsers(layers); colors = sharedColors(layers, users); canvas = { width: r.width, height: r.height };
         }
         const now = [...selected].sort().join(",");
@@ -1543,6 +1621,7 @@ export function createLayerTreeView(tree: LayerTree, status: Status, tools?: Lay
         // a hovered layer that moved or changed size: its frame follows (the view is already read)
         if (frameId !== null) { if (docId === null || !byId.has(frameId)) hideFrame(); else void drawFrame(frameId); }
         if (now === ownSelect) ownSelect = null;
+        workbench.refreshDocs();
       } while (again);
     } finally {
       reading = false;
@@ -1682,6 +1761,8 @@ export function createLayerTreeView(tree: LayerTree, status: Status, tools?: Lay
     const afterDeleteSelect = action === "delete"
       ? nextLayerAfterDelete(layers, ids, [...new Set(rows.filter(r => !r.filter).map(r => r.layer.id))]) : null;
     try {
+      // A drag export still reading this document finishes first (see exportTail).
+      if (!action.startsWith("target")) await exportsSettled();
       // A quick succession of Ctrl/Shift clicks can leave selection modals in flight.
       await selectTail;
       if (artboardIds.length) {
@@ -1782,15 +1863,30 @@ export function createLayerTreeView(tree: LayerTree, status: Status, tools?: Lay
     x0: number; px: number;
     hover: number | null; overTool: HTMLElement | null;
     canDelete: boolean; overLeftDelete: boolean; overWorkbench: boolean;
+    /** the helper's 外置删除区 is up for this drag (the left rail isn't); `trashed`: let go over it */
+    trash: boolean; trashed: boolean;
     pointerX: number; pointerY: number;
     hoverTimer: ReturnType<typeof setTimeout> | null; scroller: ReturnType<typeof setInterval> | null;
     /** 跨软件拖拽: the PNG export started when this drag first left the panel (at most once) */
     external: ExternalRun | null;
+    /** the export waits until the cursor has stayed outside a moment (EXTERNAL_EXPORT_DELAY) */
+    exportTimer?: ReturnType<typeof setTimeout> | null;
   } | null = null;
   /** A cross-app drag session and the deleters of its temporary PNGs (drained when they go). Kept
    *  by id until it is over: an export can finish, or the helper report, after the drag ended. */
   type ExternalRun = { session: ExternalDragSession; removers: (() => Promise<void>)[] };
   const externalRuns = new Map<string, ExternalRun>();
+  /** Every drag export still reading from Photoshop. A delete / convert / move dropped while one
+   *  runs (dragging to the trash starts one as soon as the cursor leaves the list) waits for it:
+   *  run together, the delete and the export's read of the same layer froze or crashed Photoshop. */
+  let exportTail: Promise<void> = Promise.resolve();
+  function trackExport(p: Promise<void>) {
+    exportTail = Promise.all([exportTail, p]).then(() => undefined, () => undefined);
+  }
+  /** at most 8 s: a stuck export must not block the panel's commands for good */
+  function exportsSettled(): Promise<void> {
+    return Promise.race([exportTail, new Promise<void>(r => setTimeout(r, 8000))]);
+  }
   /** this plugin load, in every reuse key (externalDragKey) */
   const externalLoad = externalDragSessionId();
   /** prepare's answer (external-drag-cached), per session */
@@ -1935,7 +2031,7 @@ export function createLayerTreeView(tree: LayerTree, status: Status, tools?: Lay
       target: null, sub: sub?.what ?? null, ftarget: null, ltarget: null, alt: e.altKey,
       x0: e.clientX, px: sub && "x" in sub.what ? sub.what.x : 0,
       hover: null, overTool: null, hoverTimer: null, scroller: null,
-      canDelete: canDropToDelete(layers, ids, sub?.what), overLeftDelete: false,
+      canDelete: canDropToDelete(layers, ids, sub?.what), overLeftDelete: false, trash: false, trashed: false,
       overWorkbench: false, pointerX: e.clientX, pointerY: e.clientY, external: null };
   }
 
@@ -2197,6 +2293,43 @@ export function createLayerTreeView(tree: LayerTree, status: Status, tools?: Lay
     workbench.setDragHover(drag.overWorkbench);
   }
 
+  /** the last drag that showed the 外置删除区, for a drop the helper reports after the release */
+  let lastTrashable: { drag: Parameters<typeof deleteDragged>[0]; at: number } | null = null;
+  /** Ask the helper for its 外置删除区 next to where this drag began (against the canvas when the
+   *  panel is beside it). The canvas view is the hover frame's when it has one; else it is read
+   *  and the square follows once it is known. */
+  function showTrash(d: NonNullable<typeof drag>) {
+    if (!overlay) return;
+    const action = trashAction(d.sub ? 0 : d.ids.length, d.sub?.kind as DeleteDragPart | undefined);
+    const known = frameView?.docId === d.sourceDocId && Date.now() - frameView.at < 60_000 ? frameView.view.view : null;
+    d.trash = overlay.showDragTrash(known, d.canDelete, action);
+    if (d.trash && !known && canvasView) {
+      void viewOf(d.sourceDocId).then(v => { if (v && drag === d) overlay.showDragTrash(v.view, d.canDelete, action); });
+    }
+  }
+  /** What was dragged onto the 外置删除区 goes: layers, or the mask / filter / effect dragged. */
+  function deleteDragged(d: NonNullable<typeof drag>) {
+    log("info", "trash drop delete", JSON.stringify({ ids: d.ids, sub: d.sub?.kind ?? null, canDelete: d.canDelete }));
+    if (!d.canDelete) return;
+    if (d.sourceDocId !== docId) { status("文档已切换，没有删除", "error"); return; }
+    if (d.sub) {
+      if ("chip" in d.sub) d.sub.dragged = true;
+      dropSub(d.sub, d, "delete", false);
+    } else void run("delete", d.ids);
+  }
+  overlay?.onTrashDrop(() => {
+    const hit = trashDropTarget(drag, lastTrashable, Date.now());
+    log("info", "trash drop", JSON.stringify({ live: hit?.live ?? null, known: !!hit }));
+    if (!hit) return;
+    lastTrashable = null;
+    if (hit.live) {
+      // its release (endDrag) deletes; should the panel never see that mouseup, end it here
+      const d = hit.drag;
+      d.trashed = true;
+      setTimeout(() => { if (drag === d) { endDrag("trash-drop"); workbench.finishDrag(false); } }, 400);
+    } else deleteDragged(hit.drag);
+  });
+
   function beginVisualDrag(d: NonNullable<typeof drag>) {
     lastDown = null;
     const previewIds = d.sub ? [d.sourceId] : d.ids;
@@ -2212,17 +2345,17 @@ export function createLayerTreeView(tree: LayerTree, status: Status, tools?: Lay
       return { layerId, name: subName ?? layer?.name ?? "图层", ...(typeof thumb === "string" ? { thumb } : {}) };
     });
     d.previewStarted = overlay?.beginLayerDragPreview(previewLayers, previewIds.length) ?? false;
+    if (d.previewStarted) showTrash(d);
     if (!d.sub) {
-      workbench.openForDrag();
+      if (WORKBENCH_ENABLED) workbench.openForDrag();
       const source = byId.get(d.sourceId);
-      const excluded = [FILL_PREFIX, BLEND_PREFIX, EXTRACT_PREFIX, EXPAND_PREFIX, GENERATE_PREFIX, UPSCALE_PREFIX];
-      if (source && source.kind !== "group" && !excluded.some(prefix => source.name.startsWith(prefix))) {
-        const selectedIds = new Set(d.ids);
-        const candidates = layers.filter(layer => selectedIds.has(layer.id)
-          && layer.kind !== "group" && !excluded.some(prefix => layer.name.startsWith(prefix)))
-          .map(layer => {
-            const thumb = thumbs().get(layer.id);
-            return { layerId: layer.id, name: layer.name, ...(typeof thumb === "string" ? { thumb } : {}) };
+      if (source) {
+        // folders and AI layers too: each goes as one merged image (a layer inside a dragged group
+        // is not offered again on its own)
+        const candidates = externalDragCandidates(layers, d.ids, false)
+          .map(c => {
+            const thumb = thumbs().get(c.layerId);
+            return { layerId: c.layerId, name: c.name, ...(typeof thumb === "string" ? { thumb } : {}) };
           });
         if (candidates.length) {
           const cachedThumb = thumbs().get(candidates[0].layerId);
@@ -2239,7 +2372,8 @@ export function createLayerTreeView(tree: LayerTree, status: Status, tools?: Lay
     setShown(hit, true);
     // Keep the side trash rail visible for every drag; locked/background layers show it disabled
     // instead of making the target disappear and changing the drag layout unexpectedly.
-    setShown(leftDelete, true);
+    // With the helper's 外置删除区 up, that is the delete target instead.
+    setShown(leftDelete, !d.trash);
     leftDelete.classList.toggle("disabled", !d.canDelete);
     leftDelete.title = d.canDelete
       ? "松开鼠标删除（Ctrl+Z 可撤销）"
@@ -2275,11 +2409,19 @@ export function createLayerTreeView(tree: LayerTree, status: Status, tools?: Lay
       x: m.clientX, y: m.clientY, listY: drag.view, alt: drag.alt, region: at.region,
     });
     // 跨软件拖拽: only a drag that leaves the panel exports anything (never a reorder in the list)
-    if (at.region === "outside" && previousRegion !== "outside" && !drag.external && exportLayerPng && overlay) {
-      const candidates = externalDragCandidates(layers, drag.ids, !!drag.sub);
-      if (shouldPrepareExternalDrag({ active: drag.active, previousRegion, region: at.region, started: false,
-        candidates: candidates.length, connected: overlay.connected, sub: !!drag.sub })) startExternalExport(drag, candidates);
+    // Not at once: a quick throw to the 外置删除区 (trash) also leaves the list, and an export that
+    // was still reading the layer when it was deleted froze / crashed Photoshop (log 11-14 15:44).
+    if (at.region === "outside" && previousRegion !== "outside" && !drag.external && !drag.exportTimer && exportLayerPng && overlay) {
+      const d = drag, from = previousRegion;
+      d.exportTimer = setTimeout(() => {
+        d.exportTimer = null;
+        if (drag !== d || d.external || d.trashed || d.lifecycle.region !== "outside" || !overlay) return;
+        const candidates = externalDragCandidates(layers, d.ids, !!d.sub);
+        if (shouldPrepareExternalDrag({ active: d.active, previousRegion: from, region: "outside", started: false,
+          candidates: candidates.length, connected: overlay.connected, sub: !!d.sub })) startExternalExport(d, candidates);
+      }, EXTERNAL_EXPORT_DELAY);
     }
+    if (at.region !== "outside" && drag.exportTimer) { clearTimeout(drag.exportTimer); drag.exportTimer = null; }
     if (drag.sub?.kind === "filter") drag.px = drag.sub.x + m.clientX - drag.x0;
     track();
     // near (or past) the top / bottom edge the list scrolls by itself, faster the further out
@@ -2321,9 +2463,10 @@ export function createLayerTreeView(tree: LayerTree, status: Status, tools?: Lay
       return;
     }
     beginExternalExport(session);
-    void exportExternal(d, run, answer);
+    trackExport(exportExternal(run, answer, () => drag === d && d.lifecycle.phase === "dragging"));
   }
-  async function exportExternal(d: NonNullable<typeof drag>, run: ExternalRun, answer: Promise<Set<string>>) {
+  /** `stillDragging`: the drag that wants the files is still on (else they are not handed over) */
+  async function exportExternal(run: ExternalRun, answer: Promise<Set<string>>, stillDragging: () => boolean) {
     const s = run.session, t0 = now();
     const cached = await answer;
     const fresh = new Set(layersToExport(s.layers, cached).map(l => l.layerId));
@@ -2332,10 +2475,16 @@ export function createLayerTreeView(tree: LayerTree, status: Status, tools?: Lay
       for (const [order, layer] of s.layers.entries()) {
         if (s.phase !== "exporting") break;
         // the helper already has this unchanged layer: no PNG, it reuses its own copy
+        // each stage is logged before it runs: if Photoshop hangs, the log says where
+        const tl = now();
+        log("info", "external drag export step", JSON.stringify({ sessionId: s.sessionId, layerId: layer.layerId, kind: layer.kind, stage: "info" }));
         const extra = await vectorExtra(s.docId, layer);
         if (s.phase !== "exporting") break;
+        if (fresh.has(layer.layerId))
+          log("info", "external drag export step", JSON.stringify({ sessionId: s.sessionId, layerId: layer.layerId, stage: "pixels", infoMs: Math.round(now() - tl) }));
         if (!fresh.has(layer.layerId)) { recordExportedFile(s, { layerId: layer.layerId, name: layer.name, path: "", order, key: layer.key, ...extra }); continue; }
         const out = await exportLayerPng!(s.docId, layer.layerId, s.sessionId, order);
+        log("info", "external drag export step", JSON.stringify({ sessionId: s.sessionId, layerId: layer.layerId, stage: "done", ms: Math.round(now() - tl) }));
         // cancelled while this one was written: it is not handed over, so it goes now
         if (!recordExportedFile(s, { layerId: layer.layerId, name: layer.name, path: out.path, order, key: layer.key, ...extra, rect: out.rect })) { await out.remove(); break; }
         run.removers.push(out.remove);
@@ -2348,7 +2497,7 @@ export function createLayerTreeView(tree: LayerTree, status: Status, tools?: Lay
       return;
     }
     const ms = Math.round(now() - t0);
-    const ready = finishExternalExport(s, drag === d && d.lifecycle.phase === "dragging");
+    const ready = finishExternalExport(s, stillDragging());
     log("info", "external drag export", JSON.stringify({ sessionId: s.sessionId, files: s.files.length, exported: fresh.size, ms, ready, phase: s.phase }));
     if (ready && !overlay?.readyExternalDrag(s.sessionId, s.files)) {
       log("warn", "external drag ready not sent", s.sessionId);
@@ -2411,7 +2560,12 @@ export function createLayerTreeView(tree: LayerTree, status: Status, tools?: Lay
   function endDrag(reason = "drag-ended"): typeof drag {
     const d = drag;
     if (d) cancelLayerDragLifecycle(d.lifecycle);
+    if (d?.exportTimer) { clearTimeout(d.exportTimer); d.exportTimer = null; }
     drag = null;
+    // the helper's drop on the 外置删除区 may come after this (trashDropTarget); if it came
+    // already, this is when it deletes
+    if (d?.active && d.trash) lastTrashable = d.trashed ? null : { drag: d, at: Date.now() };
+    if (d?.trashed) { const gone = d; setTimeout(() => deleteDragged(gone), 0); }
     if (d?.external) closeExternalRun(d.external, reason);
     ghostContent = "";
     ghostThumbUrl = null;
@@ -2487,7 +2641,10 @@ export function createLayerTreeView(tree: LayerTree, status: Status, tools?: Lay
       region: snapshot.region,
     });
     const ended = endDrag("released");
+    if (ended?.trashed) { workbench.finishDrag(false); return; } // deleted by endDrag
     if (route === "external" || route === "outside") {
+      // the native workbench may report a drop on it right after this release (stageDrop)
+      if (ended && !ended.sub) lastOutside = { docId: ended.sourceDocId, ids: [...ended.ids], at: Date.now() };
       workbench.finishDrag(false);
       if (route === "external") {
         log("info", "external layer drag release delegated", JSON.stringify({
@@ -2498,10 +2655,7 @@ export function createLayerTreeView(tree: LayerTree, status: Status, tools?: Lay
       return;
     }
     if (route === "workbench" && ended && docId !== null) {
-      workbench.add(ended.ids.map(layerId => {
-        const layer = layers.find(l => l.id === layerId)!;
-        return { docId: docId!, docKey, layerId, name: layer.name, kind: layer.kind };
-      }));
+      workbench.add(stageRefs(ended.ids));
       workbench.finishDrag(true);
       status("已加入工作台 " + ended.ids.length + " 个图层；原 PSD 没有修改", "ok");
       return;
@@ -2633,6 +2787,7 @@ export function createLayerTreeView(tree: LayerTree, status: Status, tools?: Lay
       // Give the UI a paint opportunity before Photoshop's modal blocks host interaction.
       if (projected) await new Promise<void>(resolve => setTimeout(resolve, 16));
       // An earlier Ctrl/Shift selection modal must finish before a drag creates clones.
+      await exportsSettled();
       await selectTail;
       if (copy) {
         status("正在复制 " + count + " 个图层…", "busy");
@@ -2697,7 +2852,8 @@ export function createLayerTreeView(tree: LayerTree, status: Status, tools?: Lay
     // like Photoshop: right-clicking a layer outside the selection selects it first
     if (!selected.has(id)) void clickRow(id, { ctrl: false, shift: false });
     const doc = docId, ids = selectedLayers().map(l => l.id);
-    const menu = contextMenu({ layers, selected, users, smartTools: !!tools, colors: LABELS.map(([k, name]) => [k, name] as const) });
+    const menu = contextMenu({ layers, selected, users, smartTools: !!tools, colors: LABELS.map(([k, name]) => [k, name] as const),
+      send: { docs: workbench.docs().filter(d => d.docId !== docId).map(d => ({ id: d.docId, name: d.name })), prefs: workbenchState().prefs, illustrator: !!illustrator?.ready(), illustratorLink: !!illustrator?.linkOf(doc, id) } });
     const native = overlay?.openMenu(menu.title, menu.items) ?? null;
     if (native) {
       popup.close();
@@ -2724,6 +2880,16 @@ export function createLayerTreeView(tree: LayerTree, status: Status, tools?: Lay
     else if (kind === "dist") void run("distribute", ids, arg);
     else if (kind === "arrange") arrange(arg as "forward" | "backward" | "front" | "back");
     else if (kind === "tool") void runTool(arg, ids);
+    else if (kind === "send" && arg === "ai") void sendToIllustrator(ids);
+    else if (kind === "send" && arg === "aiboard") void sendBoardToIllustrator();
+    else if (kind === "ai" && docId !== null) {
+      // Illustrator does the work (exports again / selects); its answer comes as an update here
+      const link = illustrator?.linkOf(docId, rowId);
+      if (link) { illustrator!.ask(arg === "reveal" ? "reveal" : "update", link); status(arg === "reveal" ? "已请 Illustrator 选中关联的对象" : "已请 Illustrator 重新发送这个对象…", "ok"); }
+    }
+    else if (kind === "send") void sendTo(Number(arg), ids);
+    else if (kind === "sendopt") toggleSendOption(arg);
+    else if (kind === "wb" && arg === "add") { workbench.add(stageRefs(ids)); status("已加入工作台 " + ids.length + " 个图层；原 PSD 没有修改", "ok"); }
     else if (kind === "select") {
       const choice = selectMenu(layers, selected).find(c => c.which === arg);
       if (choice?.enabled) void selectIds(choice.ids, choice.label);
@@ -2733,6 +2899,56 @@ export function createLayerTreeView(tree: LayerTree, status: Status, tools?: Lay
       else void run("setColor", ids, arg).then(() => setCustom(ids, null));
     }
   }
+  /** 发送到 › Illustrator: the layers as PNG, placed in Illustrator's current document at their
+   *  place (src/app/illustratorBridge.ts, the WaveLayer panel there does the placing). */
+  async function sendToIllustrator(ids: number[]) {
+    if (docId === null || !ids.length || !illustrator) return;
+    status(`正在发送 ${ids.length} 个图层到 Illustrator…`, "busy");
+    try { status(`已发送 ${await illustrator.push(docId, ids)} 个图层到 Illustrator`, "ok"); }
+    catch (e) { status("发送到 Illustrator 失败：" + (e as Error).message, "error"); }
+  }
+  /** 发送到 › Illustrator：当前画板全部: the artboard the selection is on, every layer as editable as
+   *  it can be (text / shapes as vectors, vector smart objects as their own vectors, the rest as
+   *  images), on a new artboard in Illustrator with the same groups. */
+  async function sendBoardToIllustrator() {
+    if (docId === null || !illustrator) return;
+    status("正在把画板发送到 Illustrator…", "busy");
+    try {
+      const r = await illustrator.pushBoard(docId, layers, [...selected]);
+      status(`已把「${r.name}」的 ${r.count} 个图层发送到 Illustrator（新画板）` + (r.notes.length ? "；" + r.notes.join("；") : ""), r.notes.length ? "info" : "ok");
+    } catch (e) { status("发送到 Illustrator 失败：" + (e as Error).message, "error"); }
+  }
+  /** 发送到: copies `ids` into the open document `target`, back at their place on its canvas
+   *  (core/layers/placementRestore.ts), one undo step there; the source isn't changed. */
+  async function sendTo(target: number, ids: number[]) {
+    if (docId === null || !Number.isInteger(target) || target <= 0 || !ids.length) return;
+    const p = workbenchState().prefs, name = workbench.docs().find(d => d.docId === target)?.name ?? "目标文档";
+    status(`正在发送 ${ids.length} 个图层到「${name}」…`, "busy");
+    try {
+      const r = await tree.placeStaged(stageRefs(ids), {
+        targetDocId: target, wrapGroup: false, position: p.position, restore: p.restore,
+        scaleLongEdge: p.scaleLongEdge, scaleWithCanvas: p.scaleWithCanvas, matchParents: p.matchParents, switchAfter: p.switchAfter,
+      });
+      const where = r.placement === "matched" ? "，放进了同名的组" : r.placement === "above-selection" ? `，在「${r.anchorName ?? "选中图层"}」上方` : r.placement === "top" ? "，置于顶端" : "";
+      const warn = r.compatibility?.length ? `；注意：${r.compatibility[0].detail}` : "";
+      status(`已发送 ${r.count} 个图层到「${name}」${where}` + (r.restored ? `，${r.restored} 个已还原画面位置` : "") + (r.scale !== 1 ? `，缩放 ${Math.round(r.scale * 100)}%` : "") + warn,
+        warn ? "info" : "ok");
+    } catch (e) {
+      const d = explainWorkbenchError(e);
+      log("warn", "layer send", target, e);
+      status(d.title.replace("置入失败", "发送失败") + "：" + d.reason, "error");
+    } finally { refocus("tool"); void refresh(); }
+  }
+  /** a 发送到 setting from the menu (shared with the workbench's 置入设置) */
+  function toggleSendOption(which: string) {
+    const p = workbenchState().prefs;
+    if (which === "restore") setWorkbenchPrefs({ restore: !p.restore });
+    else if (which === "scale") setWorkbenchPrefs({ scaleWithCanvas: !p.scaleWithCanvas, ...(!p.scaleWithCanvas ? { scaleLongEdge: false } : {}) });
+    else if (which === "longEdge") setWorkbenchPrefs({ scaleLongEdge: !p.scaleLongEdge, ...(!p.scaleLongEdge ? { scaleWithCanvas: false } : {}) });
+    else if (which === "parents") setWorkbenchPrefs({ matchParents: !p.matchParents });
+    else if (which === "position") setWorkbenchPrefs({ position: p.position === "selection" ? "top" : "selection" });
+    else if (which === "switch") setWorkbenchPrefs({ switchAfter: !p.switchAfter });
+  }
   /** A tool of the 工具 page from the menu, with the settings last used there (they act on
    *  Photoshop's selection, so `ids` are selected first). */
   async function runTool(which: string, ids: number[]) {
@@ -2740,6 +2956,7 @@ export function createLayerTreeView(tree: LayerTree, status: Status, tools?: Lay
     const doc = docId, px = pixelSettings();
     const name = which === "trim" ? "裁剪边缘" : which === "islands" ? "拆分像素岛" : "按行拆分文字";
     try {
+      await exportsSettled();
       await selectTail;
       await tree.select(doc, ids);
       status(name + "中…", "busy");
@@ -3207,7 +3424,7 @@ export function createLayerTreeView(tree: LayerTree, status: Status, tools?: Lay
     props, lockRow,
     list,
     workbench.el,
-    h("div", { class: "lt-foot" }, h("div", { class: "lt-foot-btns" }, menuBtn, frameBtn, workbench.toggleButton), bar));
+    h("div", { class: "lt-foot" }, h("div", { class: "lt-foot-btns" }, menuBtn, frameBtn, nativeBtn, ...(WORKBENCH_ENABLED ? [workbench.toggleButton] : [])), bar));
   render();
   return { el, refresh };
 }

@@ -1,0 +1,93 @@
+// 一键更新 (update.cmd): everything a code change needs on the Windows machine, in order, doing
+// only what is out of date:
+//   1. the overlay helper (native/overlay/build.cmd) when its source is newer than the built exe;
+//      the running helper switches to the new exe by itself
+//   2. npm run build: the Photoshop plugin, the Illustrator panel; both panels see the new
+//      build-stamp.txt and load the new build within 2 s (no ⟳, no refresh button)
+//   3. the Illustrator panel's dev install (ai/install_dev.cmd) when it isn't installed
+// and what still needs a restart (a changed manifest) is said at the end.
+import { execFileSync, spawnSync } from "node:child_process";
+import { createHash } from "node:crypto";
+import { existsSync, readFileSync, readdirSync, statSync, writeFileSync } from "node:fs";
+import { join } from "node:path";
+import { fileURLToPath } from "node:url";
+import { buildHelper } from "./helper_build.mjs";
+
+const ROOT = fileURLToPath(new URL("..", import.meta.url));
+process.chdir(ROOT);
+const STATE = "dist/.update-state.json";
+const win = process.platform === "win32";
+
+/** newest modification time under `paths` (files or folders), 0 if none */
+function newest(paths) {
+  let t = 0;
+  const walk = p => {
+    if (!existsSync(p)) return;
+    const s = statSync(p);
+    if (s.isDirectory()) { for (const f of readdirSync(p)) walk(join(p, f)); }
+    else t = Math.max(t, s.mtimeMs);
+  };
+  for (const p of paths) walk(p);
+  return t;
+}
+const hash = p => existsSync(p) ? createHash("sha1").update(readFileSync(p)).digest("hex") : "";
+const step = (n, text) => console.log(`\n[${n}/3] ${text}`);
+/** runs a .cmd with "nopause"; false when it failed */
+function cmd(file) {
+  const r = spawnSync("cmd.exe", ["/c", file, "nopause"], { stdio: "inherit" });
+  if (r.status === 0) return true;
+  // nothing printed above: say at least why (cmd.exe not started, killed, or its exit code)
+  console.log(`  ${file} 结束：${r.error ? "没能运行（" + r.error.message + "）" : r.signal ? "被终止（" + r.signal + "）" : "退出码 " + r.status}`);
+  console.log(`  看完整错误：直接双击 ${file}`);
+  return false;
+}
+
+let state = {};
+try { state = JSON.parse(readFileSync(STATE, "utf8")); } catch { /* first run */ }
+const notes = [];
+let failed = false;
+
+// 1. 外置框架
+step(1, "外置框架");
+const exe = "dist/waveplug-overlay.exe";
+const src = newest(["native/overlay/src", "native/overlay/Cargo.toml", "native/overlay/Cargo.lock"]);
+const built = existsSync(exe) ? statSync(exe).mtimeMs : 0;
+if (!win) console.log("  不是 Windows，跳过");
+else if (src <= built) console.log("  没有改动，跳过");
+else {
+  console.log("  源码比 exe 新，重新编译（几分钟）…");
+  if (!(await buildHelper(ROOT, t => console.log(t)))) { failed = true; console.log("  [失败] 外置框架没有编译成功：把上面的错误发给 Claude。插件照样继续构建"); }
+}
+
+// 2. 插件和 Illustrator 面板
+step(2, "构建 Photoshop 插件和 Illustrator 面板");
+try {
+  execFileSync(process.execPath, ["scripts/build.mjs"], { stdio: ["ignore", "ignore", "inherit"] });
+  console.log("  [OK] 已构建：打开着的 WavePlug 面板和 WaveLayer 面板 2 秒内自动载入新版本");
+} catch {
+  failed = true;
+  console.log("  [失败] 构建出错：把上面的错误发给 Claude");
+}
+
+// 3. Illustrator 面板的安装
+step(3, "Illustrator 面板");
+const appdata = process.env.APPDATA ?? "";
+const installed = appdata && existsSync(join(appdata, "Adobe/CEP/extensions/com.waveplug.ai.wavelayer/CSXS/manifest.xml"));
+if (!win) console.log("  不是 Windows，跳过");
+else if (installed) console.log("  已安装");
+else {
+  console.log("  还没安装，正在安装…");
+  if (cmd("ai\\install_dev.cmd")) notes.push("Illustrator 面板刚装上：完全退出 Illustrator 再打开，在 窗口 › 扩展功能 › WaveLayer 打开");
+  else { failed = true; console.log("  [失败] 安装没成功"); }
+}
+
+// what a reload can't pick up
+const now = { pluginManifest: hash("plugin/manifest.json"), aiManifest: hash("ai/CSXS/manifest.xml") };
+if (state.pluginManifest && state.pluginManifest !== now.pluginManifest) notes.push("Photoshop 插件的 manifest 改了：需要重启 Photoshop（权限有变化时还要用 WavePlug 重新安装插件）");
+if (state.aiManifest && state.aiManifest !== now.aiManifest && installed) notes.push("Illustrator 面板的 manifest 改了：需要重启 Illustrator");
+if (!failed) writeFileSync(STATE, JSON.stringify(now, null, 2));
+
+console.log("");
+for (const n of notes) console.log("注意：" + n);
+console.log(failed ? "有步骤失败，见上面的 [失败]。日志在 reports\\uxp_runtime.log。" : "全部完成。");
+process.exitCode = failed ? 1 : 0;

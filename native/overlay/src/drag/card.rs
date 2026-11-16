@@ -156,7 +156,12 @@ impl Canvas {
 
     /// A rounded rectangle, antialiased by its signed distance at each pixel centre.
     pub fn round_rect(&mut self, r: RectF, radius: f32, c: Rgb) {
-        if r.w <= 0.0 || r.h <= 0.0 {
+        self.round_rect_alpha(r, radius, c, 1.0);
+    }
+
+    /// `round_rect` at `alpha` (0..1) opacity.
+    pub fn round_rect_alpha(&mut self, r: RectF, radius: f32, c: Rgb, alpha: f32) {
+        if r.w <= 0.0 || r.h <= 0.0 || alpha <= 0.0 {
             return;
         }
         let radius = radius.min(r.w / 2.0).min(r.h / 2.0).max(0.0);
@@ -172,7 +177,7 @@ impl Canvas {
                 let qy = (y as f32 + 0.5 - cy).abs() - hy;
                 let outside = (qx.max(0.0).powi(2) + qy.max(0.0).powi(2)).sqrt();
                 let d = outside + qx.max(qy).min(0.0) - radius;
-                self.blend(x, y, c, (0.5 - d).clamp(0.0, 1.0));
+                self.blend(x, y, c, (0.5 - d).clamp(0.0, 1.0) * alpha.min(1.0));
             }
         }
     }

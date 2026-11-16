@@ -13,6 +13,8 @@ export interface Services {
   layers: LayerTree;
   /** Shared native helper connection, created by the Studio panel and used by WaveLayer drag/drop. */
   overlay?: Overlay;
+  /** 牵手 Illustrator: Photoshop's side (src/ps/uxpBridge.ts); missing in the browser preview */
+  bridgePs?: import("./illustratorBridge.ts").BridgePs;
   /** Created on demand from the configured address. */
   comfy(base: string): Comfy;
   pickJson(): Promise<{ name: string; text: string } | null>;
@@ -32,6 +34,9 @@ export interface Services {
   launchOverlay?(): Promise<string | null>;
   /** present only in the development build: reloads the code from disk */
   devReload?(): void;
+  /** where the loader took this build from (plugin/loader.js): the development folder or the
+   *  plugin itself; `set` remembers the choice and reloads. Absent without the loader (preview). */
+  loadFrom?: { source: "dev" | "bundled"; devRoot: string; devMissing: string; set(to: "dev" | "bundled"): void };
   version: string;
 }
 
@@ -52,6 +57,12 @@ export interface Settings {
   /** Whether the plugin starts the overlay helper (外置框架) when Photoshop starts; default true.
    *  The helper always quits with Photoshop. */
   helperAutoStart: boolean;
+  /** 性能监视: the helper's box in the canvas's bottom-right corner (CPU / memory / GPU …); default true */
+  perfMonitor?: boolean;
+  /** 卡死保护: when Photoshop stops responding, the helper offers to back up its recovery files; default true */
+  hangGuard?: boolean;
+  /** 卡死保护: start the backup as soon as the hang is noticed; default true */
+  hangAutoBackup?: boolean;
   /** 生成 (the AI modes) or 工具 */
   view?: "generate" | "tools";
   /** panel mode and the workflow last used in each mode */

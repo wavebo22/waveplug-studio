@@ -9,10 +9,12 @@ test("layer rows keep the native eye only, the expand controls and the smart-obj
   assert.match(rows, /replace\(r\.eye, l\.visible \? ic\("eye", 14\) : null\)/);
   assert.doesNotMatch(rows, /replace\(r\.move, lockIcons\.move/);
   assert.doesNotMatch(rows, /replace\(r\.edit, lockIcons\.edit/);
-  for (const name of ["expandGroupsBtn", "expandEffectsBtn", "collapseGroupsBtn", "collapseEffectsBtn", "collapseAllBtn"])
-    assert.match(rows, new RegExp("const " + name + " = h\\("));
-  assert.match(rows, /lt-expand-divider/);
+  // 1.2: 组 / 效果 are text toggles (▸ unfold all, ▾ fold all) plus a 全部折叠 button
+  assert.match(rows, /const groupsToggle = expandBtn\("组"\)/);
+  assert.match(rows, /const effectsToggle = expandBtn\("效果"\)/);
+  assert.match(rows, /const collapseAllBtn = h\(/);
   assert.match(rows, /expandCollapseControls/);
+  assert.doesNotMatch(rows, /lt-expand-divider/);
   const glyphs = readFileSync(new URL("../src/ui/dom.ts", import.meta.url), "utf8");
   for (const name of ["soReplace", "soExport", "soUnpack", "soReset"])
     assert.match(glyphs, new RegExp("\\b" + name + ":"));

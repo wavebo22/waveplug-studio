@@ -550,6 +550,8 @@ fn who(h: HWND) -> &'static str {
         "overlay"
     } else if h == find(VARIANTS_TITLE) {
         "variants"
+    } else if h == find(crate::panel::shelf::TITLE) {
+        "workbench"
     } else if is_photoshop(h) {
         "photoshop"
     } else if is_own_process(h) {
@@ -720,6 +722,117 @@ fn find_photoshop_main_window() -> HWND {
         EnumWindows(Some(find_photoshop_callback), &mut best as *mut _ as LPARAM);
     }
     best.0
+}
+
+// ── for the 性能监视 box (monitor.rs): where Photoshop is, without any surface being up ──
+static MONITOR_PS: AtomicIsize = AtomicIsize::new(0);
+
+/// Whether Photoshop has the foreground, as monitor.rs should see it.
+pub enum PsFront {
+    /// Photoshop, or one of the helper's own windows over it
+    Front,
+    /// another program
+    Away,
+    /// no foreground window right now (activation is moving)
+    Unsure,
+}
+
+pub fn photoshop_front() -> PsFront {
+    match who(unsafe { GetForegroundWindow() }) {
+        "none" => PsFront::Unsure,
+        "other" => PsFront::Away,
+        _ => PsFront::Front,
+    }
+}
+
+fn monitor_photoshop() -> HWND {
+    let cached = MONITOR_PS.load(Ordering::SeqCst) as HWND;
+    if photoshop_window_ready(cached) {
+        return cached;
+    }
+    let h = find_photoshop_main_window();
+    MONITOR_PS.store(h as isize, Ordering::SeqCst);
+    h
+}
+
+/// Photoshop's main window on screen (left, top, right, bottom); None while minimised or closed.
+pub fn photoshop_main_rect() -> Option<(i32, i32, i32, i32)> {
+    let h = monitor_photoshop();
+    if !photoshop_window_ready(h) {
+        return None;
+    }
+    window_rect(h).map(|r| (r.left, r.top, r.right, r.bottom))
+}
+
+/// The process id of the running Photoshop, 0 when there is none.
+pub fn photoshop_pid() -> u32 {
+    let h = monitor_photoshop();
+    let mut pid = 0u32;
+    if !h.is_null() {
+        unsafe { GetWindowThreadProcessId(h, &mut pid) };
+    }
+    pid
+}
+
+// ── for 卡死保护 (hang.rs): Photoshop's main window whatever its state, even minimised or hung ──
+static HANG_PS: AtomicIsize = AtomicIsize::new(0);
+
+pub fn photoshop_main_hwnd() -> HWND {
+    let cached = HANG_PS.load(Ordering::SeqCst) as HWND;
+    if !cached.is_null() && unsafe { IsWindow(cached) } != 0 && is_photoshop(cached) {
+        return cached;
+    }
+    let h = find_photoshop_main_window();
+    HANG_PS.store(h as isize, Ordering::SeqCst);
+    h
+}
+
+pub fn photoshop_main_pid() -> u32 {
+    let h = photoshop_main_hwnd();
+    let mut pid = 0u32;
+    if !h.is_null() {
+        unsafe { GetWindowThreadProcessId(h, &mut pid) };
+    }
+    pid
+}
+
+/// Puts the window titled `title` (an egui viewport of `size` logical px) in the middle of
+/// Photoshop's window, on top. Not owned by Photoshop: tying it to a hung window could hang it
+/// too. False until the window exists.
+pub fn place_dialog(title: &str, size: Vec2) -> bool {
+    let t = find(title);
+    if t.is_null() {
+        return false;
+    }
+    let ps = photoshop_main_hwnd();
+    let area = window_rect(ps)
+        .filter(|_| unsafe { IsIconic(ps) } == 0)
+        .map(|r| (r.left, r.top, r.right, r.bottom))
+        .or_else(|| {
+            let mut c = POINT { x: 0, y: 0 };
+            unsafe { GetCursorPos(&mut c) };
+            let m = unsafe { MonitorFromPoint(c, MONITOR_DEFAULTTONEAREST) };
+            let mut info: MONITORINFO = unsafe { std::mem::zeroed() };
+            info.cbSize = std::mem::size_of::<MONITORINFO>() as u32;
+            (unsafe { GetMonitorInfoW(m, &mut info) } != 0)
+                .then(|| (info.rcWork.left, info.rcWork.top, info.rcWork.right, info.rcWork.bottom))
+        });
+    let Some(a) = area else { return true };
+    let k = dpi_at(POINT { x: (a.0 + a.2) / 2, y: (a.1 + a.3) / 2 }) / 96.0;
+    let (w, h) = ((size.x as f64 * k) as i32, (size.y as f64 * k) as i32);
+    let (x, y) = ((a.0 + a.2 - w) / 2, (a.1 + a.3 - h) / 2);
+    unsafe { SetWindowPos(t, HWND_TOPMOST, x, y, w, h, SWP_NOACTIVATE | SWP_ASYNCWINDOWPOS) };
+    log::line(format!("hang dialog placed at {x},{y} {w}x{h}"));
+    true
+}
+
+/// The completion notice's window while it is up.
+pub fn toast_rect() -> Option<(i32, i32, i32, i32)> {
+    let t = find(TOAST_TITLE);
+    if t.is_null() || unsafe { IsWindowVisible(t) } == 0 {
+        return None;
+    }
+    window_rect(t).map(|r| (r.left, r.top, r.right, r.bottom))
 }
 
 /// Photoshop's main window: the top-level window under the canvas, else the one in front.
@@ -1107,7 +1220,7 @@ fn watch_variant(foreground: &str) {
         align_variant_to_canvas_top(owner, view, false);
     }
     let active =
-        photoshop_window_ready(owner) && matches!(foreground, "photoshop" | "variants" | "overlay");
+        photoshop_window_ready(owner) && matches!(foreground, "photoshop" | "variants" | "overlay" | "workbench");
     if !active {
         if !VARIANT_PARKED.load(Ordering::SeqCst) && !idle_long_enough(&VARIANT_IDLE_TICKS) {
             return;
@@ -1721,6 +1834,14 @@ pub fn watch() {
                     "Photoshop pid={photoshop_pid} exited; shutting down helper"
                 ));
                 crate::comfy::photoshop_closed();
+                if crate::app::stays() {
+                    // the user keeps WavePlug open (its window, the Start menu, 保持运行): wait for
+                    // the next Photoshop
+                    log::line("WavePlug stays running (window open / started by the user)");
+                    photoshop_process = 0;
+                    photoshop_pid = 0;
+                    continue;
+                }
                 let me = own_window();
                 if !me.is_null() {
                     unsafe { PostMessageW(me, WM_CLOSE, 0, 0) };
@@ -1783,6 +1904,7 @@ pub fn watch() {
             }
             // Independent viewports follow Photoshop even when the generate surface is hidden.
             watch_variant(now_front);
+            watch_shelf(now_front);
             if !SHOWN.load(Ordering::SeqCst) {
                 continue;
             }
@@ -1848,4 +1970,181 @@ pub fn watch() {
             }
         }
     });
+}
+
+// ── 编辑工作台 window (panel/shelf.rs): pinned to the canvas top-right, sized by its content ──
+// Simpler than the variant rail on purpose: no slide, no user resize; it parks off screen while
+// Photoshop (or one of our windows) isn't in front, like the others.
+static SHELF_SHOWN: AtomicBool = AtomicBool::new(false);
+static SHELF_PARKED: AtomicBool = AtomicBool::new(true);
+static SHELF_VIEW: Mutex<Option<ScreenRect>> = Mutex::new(None);
+static SHELF_OWNER: AtomicIsize = AtomicIsize::new(0);
+/// logical size the content asks for
+static SHELF_SIZE: Mutex<(f32, f32)> = Mutex::new((crate::panel::shelf::WIDTH, 200.0));
+static SHELF_IDLE_TICKS: AtomicU32 = AtomicU32::new(0);
+static SHELF_GUARD_HWND: AtomicIsize = AtomicIsize::new(0);
+static SHELF_ORIGINAL_WNDPROC: AtomicIsize = AtomicIsize::new(0);
+
+unsafe extern "system" fn shelf_wnd_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
+    if msg == WM_MOUSEACTIVATE {
+        return MA_NOACTIVATE; // the click goes in, the keyboard stays with Photoshop
+    }
+    let original = SHELF_ORIGINAL_WNDPROC.load(Ordering::SeqCst);
+    if original != 0 {
+        let proc: WNDPROC = unsafe { std::mem::transmute(original) };
+        unsafe { CallWindowProcW(proc, hwnd, msg, wparam, lparam) }
+    } else {
+        unsafe { DefWindowProcW(hwnd, msg, wparam, lparam) }
+    }
+}
+
+fn install_shelf_guard(h: HWND) {
+    if h.is_null() || SHELF_GUARD_HWND.load(Ordering::SeqCst) == h as isize {
+        return;
+    }
+    unsafe {
+        let orig = GetWindowLongPtrW(h, GWLP_WNDPROC);
+        if orig == 0 || orig == shelf_wnd_proc as *const () as isize {
+            return;
+        }
+        let prior = SetWindowLongPtrW(h, GWLP_WNDPROC, shelf_wnd_proc as *const () as isize);
+        if prior != 0 {
+            SHELF_ORIGINAL_WNDPROC.store(prior, Ordering::SeqCst);
+            SHELF_GUARD_HWND.store(h as isize, Ordering::SeqCst);
+        }
+    }
+}
+
+fn shelf_hwnd() -> HWND {
+    find(crate::panel::shelf::TITLE)
+}
+
+pub fn shelf_window_exists() -> bool {
+    !shelf_hwnd().is_null()
+}
+
+/// Screen rectangle (physical px) for the workbench at the canvas top-right.
+fn shelf_rect_for(view: Option<ScreenRect>, owner: HWND) -> Option<(i32, i32, i32, i32)> {
+    let (right, top) = view
+        .filter(|v| v.right > v.left && v.bottom > v.top && v.left > -30000.0 && v.top > -30000.0)
+        .map(|v| (v.right.round() as i32, v.top.round() as i32))
+        .or_else(|| window_rect(owner).map(|r| (r.right, r.top)))?;
+    let k = dpi_at(POINT { x: right - 1, y: top }) / 96.0;
+    let (lw, lh) = SHELF_SIZE.lock().map(|s| *s).unwrap_or((crate::panel::shelf::WIDTH, 200.0));
+    let (w, h) = ((lw as f64 * k).round() as i32, (lh as f64 * k).round() as i32);
+    let m = (MARGIN * k).round() as i32;
+    Some((right - m - w, top + m, w.max(80), h.max(60)))
+}
+
+fn shelf_put(h: HWND) {
+    let view = SHELF_VIEW.lock().ok().and_then(|v| *v);
+    let owner = SHELF_OWNER.load(Ordering::SeqCst) as HWND;
+    let Some((x, y, w, ht)) = shelf_rect_for(view, owner) else { return };
+    let ok = unsafe { SetWindowPos(h, HWND_TOPMOST, x, y, w, ht, SWP_NOACTIVATE | SWP_ASYNCWINDOWPOS) } != 0;
+    if ok && SHELF_PARKED.swap(false, Ordering::SeqCst) {
+        log::line(format!("workbench shown at {x},{y} size {w}x{ht}"));
+    }
+}
+
+fn shelf_park(h: HWND) {
+    let ok = unsafe { SetWindowPos(h, HWND_NOTOPMOST, PARK.0, PARK.1, 0, 0, SWP_NOSIZE | SWP_NOACTIVATE | SWP_ASYNCWINDOWPOS) } != 0;
+    if ok {
+        SHELF_PARKED.store(true, Ordering::SeqCst);
+    }
+}
+
+/// The plugin showed the workbench against `view` (the canvas). False until egui made the window.
+pub fn shelf_place(view: Option<ScreenRect>) -> bool {
+    let h = shelf_hwnd();
+    if h.is_null() {
+        return false;
+    }
+    set_style(h, true);
+    install_shelf_guard(h);
+    let pt = view.map(|v| POINT { x: ((v.left + v.right) * 0.5) as i32, y: ((v.top + v.bottom) * 0.5) as i32 }).unwrap_or_else(|| {
+        let mut p = POINT { x: 0, y: 0 };
+        unsafe { GetCursorPos(&mut p) };
+        p
+    });
+    SHELF_OWNER.store(photoshop_at(pt) as isize, Ordering::SeqCst);
+    if let Ok(mut v) = SHELF_VIEW.lock() {
+        *v = view.or(*v);
+    }
+    SHELF_SHOWN.store(true, Ordering::SeqCst);
+    SHELF_PARKED.store(true, Ordering::SeqCst);
+    shelf_put(h);
+    true
+}
+
+/// The content asks for another size (logical px): follow it, keeping the top-right corner.
+pub fn shelf_sync(width: f32, height: f32) {
+    let changed = SHELF_SIZE.lock().map(|mut s| {
+        let new = (width, height.min(640.0));
+        let c = (s.0 - new.0).abs() > 0.5 || (s.1 - new.1).abs() > 0.5;
+        *s = new;
+        c
+    }).unwrap_or(false);
+    if changed && SHELF_SHOWN.load(Ordering::SeqCst) && !SHELF_PARKED.load(Ordering::SeqCst) {
+        let h = shelf_hwnd();
+        if !h.is_null() {
+            shelf_put(h);
+        }
+    }
+}
+
+pub fn shelf_hide() {
+    SHELF_SHOWN.store(false, Ordering::SeqCst);
+    let h = shelf_hwnd();
+    if !h.is_null() {
+        shelf_park(h);
+    }
+}
+
+/// Where the workbench is on screen now (a drop target), None while hidden or parked.
+pub fn shelf_screen_rect() -> Option<(i32, i32, i32, i32)> {
+    if !SHELF_SHOWN.load(Ordering::SeqCst) || SHELF_PARKED.load(Ordering::SeqCst) {
+        return None;
+    }
+    window_rect(shelf_hwnd()).map(|r| (r.left, r.top, r.right, r.bottom))
+}
+
+/// Whether the cursor's top-level window at (x, y) is Photoshop (a drag out of the workbench lands there).
+pub fn photoshop_under(x: i32, y: i32) -> bool {
+    is_photoshop(root_at(x, y) as HWND)
+}
+
+pub fn cursor_pos() -> (i32, i32) {
+    let mut p = POINT { x: 0, y: 0 };
+    unsafe { GetCursorPos(&mut p) };
+    (p.x, p.y)
+}
+
+/// Follow Photoshop: on screen while it (or one of our windows) is in front, parked otherwise.
+fn watch_shelf(foreground: &str) {
+    if !SHELF_SHOWN.load(Ordering::SeqCst) {
+        return;
+    }
+    let h = shelf_hwnd();
+    if h.is_null() {
+        SHELF_PARKED.store(true, Ordering::SeqCst);
+        return;
+    }
+    let ex = unsafe { GetWindowLongPtrW(h, GWL_EXSTYLE) };
+    if needs_noactivate_style(false, ex) {
+        set_style(h, true);
+    }
+    install_shelf_guard(h);
+    let owner = SHELF_OWNER.load(Ordering::SeqCst) as HWND;
+    let active = photoshop_window_ready(owner) && matches!(foreground, "photoshop" | "variants" | "overlay" | "workbench" | "helper");
+    if !active {
+        if !SHELF_PARKED.load(Ordering::SeqCst) && idle_long_enough(&SHELF_IDLE_TICKS) {
+            shelf_park(h);
+            log::line(format!("workbench parked: foreground={foreground}"));
+        }
+        return;
+    }
+    SHELF_IDLE_TICKS.store(0, Ordering::SeqCst);
+    if SHELF_PARKED.load(Ordering::SeqCst) {
+        shelf_put(h);
+    }
 }

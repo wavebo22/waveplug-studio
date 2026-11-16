@@ -11,8 +11,11 @@ import { type LayerDeleteResult, type LayerTree, type MoveOptions, type RunOptio
 import { docById, findLayer, modal, onModalDone, play, step } from "./uxpHost.ts";
 import { act, selectLayers, UxpTools } from "./uxpTools.ts";
 import { type MaskKind, maskTransferDescriptors } from "./maskTransfer.ts";
-import { type StagedLayer } from "../core/layers/workbench.ts";
-import { placeWorkbenchLayers } from "./uxpWorkbench.ts";
+import { type StagedLayer, snapName } from "../core/layers/workbench.ts";
+import { encodePng } from "../core/image/png.ts";
+import { placeWorkbenchLayers, snapshotFolder } from "./uxpWorkbench.ts";
+import { readLayerImage } from "./uxpHost.ts";
+import { isNativeCommand, nativeDeleteOutcome, NATIVE_ACTIONS, NATIVE_COMMANDS_KEY, NATIVE_MENU, pickMenuId } from "../core/layers/nativeCommands.ts";
 
 declare const require: (m: string) => any;
 
@@ -71,7 +74,7 @@ const num = (v: any) => Number(typeof v === "object" && v ? v._value : v) || 0;
 
 const isLocked = (k: any) => !!k && !!(k.protectAll || k.protectComposite || k.protectPosition || k.protectTransparency || k.protectArtboardAutonest);
 
-let filterKeysLogged = false, layerFilterKeysLogged = false;
+let filterKeysLogged = false;
 /** the first thumbnails' read bounds are logged (how Photoshop reports them) */
 let thumbsLogged = 0;
 /** Photoshop numbers smart filters the other way round from the list it reports (see run "toggleFilter") */
@@ -417,9 +420,50 @@ async function repairLayerPlacement(doc: any, itemId: number, relativeId: number
   return placedAsRequested(doc, itemId, relativeId, place);
 }
 
+/** The document across sessions: its file, or its title before it is saved. */
+function docKeyOf(d: any): string {
+  let key = "";
+  try { key = String(d.path || d.title || d.name || ""); } catch { /* unsaved: title only */ }
+  return key || "doc" + d.id;
+}
+
 export class UxpLayerTree implements LayerTree {
   async placeStaged(entries: StagedLayer[], options?: import("./uxpWorkbench.ts").WorkbenchPlacementOptions) {
     return whenFree(() => placeWorkbenchLayers(entries, options));
+  }
+  async openDocs() {
+    const out: { docId: number; docKey: string; name: string }[] = [];
+    try { for (const d of ps().app.documents ?? []) out.push({ docId: d.id, docKey: docKeyOf(d), name: String(d.title ?? d.name ?? "") }); }
+    catch (e) { log("warn", "workbench open docs", e); }
+    return out;
+  }
+  async snapshotStaged(docId: number, docKey: string, layerId: number) {
+    return whenFree(async () => {
+      const { pixels } = await readLayerImage(docId, layerId);
+      if (!pixels.width || !pixels.height) return null;
+      const name = snapName(docKey, layerId);
+      const folder = await snapshotFolder();
+      const file = await folder.createFile(name, { overwrite: true });
+      await file.write(encodePng(pixels), { format: require("uxp").storage.formats.binary });
+      log("info", "workbench snapshot", JSON.stringify({ docId, layerId, name, w: pixels.width, h: pixels.height }));
+      return name;
+    });
+  }
+  async dropSnapshots(names: string[]) {
+    const folder = await snapshotFolder();
+    for (const n of names) {
+      try { const f = await folder.getEntry(n); await f.delete(); } catch { /* already gone */ }
+    }
+  }
+  async probeStaged(refs: { docId: number; layerId: number }[]) {
+    const docs = new Map<number, any>();
+    try { for (const d of ps().app.documents ?? []) docs.set(d.id, d); } catch { /* host busy: all unknown */ }
+    return refs.map(r => {
+      const d = docs.get(r.docId);
+      if (!d) return null;
+      try { const l = findLayer(d.layers ?? [], r.layerId); return l ? { name: String(l.name ?? "") } : null; }
+      catch { return null; }
+    });
   }
   async read() {
     const d = ps().app.activeDocument;
@@ -438,20 +482,13 @@ export class UxpLayerTree implements LayerTree {
     ]);
     const raw = await readRaw(d.id, !!bg?.hasBackgroundLayer);
     const layers = buildTree(raw);
-    const withFilters = layers.find(l => l.filters.length);
-    if (withFilters && !layerFilterKeysLogged) {
-      // where Photoshop keeps "all smart filters shown" (not in smartObject)
-      layerFilterKeysLogged = true;
-      const [full] = await play([{ _obj: "get", _target: [{ _ref: "layer", _id: withFilters.id }, docRef(d.id)] }]);
-      log("info", "smart filter layer keys", JSON.stringify(Object.fromEntries(Object.entries(full ?? {}).filter(([k]) => /filter|fx|mask/i.test(k)).map(([k, v]) => [k, typeof v === "object" ? "{…}" : v]))));
-    }
+    // (a one-off whole-layer `get` of a smart object used to be logged here: it took ~20 s and
+    // stalled Photoshop. Never `get` a whole layer descriptor on a path that runs by itself.)
     let selected: number[] = (target?.targetLayersIDs ?? []).map((x: any) => Number(x._id));
     if (!target?.targetLayersIDs) selected = (d.activeLayers ?? []).map((l: any) => l.id);
     const ms = Date.now() - t0;
     if (ms > 300) log("info", "layer tree read", layers.length, "layers", ms, "ms");
-    let docKey = "";
-    try { docKey = String(d.path || d.title || d.name || ""); } catch { /* unsaved: title only */ }
-    return { docId: d.id, docKey: docKey || "doc" + d.id, layers, selected, width: Math.round(d.width), height: Math.round(d.height) };
+    return { docId: d.id, docKey: docKeyOf(d), layers, selected, width: Math.round(d.width), height: Math.round(d.height) };
   }
 
   async pickColor(hex: string) {
@@ -715,6 +752,12 @@ export class UxpLayerTree implements LayerTree {
   async run(docId: number, action: LayerAction, ids: number[], arg?: string, opts: RunOptions = {}) {
     requireActiveDoc(docId);
     const label = ACTION_NAMES[action] ?? action;
+    // 原版命令（测试）: Photoshop's own command on the selected rows (falls back to the plugin's way
+    // when the menu item can't be found for certain)
+    if (nativeCommandsOn() && isNativeCommand(action)) {
+      const r = await runNative(docId, action, ids, label);
+      if (r !== FALLBACK) return r;
+    }
     if (action === "delete") {
       // Explicit layer IDs (never active pixels/masks). All successful deletions form one undo step.
       const artboardIds = new Set(opts.artboardIds ?? []);
@@ -1323,6 +1366,7 @@ export class UxpLayerTree implements LayerTree {
       }));
       return;
     }
+    if (action === "linkToFile") { await linkToFile(docId, ids[0], label); return; }
     // Photoshop's own dialogs (a file picker, 新建图层): shown, and Cancel there changes nothing
     const dialog = DIALOG_COMMANDS[action];
     if (dialog) {
@@ -1369,8 +1413,8 @@ export class UxpLayerTree implements LayerTree {
     }
     if (action === "link" && ids.length) {
       // which property tells a layer is linked (shown as 🔗 in the list)
-      const [d] = await play([{ _obj: "get", _target: [{ _ref: "layer", _id: ids[0] }, { _ref: "document", _id: docId }] }]);
-      log("info", "layer link keys", JSON.stringify(Object.keys(d ?? {}).filter(k => /link/i.test(k))), JSON.stringify(d?.linkedLayerIDs ?? null));
+      const [d] = await play([{ _obj: "get", _target: [{ _property: "linkedLayerIDs" }, { _ref: "layer", _id: ids[0] }, { _ref: "document", _id: docId }] }]);
+      log("info", "layer link ids", JSON.stringify(d?.linkedLayerIDs ?? null));
     }
   }
 
@@ -1499,17 +1543,115 @@ const ACTION_NAMES: Partial<Record<LayerAction, string>> = {
   toggleMaskLink: "链接/取消链接蒙版", moveEffect: "移动图层效果", moveEffects: "移动图层样式", deleteEffect: "删除图层效果", moveFilters: "移动智能滤镜", deleteFilter: "删除智能滤镜", deleteFilters: "清除智能滤镜",
   targetLayer: "选择图层", targetFilterMask: "选择智能滤镜蒙版", deleteFilterMask: "删除智能滤镜蒙版", viewMask: "查看蒙版", editFilter: "编辑智能滤镜", showVariant: "切换变体", deleteVariant: "删除变体", setProps: "图层属性", setLock: "锁定/解锁图层", adjustment: "新建调整图层",
   mergeDown: "向下合并", mergeVisible: "合并可见图层", flatten: "拼合图像", rasterizeStyle: "栅格化图层样式", smartViaCopy: "通过拷贝新建智能对象",
-  embedLinked: "嵌入链接的智能对象", convertToLinked: "转换为链接对象", relink: "重新链接到文件", align: "对齐图层", distribute: "分布图层",
+  embedLinked: "嵌入链接的智能对象", convertToLinked: "转换为链接对象", relink: "重新链接到文件", linkToFile: "链接到已有文件", align: "对齐图层", distribute: "分布图层",
   artboardFromLayers: "来自图层的画板", newLayerDialog: "新建图层", quickExport: "快速导出为 PNG", copyCSS: "复制 CSS", copySVG: "复制 SVG",
 };
+
+/** 链接到已有文件: an embedded smart object made a linked one, pointing at a file the user picks.
+ *  Photoshop's own 重新链接到文件 first; when it refuses an embedded layer, the file is placed as a
+ *  linked smart object in the same place (size, name, opacity, blend) right above it, and the old
+ *  layer is hidden, not deleted (its masks, effects and filters stay there). One history step. */
+async function linkToFile(docId: number, id: number, label: string): Promise<void> {
+  const lfs = require("uxp").storage.localFileSystem;
+  const file = await lfs.getFileForOpening({ types: ["psd", "psb", "ai", "pdf", "eps", "svg", "png", "jpg", "jpeg", "tif", "tiff", "webp", "gif", "bmp"] });
+  if (!file) return;
+  const token = lfs.createSessionToken(file);
+  const linkedOf = async (layerId: number) => {
+    const [r] = await play([{ _obj: "get", _target: [{ _property: "smartObject" }, { _ref: "layer", _id: layerId }, docRef(docId)] }]).catch(() => [null]);
+    return !!r?.smartObject?.linked;
+  };
+  let route = "relink";
+  await whenFree(() => step("WavePlug " + label, docId, async () => {
+    requireActiveDoc(docId);
+    const doc = docById(docId), old = findLayer(doc.layers, id);
+    if (!old) throw new Error("这个智能对象图层已不存在");
+    await selectLayers([id]);
+    try {
+      await act({ _obj: "placedLayerRelinkToFile", null: { _path: token, _kind: "local" } });
+      if (await linkedOf(id)) return;
+    } catch (e) { log("info", "link to file: relink refused", e); }
+    route = "place";
+    const { constants } = ps();
+    const box = (l: any) => { const b = l.boundsNoEffects ?? l.bounds; return { left: Number(b.left), top: Number(b.top), right: Number(b.right), bottom: Number(b.bottom) }; };
+    const want = box(old);
+    await play([{ _obj: "placeEvent", null: { _path: token, _kind: "local" }, linked: true,
+      freeTransformCenterState: { _enum: "quadCenterState", _value: "QCSAverage" },
+      offset: { _obj: "offset", horizontal: { _unit: "pixelsUnit", _value: 0 }, vertical: { _unit: "pixelsUnit", _value: 0 } } }]);
+    const made = docById(docId).activeLayers?.[0];
+    if (!made || made.id === id) throw new Error("没能置入这个文件");
+    let b = box(made);
+    const w = want.right - want.left, h = want.bottom - want.top;
+    if (w > 0 && h > 0) await made.scale(w / Math.max(0.01, b.right - b.left) * 100, h / Math.max(0.01, b.bottom - b.top) * 100, constants.AnchorPosition.TOPLEFT);
+    b = box(made);
+    if (Math.abs(want.left - b.left) > 0.01 || Math.abs(want.top - b.top) > 0.01) await made.translate(want.left - b.left, want.top - b.top);
+    await made.move(old, constants.ElementPlacement.PLACEBEFORE);
+    try { made.name = old.name; } catch { /* keeps the file's name */ }
+    try { made.opacity = old.opacity; } catch { /* 100 */ }
+    try { made.blendMode = old.blendMode; } catch { /* normal */ }
+    try { old.visible = false; } catch { /* stays shown */ }
+  }));
+  log("info", "link to file", JSON.stringify({ docId, id, route, file: String(file.name ?? "") }));
+}
 
 /** Commands run with Photoshop's own dialog shown (dialogOptions "display"). */
 const DIALOG_COMMANDS: Partial<Record<LayerAction, object>> = {
   newLayerDialog: { _obj: "make", _target: [{ _ref: "layer" }] },
-  convertToLinked: { _obj: "placedLayerConvertToLinked" },
-  relink: { _obj: "placedLayerRelinkToFile" },
+  // 转换为链接对象 / 重新链接到文件 are MENU_COMMANDS: as a batchPlay inside a modal Photoshop
+  // answered "命令当前不可用" (11-14 15:59), its own menu item shows its save / open dialog normally
   artboardFromLayers: { _obj: "make", _target: [{ _ref: "artboardSection" }], from: { _ref: "layer", _enum: "ordinal", _value: "targetEnum" } },
 };
+
+const FALLBACK = Symbol("fallback");
+function nativeCommandsOn(): boolean {
+  try { return localStorage.getItem(NATIVE_COMMANDS_KEY) === "on"; } catch { return false; }
+}
+/** 原版命令: select the rows in Photoshop, then run Photoshop's own command on them — its menu item
+ *  (dialogs, availability, history name all Photoshop's), or for delete the plain action its Delete
+ *  key records. No extra checks, no plugin history step. */
+async function runNative(docId: number, action: LayerAction, ids: number[], label: string): Promise<void | LayerDeleteResult | typeof FALLBACK> {
+  const t0 = Date.now();
+  let menuId: number | undefined;
+  const spec = NATIVE_MENU[action];
+  if (spec) {
+    const index = await menuIndex();
+    const all = (titles: string[]) => titles.flatMap(t => index.get(plainTitle(t)) ?? []);
+    const found = all(spec.titles), anchors = spec.near ? all(spec.near) : [];
+    menuId = pickMenuId(found, anchors);
+    if (menuId === undefined) {
+      log("info", "native command fallback", action, JSON.stringify({ found, anchors }));
+      return FALLBACK;
+    }
+  }
+  const before = new Map<number, string>();
+  await whenFree(() => modal(SELECT, async () => {
+    requireActiveDoc(docId);
+    const doc = docById(docId), there = ids.filter(id => findLayer(doc.layers, id));
+    if (!there.length) throw new Error("图层已不存在");
+    for (const id of there) before.set(id, String(findLayer(doc.layers, id)?.name ?? "#" + id));
+    await selectLayers(there);
+  }));
+  if (menuId !== undefined) {
+    const done = await ps().core.performMenuCommand({ commandID: menuId });
+    log("info", "native command", action, JSON.stringify({ route: "menu", menuId, done: done ?? null, ms: Date.now() - t0 }));
+    if (done === false || (done as any)?.available === false) throw new Error(`Photoshop 现在不能执行「${label}」`);
+    return;
+  }
+  if (NATIVE_ACTIONS.has(action)) {
+    // what Photoshop's Delete key records: delete the target (selected) layers, as its own history step
+    await whenFree(() => modal("删除图层", async () => {
+      requireActiveDoc(docId);
+      const [r] = await play([{ _obj: "delete", _target: [{ _ref: "layer", _enum: "ordinal", _value: "targetEnum" }] }]);
+      if (r?._obj === "error" && r.result !== -128) throw new Error(r.message || "Photoshop 拒绝删除");
+    }));
+    const doc = docById(docId), surviving = new Set<number>();
+    for (const id of before.keys()) if (findLayer(doc.layers, id)) surviving.add(id);
+    const { deleted, skipped } = nativeDeleteOutcome([...before.keys()], surviving, before);
+    const selected = (doc.activeLayers ?? [])[0]?.id ?? null;
+    log("info", "native command", action, JSON.stringify({ route: "action", deleted, skipped: skipped.length, selected, ms: Date.now() - t0 }));
+    return { kind: "delete", deleted, skipped, selected };
+  }
+  return FALLBACK;
+}
 
 /** Menu-only commands: the item's titles (Chinese, English), and a title only the 图层 menu has next to
  *  it (文件 › 导出 has a 快速导出为 PNG of its own, which exports the whole document). */
@@ -1517,6 +1659,8 @@ const MENU_COMMANDS: Partial<Record<LayerAction, { titles: string[]; near?: stri
   quickExport: { titles: ["快速导出为PNG", "QuickExportasPNG"], near: ["复制CSS", "CopyCSS"] },
   copyCSS: { titles: ["复制CSS", "CopyCSS"] },
   copySVG: { titles: ["复制SVG", "CopySVG"] },
+  convertToLinked: { titles: ["转换为链接对象", "ConverttoLinked"] },
+  relink: { titles: ["重新链接到文件", "RelinktoFile"] },
 };
 /** Every menu command's title → ids, read once (menu ids differ between Photoshop versions). */
 let menuTitles: Promise<Map<string, number[]>> | null = null;

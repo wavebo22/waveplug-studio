@@ -1,0 +1,45 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- WaveLayer for Illustrator: a CEP panel (Window › Extensions › WaveLayer). Built into dist/ai by
+     npm run build; ai/install_dev.cmd links that folder into Illustrator's extensions folder. -->
+<ExtensionManifest Version="7.0" ExtensionBundleId="com.waveplug.ai" ExtensionBundleVersion="0.1.0" ExtensionBundleName="WavePlug for Illustrator"
+  xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance">
+  <ExtensionList>
+    <Extension Id="com.waveplug.ai.wavelayer" Version="0.1.0" />
+  </ExtensionList>
+  <ExecutionEnvironment>
+    <HostList>
+      <Host Name="ILST" Version="[26.0,99.9]" />
+    </HostList>
+    <LocaleList>
+      <Locale Code="All" />
+    </LocaleList>
+    <RequiredRuntimeList>
+      <RequiredRuntime Name="CSXS" Version="11.0" />
+    </RequiredRuntimeList>
+  </ExecutionEnvironment>
+  <DispatchInfoList>
+    <Extension Id="com.waveplug.ai.wavelayer">
+      <DispatchInfo>
+        <Resources>
+          <MainPath>./index.html</MainPath>
+          <ScriptPath>./host/wavelayer.jsx</ScriptPath>
+          <CEFCommandLine>
+            <Parameter>--allow-file-access-from-files</Parameter>
+          </CEFCommandLine>
+        </Resources>
+        <Lifecycle>
+          <AutoVisible>true</AutoVisible>
+        </Lifecycle>
+        <UI>
+          <Type>Panel</Type>
+          <Menu>WaveLayer</Menu>
+          <Geometry>
+            <Size><Height>620</Height><Width>320</Width></Size>
+            <MinSize><Height>240</Height><Width>240</Width></MinSize>
+            <MaxSize><Height>2400</Height><Width>900</Width></MaxSize>
+          </Geometry>
+        </UI>
+      </DispatchInfo>
+    </Extension>
+  </DispatchInfoList>
+</ExtensionManifest>

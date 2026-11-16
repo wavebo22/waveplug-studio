@@ -22,11 +22,24 @@ test("跨软件拖拽：sessionId 唯一且只含小写字母和数字", () => {
   assert.notEqual(externalDragSessionId(), externalDragSessionId());
 });
 
-test("跨软件拖拽：候选是选中的非组图层，按列表顺序；子项拖拽没有候选", () => {
+test("跨软件拖拽：候选是选中的图层（组整体合并），按列表顺序；子项拖拽没有候选", () => {
   assert.deepEqual(externalDragCandidates(LAYERS, [4, 3, 2, 1], false),
-    [{ layerId: 1, name: "标题", kind: "text" }, { layerId: 3, name: "瓶子", kind: "pixel" }, { layerId: 4, name: "背景", kind: "background" }]);
-  assert.deepEqual(externalDragCandidates(LAYERS, [2], false), []);
+    [{ layerId: 1, name: "标题", kind: "text" }, { layerId: 2, name: "组", kind: "group" }, { layerId: 3, name: "瓶子", kind: "pixel" }, { layerId: 4, name: "背景", kind: "background" }]);
+  assert.deepEqual(externalDragCandidates(LAYERS, [2], false), [{ layerId: 2, name: "组", kind: "group" }]);
   assert.deepEqual(externalDragCandidates(LAYERS, [3], true), []);
+});
+
+test("跨软件拖拽：选中的组里的图层不再单独导出（组已合并包含它），AI 图层也是组", () => {
+  const tree = [
+    { id: 10, name: "AI填充 · 猫", kind: "group", parentId: null },
+    { id: 11, name: "v1", kind: "pixel", parentId: 10 },
+    { id: 20, name: "文件夹", kind: "group", parentId: null },
+    { id: 21, name: "子组", kind: "group", parentId: 20 },
+    { id: 22, name: "深处", kind: "pixel", parentId: 21 },
+    { id: 30, name: "单独", kind: "pixel", parentId: 21 },
+  ];
+  assert.deepEqual(externalDragCandidates(tree, [10, 11, 20, 22], false).map(l => l.layerId), [10, 20]);
+  assert.deepEqual(externalDragCandidates(tree, [22, 30], false).map(l => l.layerId), [22, 30]);
 });
 
 test("跨软件拖拽：只在第一次离开面板时准备导出", () => {

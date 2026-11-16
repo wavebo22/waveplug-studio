@@ -84,6 +84,16 @@ pub enum Command {
     },
     /// Hide the independent cursor-following drag card.
     LayerDragPreviewEnd,
+    /// 外置删除区 for the drag under way (drag/trash.rs): `view` the canvas on screen, `enabled`
+    /// whether what is dragged can be deleted, `action` what the card says over it.
+    LayerDragTrash {
+        #[serde(default)]
+        view: Option<ScreenRect>,
+        #[serde(default)]
+        enabled: bool,
+        #[serde(default)]
+        action: String,
+    },
     /// A WaveLayer row is hovered: a thin click-through frame around `rect`, cut to `clip`
     /// (Photoshop's canvas view); `rect: null` takes it away. Drawn by frame.rs.
     HoverFrame {
@@ -91,6 +101,26 @@ pub enum Command {
         rect: Option<ScreenRect>,
         #[serde(default)]
         clip: Option<ScreenRect>,
+    },
+    /// 性能监视 (monitor.rs): the small click-through box in the canvas's bottom-right corner with
+    /// CPU / memory / GPU / Photoshop / ComfyUI numbers. `comfy`: ComfyUI's address for its row.
+    Monitor {
+        on: bool,
+        #[serde(default)]
+        comfy: Option<String>,
+        #[serde(default)]
+        view: Option<ScreenRect>,
+    },
+    /// 卡死保护 (hang.rs): after `seconds` without an answer from Photoshop, a dialog offers to back
+    /// up its auto-recovery files (beside the matching document in `docs`), wait, or close it.
+    HangGuard {
+        on: bool,
+        #[serde(rename = "autoBackup", default)]
+        auto_backup: bool,
+        #[serde(default = "hang_seconds")]
+        seconds: u64,
+        #[serde(default)]
+        docs: Vec<crate::hang::DocInfo>,
     },
     /// Start or reconcile the local ComfyUI process without making the WebSocket thread wait.
     ManageComfy {
@@ -153,6 +183,31 @@ pub enum Command {
         #[serde(rename = "menuId", default)]
         menu_id: Option<String>,
     },
+    /// The plugin's settings for what this program does (性能监视, 卡死保护, ComfyUI…), sent when
+    /// it connects and whenever one changes: the app window's 功能设置 shows and edits them.
+    AppSettings {
+        settings: Map<String, Value>,
+    },
+    /// 从网页拖入 (webdrop.rs): a drag without files entered the WaveLayer panel — put the catcher
+    /// over the drop area (`left`/`top`/`width`/`height`, CSS px of the panel) so that the point
+    /// `clientX`/`clientY` is under the cursor; images go into `folder`. `on: false` takes it away.
+    WebCatch {
+        on: bool,
+        #[serde(rename = "clientX", default)]
+        client_x: f64,
+        #[serde(rename = "clientY", default)]
+        client_y: f64,
+        #[serde(default)]
+        left: f64,
+        #[serde(default)]
+        top: f64,
+        #[serde(default)]
+        width: f64,
+        #[serde(default)]
+        height: f64,
+        #[serde(default)]
+        folder: String,
+    },
     /// The drag ended in the plugin (or the export failed) before any system drag.
     ExternalDragCancel {
         #[serde(rename = "sessionId")]
@@ -165,6 +220,10 @@ pub enum Command {
 
 fn default_close_comfy() -> bool {
     true
+}
+
+fn hang_seconds() -> u64 {
+    20
 }
 
 fn toast_ms() -> u64 {
@@ -214,6 +273,23 @@ pub enum Event {
         effect: &'static str,
         target: String,
         count: usize,
+    },
+    /// The WaveLayer drag was let go over the 外置删除区: the plugin deletes what it was dragging.
+    LayerDragTrashDrop,
+    /// 功能设置 changed in the app window: the plugin applies and saves `changes` (its settings keys).
+    AppSettingsSet {
+        changes: Value,
+    },
+    /// 从网页拖入: the drag left the catcher (or never reached it): the plugin hides its overlay.
+    WebDropLeave,
+    /// 从网页拖入: let go over the catcher. `files` written into the plugin's folder; `html`,
+    /// `text`, `url` what else it carried; `formats` what it offered (logged).
+    WebDrop {
+        files: Vec<crate::webdrop::DroppedFile>,
+        html: String,
+        text: String,
+        url: String,
+        formats: Vec<String>,
     },
     /// The row picked in the menu `menu_id` (its id), or none when it was closed.
     MenuResult {
@@ -278,6 +354,28 @@ mod external_drag_tests {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn parses_the_hang_guard() {
+        match parse(r#"{"type":"hang-guard","on":true,"autoBackup":true,"seconds":30,"docs":[{"name":"a.psd","path":"D:\\a.psd"},{"name":"未标题-1"}]}"#) {
+            Some(Command::HangGuard { on: true, auto_backup: true, seconds: 30, docs }) => {
+                assert_eq!(docs.len(), 2);
+                assert_eq!(docs[0].path, "D:\\a.psd");
+                assert_eq!(docs[1].path, "");
+            }
+            other => panic!("{other:?}"),
+        }
+        assert!(matches!(parse(r#"{"type":"hang-guard","on":false}"#), Some(Command::HangGuard { on: false, seconds: 20, .. })));
+    }
+
+    #[test]
+    fn parses_the_monitor_switch() {
+        match parse(r#"{"type":"monitor","on":true,"comfy":"http://127.0.0.1:8188"}"#) {
+            Some(Command::Monitor { on: true, comfy: Some(c), view: None }) => assert_eq!(c, "http://127.0.0.1:8188"),
+            other => panic!("{other:?}"),
+        }
+        assert!(matches!(parse(r#"{"type":"monitor","on":false}"#), Some(Command::Monitor { on: false, comfy: None, view: None })));
+    }
+
     use super::*;
 
     #[test]
@@ -355,6 +453,26 @@ mod tests {
             parse(r#"{"type":"layer-drag-preview-update","action":"删除","tone":"delete"}"#),
             Some(Command::LayerDragPreviewUpdate { tone, .. }) if tone == "delete"
         ));
+        match parse(r#"{"type":"layer-drag-trash","view":{"left":0,"top":0,"right":800,"bottom":600},"enabled":true,"action":"松开删除 2 个图层"}"#) {
+            Some(Command::LayerDragTrash { view: Some(v), enabled: true, action }) => {
+                assert_eq!(v.right, 800.0);
+                assert_eq!(action, "松开删除 2 个图层");
+            }
+            other => panic!("{other:?}"),
+        }
+        assert!(matches!(parse(r#"{"type":"layer-drag-trash","view":null}"#), Some(Command::LayerDragTrash { view: None, enabled: false, .. })));
+        assert_eq!(serde_json::to_string(&Event::LayerDragTrashDrop).unwrap(), r#"{"type":"layer-drag-trash-drop"}"#);
+        assert_eq!(serde_json::to_string(&Event::WebDropLeave).unwrap(), r#"{"type":"web-drop-leave"}"#);
+        let drop = Event::WebDrop { files: vec![crate::webdrop::DroppedFile { file: "w.png".into(), name: "猫".into() }], html: String::new(), text: "t".into(), url: String::new(), formats: vec!["PNG".into()] };
+        assert_eq!(serde_json::to_string(&drop).unwrap(), r#"{"type":"web-drop","files":[{"file":"w.png","name":"猫"}],"html":"","text":"t","url":"","formats":["PNG"]}"#);
+        match parse(r#"{"type":"web-catch","on":true,"clientX":10,"clientY":20.5,"left":4,"top":4,"width":300,"height":500,"folder":"C:\\T"}"#) {
+            Some(Command::WebCatch { on: true, client_x, client_y, width, folder, .. }) => {
+                assert_eq!((client_x, client_y, width), (10.0, 20.5, 300.0));
+                assert_eq!(folder, "C:\\T");
+            }
+            other => panic!("{other:?}"),
+        }
+        assert!(matches!(parse(r#"{"type":"web-catch","on":false}"#), Some(Command::WebCatch { on: false, .. })));
         assert!(matches!(
             parse(r#"{"type":"layer-drag-preview-end"}"#),
             Some(Command::LayerDragPreviewEnd)

@@ -61,7 +61,7 @@ test("右键菜单 › 智能对象: WavePlug's tools first, status in the title
   assert.deepEqual(top(find(m.items, "智能对象").children!), [
     "编辑智能对象内容", "选中同源的智能对象", "断开共用，成为独立内容", "转为可编辑的 PSB", "-",
     "替换内容…", "导出内容…", "解包图层", "重置变换", "-",
-    "通过拷贝新建智能对象", "转换为链接对象…", "重新链接到文件…",
+    "通过拷贝新建智能对象", "转换为链接对象…", "链接到已有文件…",
   ]);
   // already an editable PSB: nothing to convert; shared by two: can be selected and split
   const so = find(m.items, "智能对象").children!;
@@ -98,4 +98,21 @@ test("右键菜单 › 转换: the 工具 page's tools, only for layers they wor
   assert.equal(two.get("act:convertSeparately"), true);
   // without the 工具 page's host none of them is offered
   assert.ok(![...rows(false, 1, 4).keys()].some(k => k.startsWith("tool:") || k === "act:convertSeparately"));
+});
+
+test("从网页拖入: web-drop / web-drop-leave from the helper", () => {
+  assert.deepEqual(parseOverlayEvent('{"type":"web-drop-leave"}'), { type: "web-drop-leave" });
+  assert.deepEqual(parseOverlayEvent('{"type":"web-drop","files":[{"file":"w.png","name":"猫"},{"file":"..\\\\x.png","name":"bad"},{"file":"","name":"e"}],"html":"<img>","text":"","url":"u","formats":["PNG",3]}'),
+    { type: "web-drop", files: [{ file: "w.png", name: "猫" }], html: "<img>", text: "", url: "u", formats: ["PNG"] });
+  assert.equal(parseOverlayEvent('{"type":"web-drop"}'), null);
+});
+
+test("WavePlug 程序的功能设置: only known keys, right kinds", async () => {
+  const { appSettingChanges, appSettingsOf } = await import("../src/core/overlay/protocol.ts");
+  assert.deepEqual(appSettingChanges({ perfMonitor: false, comfyUrl: " http://127.0.0.1:8188 ", hangGuard: "yes", evil: true }), { perfMonitor: false, comfyUrl: "http://127.0.0.1:8188" });
+  const view = appSettingsOf({ perfMonitor: false, comfyUrl: "u" });
+  assert.equal(view.perfMonitor, false);
+  assert.equal(view.hangGuard, true);
+  assert.equal(view.comfyLaunch, "");
+  assert.deepEqual(parseOverlayEvent('{"type":"app-settings-set","changes":{"hangAutoBackup":false}}'), { type: "app-settings-set", changes: { hangAutoBackup: false } });
 });

@@ -6,6 +6,7 @@
 // variations are always generated from the document *without* the group, i.e. from the original.
 
 import type { Pixels } from "../core/image/png.ts";
+import type { FileDropItem, FileDropResult } from "../core/layers/fileDrop.ts";
 import type { Rect } from "../core/image/region.ts";
 import type { Side, TaskType } from "../core/workflow/profile.ts";
 import type { ToolLayer, ToolResult } from "../core/layers/smart.ts";
@@ -117,6 +118,20 @@ export interface PsHost {
   layerDragInfo(docId: number, layerId: number, kind: string): Promise<{ rect: Rect | null; vector: VectorInput | null; res: number }>;
   /** the document's current history state id (changes with every edit, undo or redo), null if unknown */
   docVersion(docId: number): string | null;
+  /** 拖拽文件置入 (core/layers/fileDrop.ts): places files dropped on the WaveLayer panel into the
+   *  active document above the selected layer, each as a linked or an embedded smart object, as one
+   *  undo step; with no document open the files are opened instead. `file` is what the drop gave
+   *  (a UXP entry, or an object with a native path). */
+  placeDroppedFiles?(files: FileDropItem[]): Promise<FileDropResult>;
+  /** 从网页拖入: downloads the image addresses (http(s) or data:) to the temporary folder; each
+   *  becomes a file to place, or a failure with why (not an image, no answer). */
+  downloadDropImages?(urls: string[]): Promise<{ files: FileDropItem[]; failed: string[] }>;
+  /** 从网页拖入 words: a new text layer with them, in the middle of the active document. One undo step. */
+  addDroppedText?(text: string): Promise<void>;
+  /** 从网页拖入 through the helper: the native path of the folder it writes images into */
+  webDropFolder?(): Promise<string | null>;
+  /** …and the images it wrote there (`file` names), as files to place (embedded) */
+  webDropItems?(files: { file: string; name: string }[]): Promise<{ items: FileDropItem[]; failed: string[] }>;
   /** Places the PNG as an embedded smart object directly above `layerId`, scaled to cover `rect`,
    *  named `name`, with the layer's opacity and blend mode; the original layer is hidden. One undo step. */
   placeUpscaledLayer(docId: number, layerId: number, png: Uint8Array, rect: Rect, name: string): Promise<number>;
@@ -199,12 +214,22 @@ export interface LayerDeleteResult {
 export interface MoveOptions { history?: string; onlyIf?: (name: string, parentName: string) => boolean }
 
 export interface LayerTree {
-  /** Insert all staged references into the active PSD inside one new layer group (single undo step).
-   *  Source PSDs must still be open. Nothing is removed from the workbench or source PSDs. */
+  /** Copies staged references (any open PSD) into an open PSD (the active one by default): inside one
+   *  new group (the workbench) or one by one (发送到), back at their place on the canvas; one undo
+   *  step of the target. Source PSDs must still be open; nothing is removed from them. */
   placeStaged(
     entries: import("../core/layers/workbench.ts").StagedLayer[],
     options?: import("./uxpWorkbench.ts").WorkbenchPlacementOptions,
   ): Promise<import("./uxpWorkbench.ts").WorkbenchPlacementResult>;
+  /** The open documents (for 发送到 and the workbench's target / rebinding by docKey). */
+  openDocs(): Promise<import("../core/layers/workbench.ts").OpenDoc[]>;
+  /** Each staged layer as Photoshop has it now: its name, or null when its document or the layer is gone. */
+  probeStaged(refs: { docId: number; layerId: number }[]): Promise<({ name: string } | null)[]>;
+  /** Keeps a PNG of the layer in the plugin's data folder (core/layers/workbench.ts snapName): its file
+   *  name, or null when the layer has no pixels to keep. Changes no document. */
+  snapshotStaged(docId: number, docKey: string, layerId: number): Promise<string | null>;
+  /** Deletes snapshot files no entry uses any more. */
+  dropSnapshots(names: string[]): Promise<void>;
   /** All layers top to bottom with their status, and the selected ids; null without a document.
    *  `docKey`: the document across sessions (its file, or its name before it is saved). */
   read(): Promise<{ docId: number; docKey: string; layers: TreeLayer[]; selected: number[]; width: number; height: number } | null>;

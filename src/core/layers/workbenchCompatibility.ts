@@ -2,7 +2,8 @@
  *  A difference in colour mode/profile/depth is only a RISK, not proof of incompatibility.
  *  A failure cause must be grounded in an observed Photoshop result. */
 export interface WorkbenchCompatibilityNotice {
-  code: "COLOR_MODE" | "BIT_DEPTH" | "COLOR_PROFILE";
+  /** SCALED_PIXELS: 随画布缩放 resampled a pixel layer (its quality may drop) */
+  code: "COLOR_MODE" | "BIT_DEPTH" | "COLOR_PROFILE" | "SCALED_PIXELS";
   sourceDoc: string;
   sourceValue: string;
   targetValue: string;

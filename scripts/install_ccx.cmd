@@ -7,12 +7,8 @@ set "UPIA=D:\App\Adobe-UPIA-Extract\UPI64-unpacked\UnifiedPluginInstallerAgent\U
 set "ROOT=%~dp0.."
 set "LOG=%ROOT%\reports\install_%DATE:~0,4%%DATE:~5,2%%DATE:~8,2%_%RANDOM%.log"
 set "CCX="
-rem "install_ccx.cmd dev" installs the newest development loader instead of the newest release
-if /i "%~1"=="dev" (
-  for /f "delims=" %%f in ('dir /b /o:d "%ROOT%\releases\WavePlug_Studio_DEV_*_local.ccx"') do set "CCX=%ROOT%\releases\%%f"
-) else (
-  for /f "delims=" %%f in ('dir /b /o:d "%ROOT%\releases\WavePlug_Studio_*_local.ccx" ^| findstr /v /i "_DEV_"') do set "CCX=%ROOT%\releases\%%f"
-)
+rem one plugin for users and development (the old _DEV_ packages are skipped)
+for /f "delims=" %%f in ('dir /b /o:d "%ROOT%\releases\WavePlug_Studio_*_local.ccx" ^| findstr /v /i "_DEV_"') do set "CCX=%ROOT%\releases\%%f"
 
 rem UPIA resolves a root-relative Adobe user path against its current drive.
 rem Keep the working drive on the user's profile drive, even when run from F:.

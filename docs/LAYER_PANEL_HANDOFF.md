@@ -36,7 +36,7 @@
   - 回复用中文；
   - 界面要「无感」，不跳动、不闪；
   - 文字高对比、别太小；PS 用中灰主题；
-  - 说明一律做成鼠标悬停提示（`src/ui/tooltip.ts`），用户明确拒绝过「?」弹窗。
+  - 说明一律做成鼠标悬停提示（元素的 `title`，PS 自己画提示框），用户明确拒绝过「?」弹窗。
 - 改文件时**不要**写 `open(p,'w').write(open(p).read())`：它会先清空文件，曾经把 `layerTree.ts` 清空过一次。安全的做法是写到 `.new` 文件，再 `mv` 过去；或者用编辑工具。
 - 其他会话也可能在改同一批文件。动手前看一下文件的修改时间，避免互相覆盖。
 
@@ -54,7 +54,7 @@
 | `src/ui/layerTree.ts` | 整个列表界面（约 1400 行）：行池、绘制、滚动、拖动、菜单、缩略图队列、尺寸、画板框 |
 | `src/ui/layersPanel.ts` | 面板外壳和状态栏 |
 | `src/ui/dom.ts` | `h()`、`icon()`（新增 `ps*` 图标和实心部分 `FILLS`）、`setShown`/`isShown` |
-| `src/ui/popupMenu.ts` / `tooltip.ts` / `slider.ts` | 弹出菜单、悬停提示、拉杆 |
+| `src/ui/popupMenu.ts` / `slider.ts` | 弹出菜单、拉杆 |
 | `plugin/styles.css` | 所有 `.lt-*` 样式；尺寸变量 `--lt-row`、`--lt-short`、`--lt-thumb`、`--lt-mark` 定义在 `.lt-list.sz-*` 上 |
 | `src/preview/main.preview.ts` | `MockLayerTree`：徽章组、碎片组被设成了画板 |
 | `tests/layer_tree.test.ts` | 纯逻辑测试 |

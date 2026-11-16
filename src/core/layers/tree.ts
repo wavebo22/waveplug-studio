@@ -684,7 +684,7 @@ export type LayerAction =
   | "moveEffect" | "moveEffects" | "deleteEffect" | "moveFilters" | "deleteFilter" | "deleteFilters"
   | "moveMask" | "moveVectorMask" | "moveFilterMask"
   // Photoshop's own commands the panel passes on (uxpLayers.ts actionDescs / menu commands)
-  | "mergeDown" | "mergeVisible" | "flatten" | "rasterizeStyle" | "smartViaCopy" | "embedLinked" | "convertToLinked" | "relink"
+  | "mergeDown" | "mergeVisible" | "flatten" | "rasterizeStyle" | "smartViaCopy" | "embedLinked" | "convertToLinked" | "relink" | "linkToFile"
   | "align" | "distribute" | "artboardFromLayers" | "newLayerDialog" | "quickExport" | "copyCSS" | "copySVG";
 
 /** 智能对象 tools offered in the menu (they act on the selection, like on the 工具 page) */
@@ -811,6 +811,8 @@ export function layerMenu(sel: TreeLayer[]): MenuItem[] {
       ? { label: "嵌入链接的智能对象", action: "embedLinked", enabled: true }
       : { label: "转换为链接对象…", action: "convertToLinked", enabled: one && l.kind === "smartObject" },
     { label: "重新链接到文件…", action: "relink", enabled: one && !!l.smart?.linked },
+    // an embedded one pointed at a file that exists already (转换为链接对象 saves a new one)
+    { label: "链接到已有文件…", action: "linkToFile", enabled: one && l.kind === "smartObject" && !l.smart?.linked },
   );
   items.push(
     "-",

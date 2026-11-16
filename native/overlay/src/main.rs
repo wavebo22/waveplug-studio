@@ -12,18 +12,25 @@
 #![cfg_attr(not(test), windows_subsystem = "windows")]
 
 mod anim;
+mod app;
 mod host;
 mod comfy;
 mod drag;
 mod drag_target;
 mod frame;
+mod hang;
 mod life;
 mod menu;
+mod monitor;
 mod log;
 mod panel;
+mod paths;
 mod protocol;
+mod setup;
 mod server;
 mod shot;
+mod tray;
+mod webdrop;
 #[cfg(windows)]
 mod win;
 

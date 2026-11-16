@@ -73,7 +73,8 @@ fn remove_old_copies(exe: &PathBuf) {
     let Ok(list) = std::fs::read_dir(dir) else { return };
     for e in list.flatten() {
         let name = e.file_name().to_string_lossy().to_lowercase();
-        if name.starts_with("waveplug-overlay.old-") && name.ends_with(".exe") {
+        // the plugin's copy (build.cmd) and the installed WavePlug.exe (the installer's update)
+        if (name.starts_with("waveplug-overlay.old-") || name.starts_with("waveplug.old-")) && name.ends_with(".exe") {
             // still running (another copy) → fails, removed next time
             let _ = std::fs::remove_file(e.path());
         }

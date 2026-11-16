@@ -74,14 +74,21 @@ export function externalDragSessionId(now = Date.now(), random = Math.random): s
   return `${now.toString(36)}${r}`;
 }
 
-/** The layers a drag would export: the dragged (selected) layers that are not groups, in list order.
- *  A sub drag (mask, effects, filters, variant) exports nothing. */
+/** The layers a drag would export: the dragged (selected) layers, in list order. A group (a folder,
+ *  or an AI layer, which is a group of variations) goes as one merged image of what it shows, so a
+ *  layer inside a dragged group is not exported again on its own. A sub drag (mask, effects,
+ *  filters, variant) exports nothing. */
 export function externalDragCandidates(
-  layers: readonly { id: number; name: string; kind: string }[], ids: readonly number[], sub: boolean,
+  layers: readonly { id: number; name: string; kind: string; parentId?: number | null }[], ids: readonly number[], sub: boolean,
 ): ExternalDragLayer[] {
   if (sub) return [];
   const want = new Set(ids);
-  return layers.filter(l => want.has(l.id) && l.kind !== "group").map(l => ({ layerId: l.id, name: l.name, kind: l.kind }));
+  const parent = new Map(layers.map(l => [l.id, l.parentId ?? null]));
+  const insideWanted = (id: number) => {
+    for (let p = parent.get(id) ?? null, guard = 0; p !== null && guard < 1000; p = parent.get(p) ?? null, guard++) if (want.has(p)) return true;
+    return false;
+  };
+  return layers.filter(l => want.has(l.id) && !insideWanted(l.id)).map(l => ({ layerId: l.id, name: l.name, kind: l.kind }));
 }
 
 /** Start exporting (send prepare) on the move where the drag *first* leaves the panel: once per

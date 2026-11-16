@@ -3,7 +3,7 @@
 //! and nothing depends on UXP's folder), named after the layers, and offered through OLE as
 //! CF_HDROP. Pure apart from the file system; the OLE side is drag/ole.rs.
 //!
-//! Cache: %LOCALAPPDATA%\WavePlug\TransferCache\
+//! Cache: <data>\cache\TransferCache\ (paths.rs: inside the install folder)
 //! - store\<hash of key>.png: one export per layer version (the plugin's key: its load, the
 //!   document, its history state, the layer). The plugin asks which keys are here before exporting
 //!   (external-drag-prepare → external-drag-cached) and sends no file for those: dragging the same
@@ -254,7 +254,7 @@ pub fn session_folder(session_id: &str) -> String {
 }
 
 pub fn cache_root() -> Option<PathBuf> {
-    Some(PathBuf::from(std::env::var_os("LOCALAPPDATA")?).join("WavePlug").join("TransferCache"))
+    Some(crate::paths::cache_dir("TransferCache"))
 }
 
 /// Puts a drag's files in `root/<session>/`, in layer order, named after the layers: new exports

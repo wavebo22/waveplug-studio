@@ -10,6 +10,18 @@ use crate::drag::targets::Target;
 use crate::drag_target::{resolve, DropVerdict};
 use crate::panel::DraggedLayer;
 
+/// The native workbench (panel/shelf.rs): its target accepts every WaveLayer drag, reference or not
+/// (the plugin knows which layers it was dragging).
+pub const WORKBENCH: &str = "workbench";
+/// The 外置删除区 (drag/trash.rs): like the workbench it takes every WaveLayer drag (layers, masks,
+/// filters, effects); the plugin deletes what it was dragging.
+pub const TRASH: &str = "trash";
+
+/// Targets that take a drag the plugin didn't mark as a reference drag.
+fn takes_any_drag(surface: &str) -> bool {
+    surface == WORKBENCH || surface == TRASH
+}
+
 /// What a release over a reference slot hands to the surface.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Reference {
@@ -100,7 +112,9 @@ impl Session {
     }
 
     fn verdict(&self) -> DropVerdict {
-        let native = self.hover.as_ref().map(|(surface, _, action)| DropVerdict::new(action.clone(), "move", surface));
+        let native = self.hover.as_ref().map(|(surface, _, action)| {
+            DropVerdict::new(action.clone(), if *surface == TRASH { "delete" } else { "move" }, surface)
+        });
         resolve([native, self.external.clone()], self.plugin.clone())
     }
 
@@ -159,7 +173,8 @@ impl Session {
     }
 
     fn track(&mut self, hit: Option<&Target>, out: &mut Vec<Out>) {
-        let hit = if self.reference.is_some() { hit } else { None };
+        // the workbench takes any WaveLayer drag (groups too); other targets only reference drags
+        let hit = hit.filter(|t| self.reference.is_some() || takes_any_drag(t.surface));
         let next = hit.map(|t| (t.surface, t.id, t.action.clone()));
         let key = |h: &Option<(&'static str, u32, String)>| h.as_ref().map(|(s, id, _)| (*s, *id));
         if key(&next) != key(&self.hover) {
@@ -190,9 +205,12 @@ impl Session {
         let _ = (x, y);
         self.track(hit, &mut out);
         let mut ending = Ending::Released;
-        if let (Some((surface, target, _)), Some(reference)) = (self.hover.clone(), self.reference.clone()) {
-            out.push(Out::Dropped { surface, target, reference });
-            ending = Ending::Dropped;
+        if let Some((surface, target, _)) = self.hover.clone() {
+            let reference = self.reference.clone().or_else(|| takes_any_drag(surface).then(|| Reference { doc_id: 0, layers: Vec::new(), total_count: 0 }));
+            if let Some(reference) = reference {
+                out.push(Out::Dropped { surface, target, reference });
+                ending = Ending::Dropped;
+            }
         }
         self.finish(ending, &mut out);
         out
@@ -243,6 +261,31 @@ mod tests {
 
     fn slot(id: u32) -> Target {
         Target { surface: "generate", id, rect: (0, 0, 10, 10), action: "放入参考图".into() }
+    }
+
+    #[test]
+    fn the_trash_takes_any_drag_and_its_card_says_delete() {
+        let trash = Target { surface: TRASH, id: 0, rect: (0, 0, 10, 10), action: "松开删除 2 个图层".into() };
+        let mut s = Session::new();
+        s.begin();
+        let out = s.moved(5, 5, Some(&trash));
+        assert!(out.iter().any(|o| matches!(o, Out::Render { action, tone } if action == "松开删除 2 个图层" && tone == "delete")));
+        let out = s.released(5, 5, Some(&trash));
+        assert!(out.iter().any(|o| matches!(o, Out::Dropped { surface: TRASH, .. })));
+        assert_eq!(s.ending(), Some(Ending::Dropped));
+    }
+
+    #[test]
+    fn the_workbench_takes_a_drag_without_a_reference_other_targets_do_not() {
+        let shelf = Target { surface: WORKBENCH, id: 0, rect: (0, 0, 10, 10), action: "加入工作台".into() };
+        let mut s = Session::new();
+        s.begin();
+        let out = s.released(5, 5, Some(&shelf));
+        assert!(out.iter().any(|o| matches!(o, Out::Dropped { surface: WORKBENCH, .. })));
+        let mut s = Session::new();
+        s.begin();
+        let out = s.released(5, 5, Some(&slot(0)));
+        assert!(!out.iter().any(|o| matches!(o, Out::Dropped { .. })));
     }
 
     fn reference() -> Reference {

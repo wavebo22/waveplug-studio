@@ -128,3 +128,23 @@ test("跨软件拖拽：finished 可带目标程序名和文件数", () => {
   assert.deepEqual(parseOverlayEvent('{"type":"external-drag-finished","sessionId":"s1","status":"dropped","effect":"copy","target":"微信","count":2}'),
     { type: "external-drag-finished", sessionId: "s1", status: "dropped", effect: "copy", target: "微信", count: 2 });
 });
+
+test("性能监视：需要外置框架 0.13.0", async () => {
+  const { MONITOR_HELPER_VERSION, helperOutdated } = await import("../src/core/overlay/protocol.ts");
+  assert.equal(helperOutdated("0.12.0", MONITOR_HELPER_VERSION), true);
+  assert.equal(helperOutdated("0.13.0", MONITOR_HELPER_VERSION), false);
+});
+
+test("卡死保护：文档键是路径才发路径，没保存过的为空", async () => {
+  const { hangDocs, HANG_HELPER_VERSION, helperOutdated } = await import("../src/core/overlay/protocol.ts");
+  assert.deepEqual(hangDocs([
+    { name: "海报.psd", docKey: "D:\\设计\\海报.psd" },
+    { name: "未标题-1", docKey: "未标题-1" },
+    { name: "b.psd", docKey: "/Users/x/b.psd" },
+  ]), [
+    { name: "海报.psd", path: "D:\\设计\\海报.psd" },
+    { name: "未标题-1", path: "" },
+    { name: "b.psd", path: "/Users/x/b.psd" },
+  ]);
+  assert.equal(helperOutdated("0.13.0", HANG_HELPER_VERSION), true);
+});

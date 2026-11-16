@@ -8,8 +8,7 @@ const common = { define: { __BUILT_AT__: JSON.stringify(BUILT_AT) }, bundle: tru
 
 mkdirSync("dist/plugin", { recursive: true });
 mkdirSync("dist/preview", { recursive: true });
-mkdirSync("dist/dev", { recursive: true });
-for (const f of ["manifest.json", "index.html", "styles.css"]) cpSync(`plugin/${f}`, `dist/plugin/${f}`);
+for (const f of ["manifest.json", "index.html", "loader.js", "styles.css"]) cpSync(`plugin/${f}`, `dist/plugin/${f}`);
 cpSync("plugin/icons", "dist/plugin/icons", { recursive: true });
 cpSync("plugin/styles.css", "dist/preview/styles.css");
 cpSync("src/preview/preview.html", "dist/preview/index.html");
@@ -19,24 +18,9 @@ cpSync("tests/fixtures/ui/guhai_remove_inpaint_outpaint.json", "dist/preview/fix
 cpSync("tests/fixtures/ui/qwen_txt2img.json", "dist/preview/fixture_txt2img.json");
 cpSync("tests/fixtures/ui/vosr2_upscale.json", "dist/preview/fixture_upscale.json");
 
-// development loader: separate plugin id, loads dist/plugin/index.js from G: at runtime
-const manifest = JSON.parse(readFileSync("plugin/manifest.json", "utf8"));
-// the loader has its own version: UPIA refuses to install a lower one over what is there (-418),
-// and the installed dev loader was 1.3.0 before releases were renumbered. Bump when dev/ or the
-// panels in the manifest change.
-// 1.4.1: the project moved from F: to G: (dev/loader.js ROOT).
-const DEV_LOADER_VERSION = "1.4.1";
-const devManifest = {
-  ...manifest,
-  version: DEV_LOADER_VERSION,
-  id: manifest.id + ".dev",
-  name: manifest.name + " Dev",
-  entrypoints: manifest.entrypoints.map(e => ({ ...e, id: e.id + "-dev", label: { default: e.label.default + " Dev" } })),
-  requiredPermissions: { ...manifest.requiredPermissions, localFileSystem: "fullAccess", allowCodeGenerationFromStrings: true },
-};
-writeFileSync("dist/dev/manifest.json", JSON.stringify(devManifest, null, 2));
-cpSync("dev/index.html", "dist/dev/index.html");
-cpSync("dev/loader.js", "dist/dev/loader.js");
+// One plugin (com.waveplug.studio) for users and development: plugin/loader.js runs the build in
+// G:\waveplug\studio\dist\plugin when that folder is reachable (live reload), else the one
+// packed beside it. The separate development plugin (com.waveplug.studio.dev, dist/dev) is gone.
 
 // The native helper is launched by UXP through launchProcess permission.
 // Keep a copy beside each manifest so release plugins can resolve it with getPluginFolder().
@@ -52,17 +36,33 @@ const putHelper = to => {
   cpSync(from, to);
 };
 if (existsSync("dist/waveplug-overlay.exe")) {
-  for (const to of ["dist/plugin/waveplug-overlay.exe", "dist/dev/waveplug-overlay.exe"]) {
+  for (const to of ["dist/plugin/waveplug-overlay.exe"]) {
     try { putHelper(to); } catch (e) { console.warn(`helper not copied to ${to}: ${e.message}`); }
   }
 }
 // renamed copies no longer running (a running one can't be removed: it goes next time)
-for (const dir of ["dist", "dist/plugin", "dist/dev"]) {
+for (const dir of ["dist", "dist/plugin"]) {
   for (const f of readdirSync(dir)) if (/^waveplug-overlay\.old-.*\.exe$/i.test(f)) { try { rmSync(`${dir}/${f}`); } catch { /* still running */ } }
 }
 
+// WaveLayer for Illustrator (CEP panel, ai/): dist/ai is the extension folder ai/install_dev.cmd
+// links into Illustrator; dist/ai-preview runs the same panel and host script in a browser.
+mkdirSync("dist/ai/CSXS", { recursive: true });
+mkdirSync("dist/ai/host", { recursive: true });
+mkdirSync("dist/ai-preview", { recursive: true });
+for (const f of ["CSXS/manifest.xml", "index.html", "wavelayer.css", ".debug", "host/wavelayer.jsx"]) cpSync(`ai/${f}`, `dist/ai/${f}`);
+cpSync("plugin/styles.css", "dist/ai/base.css");
+for (const f of ["index.html", "wavelayer.css"]) cpSync(`ai/${f}`, `dist/ai-preview/${f}`);
+cpSync("plugin/styles.css", "dist/ai-preview/base.css");
+
+/** After a successful build: `dir`/build-stamp.txt changes, and the open panels (the development
+ *  loader in Photoshop, the WaveLayer panel in Illustrator) notice it and load the new build. */
+const stamp = dir => ({ name: "stamp", setup(b) { b.onEnd(r => { if (!r.errors.length) writeFileSync(`${dir}/build-stamp.txt`, String(Date.now())); }); } });
+
 const targets = [
-  { ...common, entryPoints: ["src/main.uxp.ts"], outfile: "dist/plugin/index.js" },
+  { ...common, entryPoints: ["src/ai/main.cep.ts"], outfile: "dist/ai/main.js", plugins: [stamp("dist/ai")] },
+  { ...common, entryPoints: ["src/ai/preview.ts"], outfile: "dist/ai-preview/main.js", loader: { ".jsx": "text" } },
+  { ...common, entryPoints: ["src/main.uxp.ts"], outfile: "dist/plugin/index.js", plugins: [stamp("dist/plugin")] },
   { ...common, entryPoints: ["src/preview/main.preview.ts"], outfile: "dist/preview/preview.js" },
   { ...common, entryPoints: ["src/preview/gallery.ts"], outfile: "dist/preview/gallery.js" },
 ];

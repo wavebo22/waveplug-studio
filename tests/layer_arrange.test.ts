@@ -78,4 +78,7 @@ test("右键菜单: Photoshop's merge, rasterize-style, export and smart-object 
   assert.equal(soMenu(1).get("relink")!.enabled, false);
   assert.equal(soMenu(2).get("embedLinked")!.enabled, true);
   assert.equal(soMenu(2).get("relink")!.enabled, true);
+  assert.equal(soMenu(1).get("linkToFile")!.enabled, true);
+  assert.equal(soMenu(2).get("linkToFile")!.enabled, false);
+  assert.equal(soMenu(1, 2).get("linkToFile")!.enabled, false);
 });

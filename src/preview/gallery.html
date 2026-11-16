@@ -9,37 +9,37 @@
     /* gallery chrome only — the components below use the plugin's own styles.css unchanged */
     html, body { height: auto; }
     body.gallery { user-select: text; padding: 16px; }
-    .g-bar { display: flex; align-items: center; flex-wrap: wrap; margin-bottom: 16px; color: var(--muted); }
-    .g-bar h1 { font-size: 15px; margin: 0 16px 0 0; color: var(--text); }
+    .g-bar { display: flex; align-items: center; flex-wrap: wrap; margin-bottom: 16px; color: var(--c-text-2); }
+    .g-bar h1 { font-size: 15px; margin: 0 16px 0 0; color: var(--c-text); }
     .g-bar .seg { margin: 0 12px 0 0; width: 210px; }
     .g-cols { display: flex; flex-wrap: wrap; align-items: flex-start; }
     .g-col { width: 340px; margin: 0 16px 16px 0; }
     .g-sec { margin-bottom: 18px; }
-    .g-sec > h2 { font-size: 12px; font-weight: 700; margin: 0 0 6px; color: var(--accent-hi); }
-    .g-sec > p { margin: 0 0 8px; color: var(--faint); font-size: 11px; }
+    .g-sec > h2 { font-size: 12px; font-weight: 700; margin: 0 0 6px; color: var(--c-accent-hi); }
+    .g-sec > p { margin: 0 0 8px; color: var(--c-text-3); font-size: 11px; }
     .g-row { display: flex; align-items: center; flex-wrap: wrap; margin-bottom: 8px; }
     .g-row > * { margin: 0 6px 6px 0; }
-    .g-cap { width: 100%; margin: 0 0 4px; font-size: 11px; color: var(--faint); }
-    .g-sw { width: 104px; font-size: 10px; color: var(--muted); }
+    .g-cap { width: 100%; margin: 0 0 4px; font-size: 11px; color: var(--c-text-3); }
+    .g-sw { width: 104px; font-size: 10px; color: var(--c-text-2); }
     .g-sw i { display: block; height: 26px; border: 1px solid rgba(255, 255, 255, .2); border-radius: 3px; margin-bottom: 2px; }
-    .g-ruler { display: flex; align-items: center; font-size: 11px; color: var(--muted); margin-bottom: 4px; }
-    .g-ruler i { display: block; background: var(--accent); margin-right: 8px; flex: none; }
-    .g-ruler code { width: 72px; color: var(--text); }
-    .g-icon { width: 76px; display: flex; flex-direction: column; align-items: center; font-size: 9px; color: var(--faint); }
-    .g-icon .icon { margin-bottom: 3px; color: var(--text); }
-    .g-static .pm, .g-static .tip { position: static; }
+    .g-ruler { display: flex; align-items: center; font-size: 11px; color: var(--c-text-2); margin-bottom: 4px; }
+    .g-ruler i { display: block; background: var(--c-accent); margin-right: 8px; flex: none; }
+    .g-ruler code { width: 72px; color: var(--c-text); }
+    .g-icon { width: 76px; display: flex; flex-direction: column; align-items: center; font-size: 9px; color: var(--c-text-3); }
+    .g-icon .icon { margin-bottom: 3px; color: var(--c-text); }
+    .g-static .pm { position: static; }
     /* top-area proposal mockup (not in the plugin yet) */
-    .p-frame { width: 300px; padding: 6px 8px 0; background: var(--bg); border: 1px solid #111; margin-bottom: 10px; }
+    .p-frame { width: 300px; padding: 6px 8px 0; background: var(--c-bg); border: 1px solid #111; margin-bottom: 10px; }
     .p-frame.narrow { width: 240px; }
     .p-row { display: flex; align-items: center; height: var(--h-s); margin-bottom: var(--sp-3); min-width: 0; }
     .p-row > * + * { margin-left: var(--sp-2); }
     .p-head { height: 20px; margin-bottom: var(--sp-2); }
     .p-title { font-weight: 700; flex: none; }
-    .p-count { color: var(--muted); font-size: var(--fs-s); flex: 0 1 auto; min-width: 0; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
-    .p-ibtn { flex: none; display: flex; align-items: center; justify-content: center; width: var(--h-s); height: var(--h-s); border-radius: var(--r); color: var(--text); }
-    .p-ibtn.small { width: 20px; height: 20px; color: var(--muted); }
-    .p-ibtn:hover { background: var(--hover); }
-    .p-ibtn.boxed { border: 1px solid var(--field-line); background: var(--field); }
+    .p-count { color: var(--c-text-2); font-size: var(--fs-s); flex: 0 1 auto; min-width: 0; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
+    .p-ibtn { flex: none; display: flex; align-items: center; justify-content: center; width: var(--h-s); height: var(--h-s); border-radius: var(--r); color: var(--c-text); }
+    .p-ibtn.small { width: 20px; height: 20px; color: var(--c-text-2); }
+    .p-ibtn:hover { background: var(--c-hover); }
+    .p-ibtn.boxed { border: 1px solid var(--c-line); background: var(--c-field); }
     /* sized for four characters: 4 × 12px + padding (+ the select's arrow) */
     .p-search { flex: none; width: 80px; height: var(--h-s); }
     .p-mode { flex: none; width: 96px; height: var(--h-s); }
@@ -48,27 +48,27 @@
     .p-frame.narrow .p-find { flex-wrap: wrap; height: auto; }
     .p-frame.narrow .p-find .p-xbtns { order: 9; width: 100%; margin: var(--sp-2) 0 0; }
     .p-xbtns > * + * { margin-left: 1px; }
-    .p-xbtn { width: 22px; height: 22px; color: var(--muted); }
-    .p-xbtn:hover { color: var(--text); }
+    .p-xbtn { width: 22px; height: 22px; color: var(--c-text-2); }
+    .p-xbtn:hover { color: var(--c-text); }
     .p-xbtns .p-sep { margin: 0 3px; }
     .p-fx { display: flex; align-items: center; font-size: 11px; font-weight: 700; font-style: italic; }
-    .p-toggle { color: var(--muted); }
-    .p-toggle.on { color: var(--text); }
-    .p-toggle.on .knob { fill: var(--accent-hi); }
-    .p-label { flex: none; color: var(--muted); font-size: var(--fs-s); white-space: nowrap; }
-    .p-pct { flex: none; display: flex; align-items: center; width: 64px; height: var(--h-s); border: 1px solid var(--field-line); border-radius: var(--r); background: var(--field); }
+    .p-toggle { color: var(--c-text-2); }
+    .p-toggle.on { color: var(--c-text); }
+    .p-toggle.on .knob { fill: var(--c-accent-hi); }
+    .p-label { flex: none; color: var(--c-text-2); font-size: var(--fs-s); white-space: nowrap; }
+    .p-pct { flex: none; display: flex; align-items: center; width: 64px; height: var(--h-s); border: 1px solid var(--c-line); border-radius: var(--r); background: var(--c-field); }
     .p-pct span { flex: 1 1 auto; text-align: center; font-variant-numeric: tabular-nums; }
-    .p-pct i { flex: none; display: flex; align-items: center; justify-content: center; width: 16px; height: 100%; border-left: 1px solid var(--field-line); color: var(--muted); font-style: normal; }
+    .p-pct i { flex: none; display: flex; align-items: center; justify-content: center; width: 16px; height: 100%; border-left: 1px solid var(--c-line); color: var(--c-text-2); font-style: normal; }
     .p-locks { display: flex; flex: none; }
-    .p-locks .p-ibtn { width: 22px; height: 22px; color: var(--muted); }
-    .p-locks .p-ibtn.on { color: var(--accent-hi); }
-    .p-sep { flex: none; width: 1px; height: 14px; background: var(--field-line); }
-    .p-menu { display: flex; align-items: center; flex: none; height: 22px; padding: 0 4px; border-radius: var(--r); color: var(--muted); }
-    .p-menu:hover { background: var(--hover); color: var(--text); }
+    .p-locks .p-ibtn { width: 22px; height: 22px; color: var(--c-text-2); }
+    .p-locks .p-ibtn.on { color: var(--c-accent-hi); }
+    .p-sep { flex: none; width: 1px; height: 14px; background: var(--c-line); }
+    .p-menu { display: flex; align-items: center; flex: none; height: 22px; padding: 0 4px; border-radius: var(--r); color: var(--c-text-2); }
+    .p-menu:hover { background: var(--c-hover); color: var(--c-text); }
     .p-grow { flex: 1 1 auto; }
-    .p-line { height: 1px; background: var(--card-line); margin: 0 -8px var(--sp-3); }
-    .p-list { height: 54px; margin: 0 -8px; border-top: 1px solid var(--field-line); background: var(--field); color: var(--faint); font-size: 11px; display: flex; align-items: center; justify-content: center; }
-    .p-notes { margin: 0 0 0 16px; padding: 0; font-size: 11px; color: var(--muted); line-height: 1.6; }
+    .p-line { height: 1px; background: var(--c-line-soft); margin: 0 -8px var(--sp-3); }
+    .p-list { height: 54px; margin: 0 -8px; border-top: 1px solid var(--c-line); background: var(--c-field); color: var(--c-text-3); font-size: 11px; display: flex; align-items: center; justify-content: center; }
+    .p-notes { margin: 0 0 0 16px; padding: 0; font-size: 11px; color: var(--c-text-2); line-height: 1.6; }
     .p-notes li { margin-bottom: 4px; }
   </style>
 </head>

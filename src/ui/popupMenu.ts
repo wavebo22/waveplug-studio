@@ -49,6 +49,8 @@ export function createPopup(host: HTMLElement) {
     el.style.left = Math.max(4, Math.min(opts.left ?? 30, host.clientWidth - 170 - 4)) + "px";
     setShown(el, true);
     opener = opts.from ?? null;
+    // kept inside the host by its real width (menus with shortcut hints are wider than 170)
+    el.style.left = Math.max(4, Math.min(opts.left ?? 30, host.clientWidth - el.offsetWidth - 4)) + "px";
     const hgt = el.offsetHeight;
     const top = opts.upward ? y - hgt : y;
     el.style.top = Math.max(4, Math.min(top, host.clientHeight - hgt - 4)) + "px";

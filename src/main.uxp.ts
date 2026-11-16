@@ -9,15 +9,23 @@ import { log, setLogContext, setLogSink } from "./app/log.ts";
 import { mountApp } from "./ui/app.ts";
 import { mountLayersPanel } from "./ui/layersPanel.ts";
 import { disposeGlobals } from "./ui/dom.ts";
+import * as bridgePs from "./ps/uxpBridge.ts";
 import { diagnose, uxpFetch } from "./ps/net.ts";
+import { dumpStorage, importPlan, MOVED_FLAG } from "./core/storageMove.ts";
 
 declare const require: (m: string) => any;
 
 const uxp = require("uxp");
 const { localFileSystem: fs, formats } = uxp.storage;
 declare const __BUILT_AT__: string;
-const VERSION = "1.1.0";
-const DEV = typeof (globalThis as any).__waveplugDevReload === "function";
+const VERSION = "1.3.0";
+// one plugin for users and development: the loader (plugin/loader.js) runs either the build in the
+// development folder ("dev": live reload, logs mirrored to reports\) or the one inside the plugin
+// The old separate development plugin (com.waveplug.studio.dev) runs this code through its old
+// loader, which sets no __waveplugSource: still the development build, and it hands its data over.
+const OLD_DEV_PLUGIN = typeof (globalThis as any).__waveplugDevReload === "function" && (globalThis as any).__waveplugSource === undefined;
+const DEV = (globalThis as any).__waveplugSource === "dev" || OLD_DEV_PLUGIN;
+const DEV_ROOT: string = (globalThis as any).__waveplugDevRoot ?? "G:/waveplug/studio/dist/plugin/";
 
 // Diagnostic log: plugin data folder, mirrored into the project's reports folder on G: when that
 // drive is reachable, so it can be read without the UXP developer console.
@@ -87,12 +95,31 @@ const layerTree = new UxpLayerTree();
 // the loader calls the old build's dispose before it reads the files, so several quick ⟳ can each
 // start a build: the one that started just before this one is still running, stop it here
 try { (globalThis as any).__waveplugDispose?.(); } catch { /* old build */ }
-(globalThis as any).__waveplugDispose =() => { host.dispose(); layerTree.dispose(); disposeGlobals(); };
+// 开发版: a new build (npm run build / update.cmd writes dist/plugin/build-stamp.txt last) is loaded
+// by itself, as if ⟳ had been clicked
+let devWatch: ReturnType<typeof setInterval> | null = null;
+if (DEV) {
+  let seen: string | null = null, busy = false;
+  const STAMP = [`file:${DEV_ROOT}build-stamp.txt`, `file:///${DEV_ROOT}build-stamp.txt`];
+  devWatch = setInterval(async () => {
+    if (busy) return;
+    busy = true;
+    try {
+      let text: string | null = null;
+      for (const url of STAMP) { try { text = String(await (await fs.getEntryWithUrl(url)).read({ format: formats.utf8 })).trim(); break; } catch { /* next form */ } }
+      if (text === null) return;
+      if (seen === null) { seen = text; return; }
+      if (text !== seen) { seen = text; log("info", "dev build changed, reloading", text); (globalThis as any).__waveplugDevReload(); }
+    } finally { busy = false; }
+  }, 2000);
+}
+(globalThis as any).__waveplugDispose =() => { if (devWatch) clearInterval(devWatch); host.dispose(); layerTree.dispose(); disposeGlobals(); };
 
 const services: Services = {
   host,
   tools: new UxpTools(),
   layers: layerTree,
+  bridgePs,
   comfy: base => new ComfyClient(base, { fetch: uxpFetch, WebSocket }),
   diagnose,
   debugSave: DEV ? (name, png) => {
@@ -158,8 +185,18 @@ const services: Services = {
     await f.write(png, { format: formats.binary });
     return true;
   },
-  version: DEV ? `dev · ${__BUILT_AT__}` : VERSION,
+  version: DEV ? `dev · ${__BUILT_AT__}` : `${VERSION} 测试版`,
   devReload: DEV ? () => (globalThis as any).__waveplugDevReload() : undefined,
+  loadFrom: typeof (globalThis as any).__waveplugDevReload === "function" ? {
+    source: DEV ? "dev" : "bundled",
+    devRoot: DEV_ROOT,
+    devMissing: String((globalThis as any).__waveplugDevMissing ?? ""),
+    set(to) {
+      try { localStorage.setItem("wp.loadFrom", to); } catch { /* storage off */ }
+      log("info", "load from", to);
+      (globalThis as any).__waveplugDevReload();
+    },
+  } : undefined,
 };
 
 // Two panels: WavePlug Studio and WavePlug 图层 (the layer list on its own, dockable like
@@ -181,7 +218,7 @@ function releasePanels(): Panels {
   uxp.entrypoints.setup({ panels: { studio: panel("studio"), layers: panel("layers") } });
   return { root: n => roots[n], isShown: n => shown[n], onShow: cb => listeners.push(cb) };
 }
-const panels: Panels | null = DEV ? (globalThis as any).__waveplugPanels ?? null : releasePanels();
+const panels: Panels | null = (globalThis as any).__waveplugPanels ?? releasePanels();
 /** the element a panel mounts into: the loader's root holds a fresh #app / #layers-app */
 const mountPoint = (name: PanelName, id: string): HTMLElement | null =>
   (panels?.root(name).querySelector("#" + id) as HTMLElement | null) ?? panels?.root(name) ?? document.getElementById(id);
@@ -204,3 +241,31 @@ if (panels) {
     layersEl.textContent = "WavePlug 图层 启动失败：" + (e as Error).message;
   }
 }
+
+// ── the old development plugin's data → the one plugin (src/core/storageMove.ts) ──
+// file in the development folder's parent (dist\), reachable by both plugins on this computer
+const MOVE_FILE = DEV_ROOT.replace(/[^/]+\/$/, "") + "dev-plugin-data.json";
+void (async () => {
+  try {
+    if (OLD_DEV_PLUGIN) {
+      const text = JSON.stringify(dumpStorage(localStorage));
+      for (const url of [`file:${MOVE_FILE}`, `file:///${MOVE_FILE}`]) {
+        try { const f = await fs.createEntryWithUrl(url, { overwrite: true }); await f.write(text, { format: formats.utf8 }); log("info", "dev plugin data written for the move", MOVE_FILE); return; }
+        catch { /* next form */ }
+      }
+      return;
+    }
+    if (!DEV || localStorage.getItem(MOVED_FLAG)) return;
+    let text: string | null = null;
+    for (const url of [`file:${MOVE_FILE}`, `file:///${MOVE_FILE}`]) {
+      try { text = String(await (await fs.getEntryWithUrl(url)).read({ format: formats.utf8 })); break; } catch { /* next form */ }
+    }
+    if (text === null) return;
+    const plan = importPlan(text, false);
+    for (const [k, v] of plan) localStorage.setItem(k, v);
+    localStorage.setItem(MOVED_FLAG, new Date().toISOString());
+    log("info", "took over the old dev plugin's data", plan.length);
+    // the panels read settings / workflows when they mount: start again with the moved data
+    if (plan.length) (globalThis as any).__waveplugDevReload?.();
+  } catch (e) { log("warn", "dev plugin data move", e); }
+})();

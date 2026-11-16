@@ -90,6 +90,36 @@ src/ui/app.ts  startOverlay()      生成页提供状态和     src/panel/genera
 
 `src/menu.rs`，不是一个 `Surface`：独立线程上的 Win32 弹出菜单，和 `frame.rs` 一样不经过 UI 线程。`menu-open` 带整棵菜单树（插件 `src/core/layers/contextMenu.ts` 生成），helper 只负责显示和回报选了哪一行的 id（`menu-result`）。不抢前台、靠低级鼠标钩子关菜单的原因和实测要点见 `docs/README.md` 11-12 条目。`plan()`（树 → 弹出菜单和命令编号）是纯函数，有测试；改菜单外观（自绘、图标）从这里的 `build()` 入手。
 
+### 3.3 性能监视（2026-11-14，0.13.0，未实测）
+
+`src/monitor.rs`，不是一个 `Surface`：和 `frame.rs` 一样是独立线程上的纯 Win32 窗口（`WS_EX_LAYERED | WS_EX_TRANSPARENT | WS_EX_NOACTIVATE | WS_EX_TOOLWINDOW | WS_EX_TOPMOST`，`WM_NCHITTEST → HTTRANSPARENT`），GDI 画文字，不经过 egui，不拿鼠标、键盘和前台。
+
+- **协议**：插件 → 小程序 `{"type":"monitor","on":true,"comfy":"http://127.0.0.1:8188"}`（`view` 可选）。插件每次连上都重发（`src/app/overlay.ts` 的 `setMonitor`）；断线时关闭。设置项 `perfMonitor`（默认开），在「ComfyUI 连接 › 启动与关闭」。
+- **位置**：画布右下角，留 12 px。画布范围取自任何 `show` 消息带的 `view`（`host.rs` 的 `on_command`），`hide generate`（没有文档）时清掉，退到 PS 主窗口右下角；`view` 不在 PS 窗口内时也退回。和完成提醒（同一个角）重叠时移到它上方。不能拖动（窗口是穿透的）。
+- **显示规则**：窗口线程每 250 ms 看一次：PS（或小程序自己的窗口）在前台且没最小化才显示，连续两次不在前台就隐藏。隐藏期间采样线程不采样。
+- **数据**（采样线程，每秒一次）：CPU `GetSystemTimes` 差值；内存 `GlobalMemoryStatusEx`；GPU / 显存 `nvml.dll`（只从 System32 加载，第 0 块显卡，没有就不显示这两行）；PS 进程工作集 `K32GetProcessMemoryInfo`；暂存盘每 5 秒扫一次各固定盘根目录的 `Photoshop Temp*` 文件，取合计最大的那个盘和它的剩余空间；ComfyUI 每 3 秒读一次 `/system_stats` 的 `torch_vram_total`（只读本机地址，`comfy.rs` 的 `system_stats`）。读不到的项不显示。
+- **颜色**：占用 ≥ 80% 黄、≥ 92% 红；PS 占物理内存 ≥ 60% 黄、≥ 75% 红；暂存盘剩余 < 50 GB 黄、< 20 GB 红。行的文字和阈值是纯函数 `rows()`，有测试；定位 `place()` / `area()` 也有测试。
+- **日志**：`monitor: on / off`、`window ready`、`nvml ready`（或没有 GPU 行的原因）、`shown at x,y WxH rows=N`、`hidden`。
+
+### 3.4 卡死保护（2026-11-14，0.14.0，未实测）
+
+`src/hang.rs`（监测和备份）+ `host.rs` 的 `hang_dialog`（egui 第三个视窗，标题 `HANG_TITLE`，由 `win::place_dialog` 放在 PS 窗口中间、置顶）。
+
+- **监测**：独立线程每秒对 PS 主窗口（`win::photoshop_main_hwnd`，最小化也能找到）`SendMessageTimeoutW(WM_NULL, SMTO_BLOCK | SMTO_ABORTIFHUNG, 1000 ms)`。PS 做长操作时一般仍在处理消息，模态对话框也会处理消息，所以不会误报；打开超大文件这类真不处理消息的情况会弹框，选「继续等待」即可（`WAIT_MORE_SECS` = 60 秒后再问）。PS 重新响应时关闭对话框并发 `host::notify` 提示。
+- **对话框不属于 PS**：不设 `GWLP_HWNDPARENT`，跨进程把窗口挂在卡死的窗口下面可能连带卡住。它可以被激活（PS 卡死时键盘本来也到不了 PS）。
+- **备份**：`run_backup` 扫描恢复文件夹（深度 3），逐个复制；文件名匹配文档用 `match_doc`（不分大小写、取最长的文档名，至少 2 个字），目标路径 `backup_target`，重名加「 (2)」`free_name`。都是纯函数，有测试。复制时 PS 可能正在写这个文件，所以结果里列出失败的文件。每个找到的文件、复制目标、失败原因都写日志。
+- **关闭 PS**：`TerminateProcess`。之后 `win.rs` 的 `watch` 看到 PS 退出，照常关闭外置框架（和按设置关闭 ComfyUI）。PS 下次启动时也会自己提示恢复。
+- **待实测**：PS 恢复文件的真实命名（决定能否放到原文件旁边）；对话框在 PS 卡死时能否正常显示和点击；`SMTO_ABORTIFHUNG` 在 PS 打开大文件时的误报情况。
+
+### 3.5 第二个客户端：Illustrator（2026-11-14，0.15.0，未实测）
+
+`server.rs` 可以同时连两个客户端：**Photoshop 插件**（不报到，第一条消息就是普通命令，新的连接替换旧的）和 **Illustrator 的 WaveLayer 面板**（`ai/`，第一条消息 `{"type":"join","role":"illustrator"}`）。只有 Photoshop 的消息进 host；host 的事件（`server::send`）只发给 Photoshop。
+
+- `{"type":"bridge","to":…,"msg":…}` 原样转给另一边，变成 `{"type":"bridge","from":…,"msg":…}`；对面不在时回 `{"kind":"missing","reqId":…}`。消息内容的格式在 `src/core/overlay/bridge.ts`。
+- 一方连上或断开时，另一方收到 `{"type":"peer","role":…,"connected":…}`；新连上的一方马上收到对方当前在不在。
+- 被同角色新连接替换掉的旧连接，断开时不算「Photoshop 走了」，不触发 `on_disconnect`。
+- 纯函数 `route()` / `missing()` 有测试。
+
 ## 4. 新增一个外附介面（步骤）
 
 以「图层工具面板」为例，名称 `layertools`：

@@ -12,6 +12,7 @@ use std::time::{Duration, Instant};
 use eframe::egui::{self, Frame, Id, Margin, Sense, Stroke, ViewportCommand};
 
 use crate::panel::generate::GenerateSurface;
+use crate::panel::shelf::{self, Shelf};
 use crate::panel::variants::{self, VariantRail};
 use crate::panel::{theme, Surface, DraggedLayer};
 use crate::protocol::{Command, Event, ScreenRect};
@@ -21,6 +22,9 @@ use crate::server;
 pub const TITLE: &str = "WavePlug 外置生成面板";
 /// The completion notice's window (an egui viewport), found the same way.
 pub const TOAST_TITLE: &str = "WavePlug 提示";
+/// 卡死保护's dialog (hang.rs)
+pub const HANG_TITLE: &str = "WavePlug · Photoshop 没有响应";
+const HANG_SIZE: egui::Vec2 = egui::vec2(440.0, 236.0);
 const TOAST_SIZE: egui::Vec2 = egui::vec2(300.0, 70.0);
 const COLLAPSED_BAR_HEIGHT: f32 = 12.0;
 const DRAG_REVEAL_ZONE_HEIGHT: f32 = 72.0;
@@ -128,6 +132,33 @@ fn on_command(c: Command) {
         }
         _ => {}
     }
+    if let Command::WebCatch { on, client_x, client_y, left, top, width, height, folder } = c {
+        crate::webdrop::set(on.then(|| crate::webdrop::CatchRequest { client: (client_x, client_y), area: (left, top, width, height), folder }));
+        return;
+    }
+    if let Command::AppSettings { settings } = c {
+        crate::app::set_plugin_settings(settings);
+        return;
+    }
+    if let Command::HangGuard { on, auto_backup, seconds, docs } = c {
+        crate::hang::configure(on, auto_backup, seconds, docs);
+        return;
+    }
+    // 性能监视 is its own window too (monitor.rs); it sits in the corner of whatever canvas view
+    // the plugin last placed a surface against
+    match &c {
+        Command::Monitor { on, comfy, view } => {
+            crate::monitor::set(*on, comfy.clone());
+            if view.is_some() {
+                crate::monitor::set_view(*view);
+            }
+            return;
+        }
+        Command::Show { view: Some(view), .. } => crate::monitor::set_view(Some(*view)),
+        // the generate panel leaves only when no document is open: no canvas to sit in
+        Command::Hide { panel } if panel == "generate" => crate::monitor::set_view(None),
+        _ => {}
+    }
     // the hover frame is its own window: nothing for the UI thread to draw
     if let Command::HoverFrame { rect, clip } = c {
         crate::frame::set(rect, clip);
@@ -135,11 +166,11 @@ fn on_command(c: Command) {
     }
     #[cfg(windows)]
     match &c {
-        Command::Show { panel, view } if panel != variants::ID => {
+        Command::Show { panel, view } if panel != variants::ID && panel != shelf::ID => {
             crate::win::show(panel, *view, size_of(panel))
         }
-        Command::Hide { panel } if panel != variants::ID => crate::win::hide(panel),
-        _ => {} // a variants viewport is controlled separately by Host.update
+        Command::Hide { panel } if panel != variants::ID && panel != shelf::ID => crate::win::hide(panel),
+        _ => {} // the variants and workbench viewports are controlled separately by Host.update
     }
     if let Ok(mut q) = INBOX.lock() {
         q.push_back(c);
@@ -151,22 +182,59 @@ fn on_command(c: Command) {
 
 /// The plugin went away: put everything away and forget its revisions.
 fn on_disconnect() {
+    crate::app::plugin_gone();
     crate::frame::set(None, None);
     crate::menu::close(None);
+    crate::monitor::set(false, None);
+    crate::monitor::set_view(None);
     #[cfg(windows)]
     {
         crate::win::hide_all();
         crate::win::variant_hide();
+        crate::win::shelf_hide();
     }
     on_command(Command::Hello);
     on_command(Command::Hide {
         panel: variants::ID.to_string(),
     });
+    on_command(Command::Hide {
+        panel: shelf::ID.to_string(),
+    });
+}
+
+/// A copy that isn't the installed WavePlug (the one inside the Photoshop plugin) starts the
+/// installed one instead, so one program with one data folder runs. Not from the source tree
+/// (dist\ has ..\reports): a developer runs what they built.
+fn hand_to_installed() -> bool {
+    if crate::paths::running_installed() || crate::life::replacing() {
+        return false;
+    }
+    let Ok(me) = std::env::current_exe() else { return false };
+    if me.parent().and_then(|d| d.parent()).is_some_and(|p| p.join("reports").is_dir()) {
+        return false;
+    }
+    let Some(dir) = crate::paths::registered_dir() else { return false };
+    let exe = dir.join(crate::paths::APP_EXE);
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    match std::process::Command::new(&exe).args(&args).current_dir(&dir).spawn() {
+        Ok(_) => true,
+        Err(_) => false,
+    }
 }
 
 pub fn run() {
+    if hand_to_installed() {
+        return;
+    }
     crate::log::init();
+    let args: Vec<String> = std::env::args().collect();
+    let show = args.iter().any(|a| a == "--show");
+    let uninstall = args.iter().any(|a| a == "--uninstall");
     crate::life::init();
+    if show || uninstall {
+        crate::app::pin();
+        if uninstall { crate::app::ask_uninstall() } else { crate::app::open(None) }
+    }
     let list = surfaces();
     let first = list
         .first()
@@ -204,6 +272,13 @@ pub fn run() {
                 bound = server::start(on_command, on_disconnect);
                 tries -= 1;
             }
+            if bound.is_err() && (show || uninstall) {
+                // started from the Start menu / 应用 while it already runs: that one shows itself
+                crate::server::ask_running_to_show(if uninstall { "uninstall" } else { "overview" });
+            }
+            if bound.is_ok() {
+                crate::tray::start();
+            }
             if bound.is_err() {
                 crate::log::line("port in use: another helper is running; quitting");
                 // a ComfyUI taken over from the previous copy must outlive this one
@@ -229,10 +304,17 @@ pub fn run() {
                 resize_from: None,
                 collapsed: true,
                 toast: None,
+                hang_placed: false,
                 variant_rail: VariantRail::new(),
                 variant_shown: false,
                 variant_view: None,
                 variant_placed: false,
+                shelf: Shelf::new(),
+                shelf_shown: false,
+                shelf_view: None,
+                shelf_placed: false,
+                shelf_drag: None,
+                app: None,
             }))
         }),
     );
@@ -259,10 +341,21 @@ struct Host {
     /// collapsed while idle; expanded on hover, active input/work, or a drag entering its reveal zone
     collapsed: bool,
     toast: Option<Toast>,
+    /// 卡死保护's dialog window has been put in the middle of Photoshop
+    hang_placed: bool,
     variant_rail: VariantRail,
     variant_shown: bool,
     variant_view: Option<ScreenRect>,
     variant_placed: bool,
+    /// the 编辑工作台 window (panel/shelf.rs)
+    shelf: Shelf,
+    shelf_shown: bool,
+    shelf_view: Option<ScreenRect>,
+    shelf_placed: bool,
+    /// a drag out of the workbench window is running: its entries' keys
+    /// the WavePlug window, once opened
+    app: Option<crate::app::AppWindow>,
+    shelf_drag: Option<Vec<String>>,
 }
 
 #[cfg(test)]
@@ -289,6 +382,11 @@ struct Toast {
     placed: bool,
 }
 
+/// A notice in the corner of Photoshop's window (from another thread: hang.rs).
+pub fn notify(title: &str, text: &str) {
+    on_command(Command::Toast { title: title.into(), text: text.into(), view: None, ms: 8000 });
+}
+
 /// Wake the UI thread (the drag engine queued an event).
 pub fn wake() {
     if let Some(ctx) = CTX.get() {
@@ -302,6 +400,34 @@ impl Host {
     fn take_drag_events(&mut self) {
         for e in crate::drag::take_events() {
             match e {
+                crate::drag::Event::Dropped { surface: crate::drag::session::TRASH, .. } => {
+                    crate::log::line("trash drop");
+                    server::send(&Event::LayerDragTrashDrop);
+                }
+                crate::drag::Event::Dropped { surface: shelf::ID, reference, .. } => {
+                    // the plugin knows every layer it was dragging (groups too); these are a hint
+                    let ids: Vec<u32> = reference.layers.iter().map(|l| l.layer_id).collect();
+                    server::send(&Event::Action {
+                        panel: shelf::ID.to_string(),
+                        action: serde_json::json!({ "kind": "stage-drop", "docId": reference.doc_id, "layerIds": ids }),
+                    });
+                }
+                crate::drag::Event::Ended { ending } => {
+                    if let Some(keys) = self.shelf_drag.take() {
+                        #[cfg(windows)]
+                        let over_ps = {
+                            let (x, y) = crate::win::cursor_pos();
+                            crate::win::photoshop_under(x, y)
+                        };
+                        #[cfg(not(windows))]
+                        let over_ps = false;
+                        crate::log::line(format!("workbench drag out ended: {ending} over_photoshop={over_ps} entries={}", keys.len()));
+                        if ending == "released" && over_ps {
+                            server::send(&Event::Action { panel: shelf::ID.to_string(), action: serde_json::json!({ "kind": "drop-into-ps", "keys": keys }) });
+                        }
+                        server::send(&Event::Action { panel: shelf::ID.to_string(), action: serde_json::json!({ "kind": "drag-out-end", "ending": ending }) });
+                    }
+                }
                 crate::drag::Event::Dropped { surface, target, reference } => {
                     if let Some(i) = self.index(surface) {
                         for action in self.surfaces[i].external_drop(target, &reference) {
@@ -343,6 +469,10 @@ impl Host {
                 Command::HoverFrame { .. } => {} // frame.rs, on its own thread
                 Command::MenuOpen { .. } | Command::MenuClose { .. } => {} // menu.rs, on its own thread
                 Command::RestartHelper => {}     // life.rs, on its own thread
+                Command::Monitor { .. } => {}    // monitor.rs, on its own thread
+                Command::HangGuard { .. } => {}  // hang.rs, on its own thread
+                Command::WebCatch { .. } => {}   // webdrop.rs, on its own thread
+                Command::AppSettings { .. } => {} // app.rs
                 Command::ExternalDragPrepare { .. }
                 | Command::ExternalDragReady { .. }
                 | Command::ExternalDragCancel { .. }
@@ -399,6 +529,12 @@ impl Host {
                         crate::drag::send(crate::drag::Cmd::PreviewStart { layers, total: total_count });
                     }
                 }
+                Command::LayerDragTrash { view, enabled, action } => {
+                    let view = view.filter(|v| v.right > v.left && v.bottom > v.top).map(|v| {
+                        (v.left.round() as i32, v.top.round() as i32, v.right.round() as i32, v.bottom.round() as i32)
+                    });
+                    crate::drag::send(crate::drag::Cmd::Trash { view, enabled, action });
+                }
                 Command::LayerDragPreviewUpdate { action, tone } => {
                     crate::drag::send(crate::drag::Cmd::Verdict { action, tone });
                 }
@@ -415,11 +551,12 @@ impl Host {
                     rev,
                     sections,
                 } => {
-                    if panel == variants::ID {
+                    if panel == variants::ID || panel == shelf::ID {
+                        let is_shelf = panel == shelf::ID;
                         let last = self.revs.entry(panel).or_insert(0);
                         if rev > *last {
                             *last = rev;
-                            self.variant_rail.apply(&sections);
+                            if is_shelf { self.shelf.apply(&sections) } else { self.variant_rail.apply(&sections) }
                         }
                         continue;
                     }
@@ -434,6 +571,12 @@ impl Host {
                     self.surfaces[i].apply(&sections);
                 }
                 Command::Show { panel, view } => {
+                    if panel == shelf::ID {
+                        self.shelf_shown = true;
+                        self.shelf_view = view;
+                        self.shelf_placed = false;
+                        continue;
+                    }
                     if panel == variants::ID {
                         self.variant_shown = true;
                         self.variant_view = view;
@@ -467,6 +610,14 @@ impl Host {
                     });
                 }
                 Command::Hide { panel } => {
+                    if panel == shelf::ID {
+                        self.shelf_shown = false;
+                        self.shelf_placed = false;
+                        crate::drag::targets::publish(shelf::ID, Vec::new());
+                        #[cfg(windows)]
+                        crate::win::shelf_hide();
+                        continue;
+                    }
                     if panel == variants::ID {
                         self.variant_shown = false;
                         self.variant_placed = false;
@@ -603,6 +754,95 @@ impl Host {
         let _ = ctx;
     }
 
+    /// 卡死保护 (hang.rs): Photoshop stopped answering. Its own window in the middle of Photoshop's,
+    /// activatable (Photoshop can't take the keyboard now anyway); gone when Photoshop answers again.
+    fn hang_dialog(&mut self, ctx: &egui::Context) {
+        use crate::hang::Choice;
+        let Some(d) = crate::hang::dialog() else {
+            self.hang_placed = false;
+            return;
+        };
+        let builder = egui::ViewportBuilder::default()
+            .with_title(HANG_TITLE)
+            .with_inner_size(HANG_SIZE)
+            .with_decorations(false)
+            .with_taskbar(false)
+            .with_resizable(false)
+            .with_always_on_top();
+        #[cfg(windows)]
+        let builder = builder.with_position([crate::win::PARK.0 as f32, crate::win::PARK.1 as f32]);
+        let picked = ctx.show_viewport_immediate(egui::ViewportId::from_hash_of("hang"), builder, |ctx, _| {
+            let mut picked: Option<Choice> = None;
+            egui::CentralPanel::default()
+                .frame(
+                    Frame::new()
+                        .fill(theme::SURFACE)
+                        .stroke(Stroke::new(2.0_f32, theme::WARN))
+                        .inner_margin(Margin::symmetric(16, 14)),
+                )
+                .show(ctx, |ui| {
+                    ui.label(egui::RichText::new("Photoshop 没有响应").font(theme::font_bold(theme::FS_L)).color(theme::WARN));
+                    ui.label(format!("已经 {} 秒没有响应。可能还在处理大文件，也可能已经卡死。", d.seconds));
+                    ui.add_space(4.0);
+                    let backup = if d.busy {
+                        "正在备份自动恢复文件…".to_string()
+                    } else {
+                        d.backup.clone().unwrap_or_else(|| "还没有备份自动恢复文件。".into())
+                    };
+                    ui.label(egui::RichText::new(backup).color(theme::TEXT));
+                    ui.label(
+                        egui::RichText::new("自动恢复文件是 Photoshop 定时自动存储的内容（首选项 › 文件处理），只包含上次自动存储时的修改。")
+                            .size(theme::FS_S)
+                            .color(theme::TEXT_3),
+                    );
+                    ui.add_space(6.0);
+                    let idle = !d.busy && !d.closing;
+                    if d.closing {
+                        ui.label(egui::RichText::new(if d.busy { "备份完成后关闭 Photoshop…" } else { "正在关闭 Photoshop…" }).color(theme::TEXT_2));
+                    } else if d.confirm_close {
+                        ui.label(egui::RichText::new("确定强制关闭 Photoshop？没有保存、也不在自动恢复文件里的修改都会丢失。").color(theme::ERR));
+                        ui.horizontal(|ui| {
+                            if ui.add_enabled(idle, egui::Button::new("备份后关闭")).clicked() {
+                                picked = Some(Choice::Close { backup: true });
+                            }
+                            if ui.add_enabled(idle, egui::Button::new("直接关闭")).clicked() {
+                                picked = Some(Choice::Close { backup: false });
+                            }
+                            if ui.button("取消").clicked() {
+                                picked = Some(Choice::CancelClose);
+                            }
+                        });
+                    } else {
+                        ui.horizontal(|ui| {
+                            if ui.button("继续等待").clicked() {
+                                picked = Some(Choice::Wait);
+                            }
+                            let again = if d.backup.is_some() { "再备份一次" } else { "备份恢复文件" };
+                            if ui.add_enabled(idle, egui::Button::new(again)).clicked() {
+                                picked = Some(Choice::Backup);
+                            }
+                            if d.backup_dir.is_some() && ui.button("打开备份位置").clicked() {
+                                picked = Some(Choice::OpenBackup);
+                            }
+                            if ui.add_enabled(idle, egui::Button::new("关闭 Photoshop…")).clicked() {
+                                picked = Some(Choice::AskClose);
+                            }
+                        });
+                    }
+                });
+            picked
+        });
+        if let Some(c) = picked {
+            crate::hang::choose(c);
+        }
+        #[cfg(windows)]
+        if !self.hang_placed {
+            self.hang_placed = crate::win::place_dialog(HANG_TITLE, HANG_SIZE);
+        }
+        // the seconds count up and the backup's result comes from another thread
+        ctx.request_repaint_after(Duration::from_millis(500));
+    }
+
     /// The completion notice: its own small window in the canvas's bottom-right corner, yellow
     /// frame, until its time is up or it is clicked.
     fn notice(&mut self, ctx: &egui::Context) {
@@ -732,6 +972,74 @@ impl Host {
     }
 }
 
+impl Host {
+    /// The 编辑工作台 window: its own viewport like the variant rail, a drop target for every
+    /// WaveLayer drag while it is on screen, and the start of drags out of it.
+    fn shelf_viewport(&mut self, ctx: &egui::Context) {
+        if !self.shelf_shown {
+            return;
+        }
+        let band = crate::drag::active() && self.shelf_drag.is_none();
+        let hot = band && crate::drag::hovered() == Some((shelf::ID, 0));
+        let size = egui::vec2(shelf::WIDTH, self.shelf.content_height(band));
+        let builder = egui::ViewportBuilder::default()
+            .with_title(shelf::TITLE)
+            .with_inner_size(size)
+            .with_decorations(false)
+            .with_taskbar(false)
+            .with_resizable(false)
+            .with_active(false);
+        #[cfg(windows)]
+        let builder = builder.with_position([crate::win::PARK.0 as f32, crate::win::PARK.1 as f32]);
+        #[cfg(not(windows))]
+        let builder = builder.with_always_on_top();
+        let (actions, drag_out) = ctx.show_viewport_immediate(
+            egui::ViewportId::from_hash_of("waveplug-workbench"),
+            builder,
+            |viewport_ctx, _| self.shelf.draw(viewport_ctx, band, hot),
+        );
+        #[cfg(windows)]
+        {
+            if !self.shelf_placed || !crate::win::shelf_window_exists() {
+                self.shelf_placed = crate::win::shelf_place(self.shelf_view);
+                if !self.shelf_placed {
+                    ctx.request_repaint_after(Duration::from_millis(200));
+                }
+            }
+            crate::win::shelf_sync(size.x, size.y);
+            let targets = if band {
+                crate::win::shelf_screen_rect()
+                    .map(|rect| vec![crate::drag::targets::Target { surface: shelf::ID, id: 0, rect, action: "加入工作台".into() }])
+                    .unwrap_or_default()
+            } else {
+                Vec::new()
+            };
+            crate::drag::targets::publish(shelf::ID, targets);
+        }
+        if let Some(d) = drag_out {
+            if !crate::drag::active() && !d.keys.is_empty() {
+                let total = d.keys.len();
+                let layers = d.names.iter().take(8).enumerate().map(|(i, name)| DraggedLayer {
+                    layer_id: 0,
+                    name: name.clone(),
+                    thumb: if i == 0 { d.thumb.clone() } else { None },
+                }).collect();
+                crate::drag::send(crate::drag::Cmd::PreviewStart { layers, total });
+                crate::drag::send(crate::drag::Cmd::Verdict { action: "置入当前 PSD".into(), tone: "workbench".into() });
+                crate::log::line(format!("workbench drag out start entries={total}"));
+                server::send(&Event::Action { panel: shelf::ID.to_string(), action: serde_json::json!({ "kind": "drag-out", "keys": d.keys }) });
+                self.shelf_drag = Some(d.keys);
+            }
+        }
+        if self.shelf_drag.is_some() || band {
+            ctx.request_repaint_after(Duration::from_millis(50));
+        }
+        for action in actions {
+            server::send(&Event::Action { panel: shelf::ID.to_string(), action });
+        }
+    }
+}
+
 impl eframe::App for Host {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         self.take_commands(ctx);
@@ -818,7 +1126,19 @@ impl eframe::App for Host {
         #[cfg(windows)]
         self.track_typing(ctx);
         self.variant_viewport(ctx);
+        self.shelf_viewport(ctx);
         self.notice(ctx);
+        self.hang_dialog(ctx);
+        // the WavePlug window (app.rs), made the first time it opens (it looks for Photoshop /
+        // Illustrator on the disks)
+        if crate::app::is_open() {
+            self.app.get_or_insert_with(|| crate::app::AppWindow::new(ctx.clone())).show(ctx);
+        }
+        if crate::app::quitting() {
+            crate::log::line("quit (tray / removed)");
+            crate::tray::remove();
+            ctx.send_viewport_cmd(ViewportCommand::Close);
+        }
         // actions a surface held back (the prompt, once typing pauses)
         let now = Instant::now();
         for s in self.surfaces.iter_mut() {

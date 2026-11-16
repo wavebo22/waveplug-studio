@@ -8,7 +8,7 @@
 
 import { onDispose } from "../ui/dom.ts";
 import { log, setLogContext } from "./log.ts";
-import { EXPECTED_HELPER_VERSION, OVERLAY_URL, type ComfyManagerStatus, type ExternalDragEvent, type ExternalDragFile, type MenuNode, type OverlayCommand, MENU_HELPER_VERSION, type ScreenRect, helperOutdated, parseOverlayEvent } from "../core/overlay/protocol.ts";
+import { EXPECTED_HELPER_VERSION, OVERLAY_URL, type ComfyManagerStatus, type ExternalDragEvent, type ExternalDragFile, HANG_SECONDS, type HangDoc, type MenuNode, type OverlayCommand, MENU_HELPER_VERSION, type ScreenRect, TRASH_HELPER_VERSION, WEBDROP_HELPER_VERSION, type WebDropEvent, helperOutdated, parseOverlayEvent } from "../core/overlay/protocol.ts";
 import { type Hub, createHub } from "../core/overlay/hub.ts";
 
 const RETRY_MS = 3000;
@@ -27,6 +27,11 @@ export interface Overlay {
   beginLayerDragPreview(layers: { layerId: number; name: string; thumb?: string }[], totalCount: number): boolean;
   updateLayerDragPreview(action: string, tone: "move" | "copy" | "delete" | "workbench" | "invalid"): void;
   endLayerDragPreview(): void;
+  /** 外置删除区 for the drag under way (after beginLayerDragPreview). False when the helper isn't
+   *  connected or is older than TRASH_HELPER_VERSION: the panel then shows its own red rail. */
+  showDragTrash(view: ScreenRect | null, enabled: boolean, action: string): boolean;
+  /** the drag was let go over the 外置删除区 */
+  onTrashDrop(cb: () => void): () => void;
   /** 悬停边框: frame `rect` (screen px) cut to `clip` on the canvas; null takes it away. */
   hoverFrame(frame: { rect: ScreenRect; clip: ScreenRect } | null): void;
   /** Cross-app drag (把图层拖出 Photoshop): PNGs are being written / are written / the session is
@@ -38,6 +43,18 @@ export interface Overlay {
   /** Ask the native helper to reconcile the configured local ComfyUI process (`restart`: stop the
    *  one it started and start it again). */
   manageComfy(options: { path: string; base: string; closeWithPhotoshop: boolean; restartIfNeeded?: boolean; disableBrowser?: boolean; startIfMissing?: boolean; restart?: boolean }): void;
+  /** 性能监视: the helper's box in the canvas's bottom-right corner, on or off; `comfy` is ComfyUI's
+   *  address for its row. Remembered and sent again whenever a helper connects. */
+  setMonitor(on: boolean, comfy: string): void;
+  /** 牵手 Illustrator: a message for the Illustrator panel (dropped while it isn't connected). */
+  sendBridge(msg: unknown): void;
+  /** messages from the Illustrator panel */
+  onBridge(cb: (msg: unknown) => void): () => void;
+  /** whether the Illustrator panel is connected to the helper */
+  readonly illustrator: boolean;
+  onIllustrator(cb: (connected: boolean) => void): () => void;
+  /** 卡死保护: on / off, and the open documents. Remembered and sent again whenever a helper connects. */
+  setHangGuard(on: boolean, autoBackup: boolean, docs: HangDoc[]): void;
   /** Starts the helper's exe unless it is connected, and waits up to `waitMs` for it to connect:
    *  null when it did, else why not. */
   launchHelper(waitMs?: number): Promise<string | null>;
@@ -54,6 +71,15 @@ export interface Overlay {
   onConnected(cb: () => void): () => void;
   onDisconnected(cb: () => void): () => void;
   onComfyStatus(cb: (status: ComfyManagerStatus) => void): () => void;
+  /** 从网页拖入: put the helper's drop catcher over the panel's drop area (see web-catch). False
+   *  when the helper isn't connected or is older than WEBDROP_HELPER_VERSION. */
+  webCatch(at: { clientX: number; clientY: number; left: number; top: number; width: number; height: number; folder: string } | null): boolean;
+  /** 功能设置 for the WavePlug app window: remembered, sent now and whenever a helper connects
+   *  (only when it changed) */
+  sendAppSettings(settings: Record<string, string | boolean>): void;
+  onAppSettingsSet(cb: (changes: Record<string, string | boolean>) => void): () => void;
+  /** web-drop / web-drop-leave from the helper */
+  onWebDrop(cb: (event: WebDropEvent) => void): () => void;
   /** external-drag-cached / -files-copied / -finished from the helper */
   onExternalDrag(cb: (event: ExternalDragEvent) => void): () => void;
   readonly connected: boolean;
@@ -67,6 +93,15 @@ export function connectOverlay(opts: { launch?: () => Promise<string | null>; au
   const disconnectionListeners = new Set<() => void>();
   const comfyListeners = new Set<(status: ComfyManagerStatus) => void>();
   const externalDragListeners = new Set<(event: ExternalDragEvent) => void>();
+  const trashListeners = new Set<() => void>();
+  const webDropListeners = new Set<(event: WebDropEvent) => void>();
+  const appSettingsListeners = new Set<(changes: Record<string, string | boolean>) => void>();
+  let appSettings: Record<string, string | boolean> | null = null, appSettingsSent = "";
+  const bridgeListeners = new Set<(msg: unknown) => void>();
+  const peerListeners = new Set<(connected: boolean) => void>();
+  let illustrator = false;
+  let monitor: { on: boolean; comfy: string } | null = null;
+  let hangGuard: OverlayCommand | null = null, hangKey = "";
   let menuSeq = 0;
   const menus = new Map<string, (item: string | null) => void>();
   const endMenus = () => { for (const done of menus.values()) done(null); menus.clear(); };
@@ -116,6 +151,9 @@ export function connectOverlay(opts: { launch?: () => Promise<string | null>; au
       helperLaunchAttempted = true;
       log("info", "overlay connected");
       hub.connected();
+      if (monitor) send({ type: "monitor", ...monitor });
+      if (hangGuard) send(hangGuard);
+      if (appSettings) { appSettingsSent = JSON.stringify(appSettings); send({ type: "app-settings", settings: appSettings }); }
       connectionListeners.forEach(cb => { try { cb(); } catch (err) { log("warn", "overlay connect listener", err); } });
     };
     sock.onmessage = e => {
@@ -136,6 +174,30 @@ export function connectOverlay(opts: { launch?: () => Promise<string | null>; au
         done?.(m.item);
         return;
       }
+      if (m?.type === "bridge") {
+        if (m.from === "illustrator" || m.from === "helper") bridgeListeners.forEach(cb => { try { cb(m.msg); } catch (err) { log("warn", "bridge listener", err); } });
+        return;
+      }
+      if (m?.type === "peer") {
+        if (m.role === "illustrator" && m.connected !== illustrator) {
+          illustrator = m.connected;
+          log("info", "illustrator panel", m.connected ? "connected" : "gone");
+          peerListeners.forEach(cb => { try { cb(m.connected); } catch (err) { log("warn", "peer listener", err); } });
+        }
+        return;
+      }
+      if (m?.type === "app-settings-set") {
+        appSettingsListeners.forEach(cb => { try { cb(m.changes); } catch (err) { log("warn", "app settings listener", err); } });
+        return;
+      }
+      if (m?.type === "web-drop" || m?.type === "web-drop-leave") {
+        webDropListeners.forEach(cb => { try { cb(m); } catch (err) { log("warn", "web drop listener", err); } });
+        return;
+      }
+      if (m?.type === "layer-drag-trash-drop") {
+        trashListeners.forEach(cb => { try { cb(); } catch (err) { log("warn", "trash drop listener", err); } });
+        return;
+      }
       if (m?.type === "external-drag-cached" || m?.type === "external-drag-files-copied" || m?.type === "external-drag-finished") {
         externalDragListeners.forEach(cb => { try { cb(m); } catch (err) { log("warn", "external drag listener", err); } });
         return;
@@ -150,6 +212,7 @@ export function connectOverlay(opts: { launch?: () => Promise<string | null>; au
       }
       connected = false;
       helperVersion = null;
+      if (illustrator) { illustrator = false; peerListeners.forEach(cb => { try { cb(false); } catch { /* listener */ } }); }
       ws = null;
       setLogContext({ 外置框架: "未连接" });
       endMenus(); // a menu the helper was showing went with it
@@ -168,6 +231,9 @@ export function connectOverlay(opts: { launch?: () => Promise<string | null>; au
     disconnectionListeners.clear();
     comfyListeners.clear();
     externalDragListeners.clear();
+    trashListeners.clear();
+    bridgeListeners.clear();
+    peerListeners.clear();
   });
   return {
     hub,
@@ -187,6 +253,34 @@ export function connectOverlay(opts: { launch?: () => Promise<string | null>; au
     },
     endLayerDragPreview() {
       send({ type: "layer-drag-preview-end" });
+    },
+    showDragTrash(view, enabled, action) {
+      if (!connected || helperVersion === null || helperOutdated(helperVersion, TRASH_HELPER_VERSION)) return false;
+      return sendChecked({ type: "layer-drag-trash", view, enabled, action });
+    },
+    sendAppSettings(s) {
+      appSettings = { ...s };
+      const text = JSON.stringify(appSettings);
+      if (!connected || text === appSettingsSent) return;
+      appSettingsSent = text;
+      send({ type: "app-settings", settings: appSettings });
+    },
+    onAppSettingsSet(cb) {
+      appSettingsListeners.add(cb);
+      return () => appSettingsListeners.delete(cb);
+    },
+    webCatch(at) {
+      if (!at) { if (connected) send({ type: "web-catch", on: false }); return true; }
+      if (!connected || helperVersion === null || helperOutdated(helperVersion, WEBDROP_HELPER_VERSION)) return false;
+      return sendChecked({ type: "web-catch", on: true, ...at });
+    },
+    onWebDrop(cb) {
+      webDropListeners.add(cb);
+      return () => webDropListeners.delete(cb);
+    },
+    onTrashDrop(cb) {
+      trashListeners.add(cb);
+      return () => trashListeners.delete(cb);
     },
     hoverFrame(frame) {
       send(frame ? { type: "hover-frame", rect: frame.rect, clip: frame.clip } : { type: "hover-frame", rect: null });
@@ -225,6 +319,32 @@ export function connectOverlay(opts: { launch?: () => Promise<string | null>; au
     },
     closeMenu() {
       if (menus.size) send({ type: "menu-close" });
+    },
+    setMonitor(on, comfy) {
+      if (monitor && monitor.on === on && monitor.comfy === comfy) return;
+      monitor = { on, comfy };
+      log("info", "overlay monitor", on);
+      send({ type: "monitor", on, comfy });
+    },
+    sendBridge(msg) {
+      send({ type: "bridge", to: "illustrator", msg });
+    },
+    onBridge(cb) {
+      bridgeListeners.add(cb);
+      return () => bridgeListeners.delete(cb);
+    },
+    get illustrator() { return illustrator; },
+    onIllustrator(cb) {
+      peerListeners.add(cb);
+      return () => peerListeners.delete(cb);
+    },
+    setHangGuard(on, autoBackup, docs) {
+      const m: OverlayCommand = { type: "hang-guard", on, autoBackup, seconds: HANG_SECONDS, docs };
+      const key = JSON.stringify(m);
+      if (key === hangKey) return;
+      if (!hangGuard || (hangGuard as { on: boolean }).on !== on) log("info", "overlay hang guard", on, autoBackup);
+      hangGuard = m; hangKey = key;
+      send(m);
     },
     launchHelper,
     async restartHelper(waitMs = 15_000) {

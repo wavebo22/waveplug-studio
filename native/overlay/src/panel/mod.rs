@@ -6,6 +6,7 @@
 // Adding a surface: HANDOFF.md 「新增一個外附介面」. The generate panel (generate/) is the model.
 
 pub mod generate;
+pub mod shelf;
 pub mod theme;
 pub mod variants;
 
