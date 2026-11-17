@@ -60,14 +60,19 @@ const remote = existsSync(".git") ? git("remote", "get-url", "origin") : null;
 if (!remote || remote.status !== 0) console.log("  不是从 GitHub 克隆的文件夹，跳过");
 else {
   const before = git("rev-parse", "HEAD").stdout.trim();
-  // the repository is private: without a saved GitHub login, sign in once through the browser
-  // (Git Credential Manager keeps it in Windows' credential store) before pulling
+  // the repository is public: no login. Only when GitHub says the login is missing or wrong (a
+  // private fork) sign in once through the browser; a network problem is just said.
   const env = { ...process.env, GIT_TERMINAL_PROMPT: "0", GCM_INTERACTIVE: "never" };
   const reach = () => spawnSync("git", ["ls-remote", "--heads", "origin"], { encoding: "utf8", env });
-  if (win && reach().status !== 0) {
-    console.log("  还没登录 GitHub：正在打开浏览器登录（只需要一次），在网页里点 Authorize…");
-    spawnSync("git", ["credential-manager", "github", "login", "--browser"], { stdio: "inherit" });
-    if (reach().status !== 0) console.log("  还是连不上 GitHub：" + (reach().stderr || "").trim().split("\n").pop());
+  const first = reach();
+  if (first.status !== 0) {
+    const why = (first.stderr || "").trim();
+    if (win && /authentication|could not read username|terminal prompts disabled|repository not found/i.test(why)) {
+      console.log("  GitHub 要求登录：正在打开浏览器登录（只需要一次），在网页里点 Authorize…");
+      spawnSync("git", ["credential-manager", "github", "login", "--browser"], { stdio: "inherit" });
+    } else {
+      console.log("  连不上 GitHub（网络问题）：" + why.split("\n").pop());
+    }
   }
   // inherit: Git's messages reach the user
   // no console password prompt (WavePlug runs this without a console); Git's own sign-in window may still appear
