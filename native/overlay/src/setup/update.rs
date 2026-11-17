@@ -7,9 +7,9 @@
 
 use std::path::{Path, PathBuf};
 
-/// Where updates come from when the user hasn't set anything: the project's GitHub repository
-/// ("owner/repo"). Empty: none yet, the user fills it in under 安装与更新 › 更新.
-pub const DEFAULT_SOURCE: &str = "";
+/// Where updates come from when the user hasn't set anything: the project's public GitHub
+/// repository; its newest Release carries WavePlug_Setup_<version>.exe (发布到 GitHub).
+pub const DEFAULT_SOURCE: &str = "wavebo22/waveplug-studio";
 
 use serde::Deserialize;
 
