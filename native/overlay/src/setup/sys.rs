@@ -140,21 +140,6 @@ pub fn open(path: &Path) -> Result<(), String> {
     Command::new(program).arg(path).spawn().map(|_| ()).map_err(|e| e.to_string())
 }
 
-/// Some program opens files of this extension (".ccx"): HKEY_CLASSES_ROOT has it with a handler.
-pub fn has_handler(ext: &str) -> bool {
-    if !cfg!(windows) {
-        return true;
-    }
-    // reg.exe hidden (no console flashing): Some(output) when the key exists
-    let q = |key: &str| run("reg", &["query", key, "/ve"]).ok().filter(|(code, _)| *code == 0).map(|(_, text)| text);
-    let Some(text) = q(&format!("HKCR\\{ext}")) else { return false };
-    // the default value names a ProgID that must have something to open with
-    match super::detect::reg_default_value(&text) {
-        Some(progid) if !progid.is_empty() => q(&format!("HKCR\\{progid}\\shell")).is_some(),
-        _ => q(&format!("HKCR\\{ext}\\OpenWithProgids")).is_some(),
-    }
-}
-
 /// Starts a program on its own (the new installer after an update).
 pub fn launch(exe: &Path, args: &[&str]) -> Result<(), String> {
     Command::new(exe).args(args).spawn().map(|_| ()).map_err(|e| format!("{} 没能启动：{e}", exe.display()))

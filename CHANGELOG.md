@@ -1,5 +1,10 @@
 # 更新记录
 
+## 1.3.1（未发布）
+- Photoshop 插件的安装和卸载不再需要 Adobe 的安装工具（UPIA）或 Creative Cloud：WavePlug 直接把插件放进 Adobe 的插件文件夹并登记到 Adobe 的插件列表，和 Adobe 安装工具的做法一样。Windows 会请求一次管理员权限。
+- 卸载旧开发版插件同样不需要 UPIA。
+- `WavePlug.exe --install-ps [安装包]` / `--remove-ps`：不开窗口安装或卸载 Photoshop 插件，结果写在 `data\logs\setup.log`。
+
 ## 1.3.0（2026-11-16）
 **只有一个 Photoshop 插件**
 - 正式版和开发版合成一个插件 `WavePlug Studio`（`com.waveplug.studio`）。电脑上有源码文件夹 `G:\waveplug\studio\dist\plugin` 时，它从那里加载最新构建（构建后自动载入）；没有时运行插件自带的版本。设置 › 开发者里可以切换「从开发文件夹加载代码」。

@@ -36,9 +36,54 @@ mod webdrop;
 mod win;
 
 fn main() {
+    let args: Vec<String> = std::env::args().collect();
+    if let Some(i) = args.iter().position(|a| a == "--install-ps" || a == "--remove-ps") {
+        std::process::exit(plugin_cli(&args, i));
+    }
     if std::env::args().any(|a| a == "--demo") {
         panel::generate::demo::run();
         return;
     }
     host::run();
 }
+
+/// `--install-ps [installer or WavePlug.pak]` / `--remove-ps`: the Photoshop plugin without the
+/// window (scripts, testing; still one Windows administrator prompt unless already elevated).
+/// What happened goes to <data>\logs\setup.log; exit code 0 when it worked.
+fn plugin_cli(args: &[String], i: usize) -> i32 {
+    use setup::{install, payload};
+    let file = paths::logs_dir().join("setup.log");
+    let _ = std::fs::create_dir_all(paths::logs_dir());
+    let log = |t: String| {
+        use std::io::Write;
+        if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(&file) {
+            let _ = writeln!(f, "{t}");
+        }
+    };
+    let cfg = install::Config::load();
+    let result = if args[i] == "--remove-ps" {
+        log("── 卸载 Photoshop 插件（命令行） ──".into());
+        install::remove_plugin(&cfg, &log)
+    } else {
+        log("── 安装 Photoshop 插件（命令行） ──".into());
+        let pak = args.get(i + 1).map(std::path::PathBuf::from).or_else(|| paths::install_dir().map(|d| d.join(paths::PACK)));
+        match pak.ok_or_else(|| "没有安装包：给出安装程序或 WavePlug.pak 的路径".to_string()).and_then(|p| payload::read_exe(&p).and_then(|x| x.ok_or_else(|| format!("{} 不是 WavePlug 安装包", p.display())))) {
+            Ok(p) => {
+                let version = p.info().map(|i| i.version).unwrap_or_default();
+                install::install_plugin(&p, &version, &cfg, &log)
+            }
+            Err(e) => Err(e),
+        }
+    };
+    match result {
+        Ok(m) => {
+            log(format!("完成：{m}"));
+            0
+        }
+        Err(e) => {
+            log(format!("失败：{e}"));
+            1
+        }
+    }
+}
+

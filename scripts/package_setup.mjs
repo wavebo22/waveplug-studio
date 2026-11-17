@@ -63,6 +63,9 @@ const built = new Date().toISOString().slice(0, 16).replace("T", " ");
 const entries = [
   ["payload.json", Buffer.from(JSON.stringify({ version: plugin.version, ai_version: aiVersion, helper_version: helperVersion, built }))],
   ["WavePlug.ccx", ccx],
+  // the same files unpacked: WavePlug copies them into Adobe's plugin folder itself (no UPIA, no
+  // Creative Cloud; native/overlay/src/setup/install.rs)
+  ...files("dist/plugin").filter(p => !skip(p)).map(p => ["ps/" + relative("dist/plugin", p).split(/[\\/]/).join("/"), readFileSync(p)]),
   // the app the installer puts in the chosen folder: the same exe as the plugin's helper
   ["WavePlug.exe", readFileSync("dist/plugin/waveplug-overlay.exe")],
   // the panel ships without .debug (remote debugging); build-stamp.txt makes an open panel reload

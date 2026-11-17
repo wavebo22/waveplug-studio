@@ -150,7 +150,6 @@ struct Status {
     panel: Option<(String, bool)>,
     ps_running: bool,
     ai_running: bool,
-    upia: Option<PathBuf>,
     comfy_up: Option<bool>,
     cache_bytes: u64,
     read: bool,
@@ -160,7 +159,6 @@ struct Status {
 enum Pick {
     Ps,
     Ai,
-    Upia,
     Dev,
     Installer,
 }
@@ -339,7 +337,6 @@ impl AppWindow {
         self.last_refresh = Some(Instant::now());
         let shared = self.shared.clone();
         let ctx = self.ctx.clone();
-        let cfg = self.cfg.clone();
         let comfy = plugin_str("comfyUrl");
         std::thread::spawn(move || {
             let st = Status {
@@ -347,7 +344,6 @@ impl AppWindow {
                 panel: install::installed_panel(),
                 ps_running: sys::is_running(App::Photoshop.exe_name()),
                 ai_running: sys::is_running(App::Illustrator.exe_name()),
-                upia: install::find_upia(&cfg),
                 comfy_up: comfy.as_deref().and_then(reachable),
                 cache_bytes: folder_size(&paths::data_root().join("cache")),
                 read: true,
@@ -367,7 +363,6 @@ impl AppWindow {
             let (title, filter) = match what {
                 Pick::Ps => ("选择 Photoshop.exe", ("Photoshop", "Photoshop.exe")),
                 Pick::Ai => ("选择 Illustrator.exe", ("Illustrator", "Illustrator.exe")),
-                Pick::Upia => ("选择 UnifiedPluginInstallerAgent.exe", ("Adobe 安装工具", "UnifiedPluginInstallerAgent.exe")),
                 Pick::Dev => ("选择源码文件夹里的 package.json", ("package.json", "package.json")),
                 Pick::Installer => ("选择新的 WavePlug 安装程序", ("WavePlug 安装程序", "*.exe")),
             };
@@ -390,7 +385,6 @@ impl AppWindow {
                 self.cfg.ai_exe = s;
                 self.want_ai = true;
             }
-            Pick::Upia => self.cfg.upia = s,
             Pick::Dev => self.cfg.dev_source = p.parent().map(|d| d.display().to_string()).unwrap_or_default(),
             Pick::Installer => {
                 self.start_installer(&p);
@@ -800,15 +794,7 @@ impl AppWindow {
             if st.ps_running {
                 ui.label(small("Photoshop 正在运行：安装 / 卸载插件前要先关闭它", theme::WARN));
             }
-            ui.horizontal_wrapped(|ui| {
-                match &st.upia {
-                    Some(p) => ui.label(small(format!("Adobe 安装工具：{}", p.display()), theme::TEXT_3)),
-                    None => ui.label(small("没找到 Adobe 安装工具（UPIA）：安装时会交给 Creative Cloud", theme::TEXT_3)),
-                };
-                if ui.small_button("指定…").clicked() {
-                    self.pick(Pick::Upia);
-                }
-            });
+            ui.label(small("插件直接装进 Adobe 的插件文件夹，不需要 Creative Cloud；装 / 卸时 Windows 会请求一次管理员权限。", theme::TEXT_3));
             ui.checkbox(&mut self.want_ps, "Photoshop 插件");
         });
         card(ui, "Illustrator", |ui| {

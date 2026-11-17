@@ -1,6 +1,6 @@
-// Installing, updating and removing WavePlug: the Photoshop plugin (a .ccx, through Adobe's
-// installer UPIA, which needs administrator rights and Photoshop closed; without UPIA, Creative
-// Cloud opens the .ccx), the Illustrator panel (a CEP extension copied into the user's extensions
+// Installing, updating and removing WavePlug: the Photoshop plugin (copied into Adobe's plugin
+// folder and registered in its plugin list, the way Adobe's installer does it, but without
+// Creative Cloud: administrator rights and Photoshop closed), the Illustrator panel (a CEP extension copied into the user's extensions
 // folder, unsigned panels allowed with PlayerDebugMode) and this program itself.
 
 use std::path::{Path, PathBuf};
@@ -16,7 +16,6 @@ pub const PLUGIN_NAME: &str = "WavePlug Studio";
 /// the separate development plugin of before (one plugin now: plugin/loader.js runs the source
 /// folder's build when it is there); the 开发者 section removes it once its data has moved
 pub const OLD_DEV_ID: &str = "com.waveplug.studio.dev";
-pub const OLD_DEV_NAME: &str = "WavePlug Studio Dev";
 pub const AI_ID: &str = "com.waveplug.ai.wavelayer";
 pub const HELPER_EXE: &str = "waveplug-overlay.exe";
 
@@ -26,7 +25,8 @@ pub const HELPER_EXE: &str = "waveplug-overlay.exe";
 pub struct Config {
     pub ps_exe: String,
     pub ai_exe: String,
-    /// Adobe's UnifiedPluginInstallerAgent.exe when it isn't in the usual place
+    /// Adobe's installer (UPIA), from before the plugin was installed without it: kept so older
+    /// setup.json files still read
     pub upia: String,
     /// latest.json of the published version (scripts/package_setup.mjs writes one)
     pub update_url: String,
@@ -57,31 +57,6 @@ impl Config {
 
 fn common_files() -> PathBuf {
     PathBuf::from(std::env::var("CommonProgramFiles").unwrap_or_else(|_| "C:\\Program Files\\Common Files".into()))
-}
-
-/// Where UPIA may be: the configured one, then where Creative Cloud puts it.
-pub fn upia_candidates(cfg: &Config) -> Vec<PathBuf> {
-    let mut out = Vec::new();
-    if !cfg.upia.trim().is_empty() {
-        out.push(PathBuf::from(cfg.upia.trim()));
-    }
-    let rel = "Adobe\\Adobe Desktop Common\\RemoteComponents\\UPI\\UnifiedPluginInstallerAgent\\UnifiedPluginInstallerAgent.exe";
-    out.push(common_files().join(rel));
-    for var in ["CommonProgramW6432", "CommonProgramFiles(x86)"] {
-        if let Ok(d) = std::env::var(var) {
-            out.push(PathBuf::from(d).join(rel));
-        }
-    }
-    // a UPIA unpacked by hand (no Creative Cloud), where scripts\install_ccx.cmd expects it
-    for drive in b'C'..=b'Z' {
-        out.push(PathBuf::from(format!("{}:\\App\\Adobe-UPIA-Extract\\UPI64-unpacked\\UnifiedPluginInstallerAgent\\UnifiedPluginInstallerAgent.exe", drive as char)));
-    }
-    out.dedup();
-    out
-}
-
-pub fn find_upia(cfg: &Config) -> Option<PathBuf> {
-    upia_candidates(cfg).into_iter().find(|p| p.is_file())
 }
 
 /// The installed Photoshop plugin's version and whether it's on, from Adobe's plugin list.
@@ -137,82 +112,194 @@ fn remove_folder(p: &Path) -> std::io::Result<()> {
 
 pub type Log<'a> = &'a dyn Fn(String);
 
-/// Writes the .ccx out of the payload: its path.
-fn write_ccx(payload: &Payload, version: &str) -> Result<PathBuf, String> {
-    let ccx = payload.get("WavePlug.ccx").ok_or("安装包里没有 Photoshop 插件")?;
-    let dir = std::env::temp_dir().join("WavePlug");
-    std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
-    let path = dir.join(format!("WavePlug_Studio_{version}.ccx"));
-    std::fs::write(&path, ccx).map_err(|e| format!("写不了 {}：{e}", path.display()))?;
-    Ok(path)
+// ── the Photoshop plugin, without Adobe's installer ──
+// What UPIA does, done here: the plugin's files go to
+//   %CommonProgramFiles%\Adobe\UXP\Plugins\External\<id>_<version>
+// and Adobe's plugin list %CommonProgramFiles%\Adobe\UXP\PluginsInfo\v1\PS.json gets an entry
+//   { hostMinVersion, name, path: "$systemPlugins\\External\\<id>_<version>", pluginId,
+//     status: "enabled", type: "uxp", versionString }
+// Photoshop reads that list when it starts. Both places are under Program Files: one Windows
+// administrator prompt per install / removal. No Creative Cloud, no UPIA.
+
+fn uxp_root() -> PathBuf {
+    common_files().join("Adobe").join("UXP")
 }
 
-/// UPIA with `args`, as administrator, run from the user's profile folder (UPIA resolves a path
-/// against the current drive and fails with -198 elsewhere): its exit code and what it printed.
-fn upia(upia: &Path, args: &str, log: Log) -> Result<(i32, String), String> {
-    let out = std::env::temp_dir().join("WavePlug").join(format!("upia_{}.log", std::process::id()));
-    let _ = std::fs::create_dir_all(out.parent().unwrap());
-    let _ = std::fs::remove_file(&out);
-    let home = std::env::var("USERPROFILE").unwrap_or_else(|_| "C:\\".into());
-    // /s: cmd takes off the outer quotes and keeps the inner ones
-    let params = format!("/s /c \"cd /d \"{home}\" && \"{}\" {args} > \"{}\" 2>&1\"", upia.display(), out.display());
-    log("Windows 会请求管理员权限（Adobe 的安装工具需要）…".into());
-    let code = sys::run_elevated("cmd.exe", &params, Path::new(&home))?;
-    let text = std::fs::read(&out).map(|b| sys::decode(&b)).unwrap_or_default();
-    for l in text.lines().filter(|l| !l.trim().is_empty()) {
-        log(format!("  {}", l.trim()));
+fn ps_list() -> PathBuf {
+    uxp_root().join("PluginsInfo").join("v1").join("PS.json")
+}
+
+/// Adobe's plugin list with `id` (re)registered at `version` (any older entry of it replaced).
+pub fn uxp_register(list: &str, id: &str, name: &str, version: &str, host_min: &str) -> Result<String, String> {
+    let mut v = uxp_parse(list)?;
+    let plugins = v["plugins"].as_array_mut().ok_or("PS.json 里的 plugins 不是列表")?;
+    plugins.retain(|p| p.get("pluginId").and_then(|x| x.as_str()) != Some(id));
+    plugins.push(serde_json::json!({
+        "hostMinVersion": host_min,
+        "name": name,
+        "path": format!("$systemPlugins\\External\\{id}_{version}"),
+        "pluginId": id,
+        "status": "enabled",
+        "type": "uxp",
+        "versionString": version,
+    }));
+    serde_json::to_string(&v).map_err(|e| e.to_string())
+}
+
+/// Adobe's plugin list without `id`.
+pub fn uxp_unregister(list: &str, id: &str) -> Result<String, String> {
+    let mut v = uxp_parse(list)?;
+    if let Some(plugins) = v["plugins"].as_array_mut() {
+        plugins.retain(|p| p.get("pluginId").and_then(|x| x.as_str()) != Some(id));
     }
-    Ok((code, text))
+    serde_json::to_string(&v).map_err(|e| e.to_string())
 }
 
-/// The Photoshop plugin: UPIA when there is one, else the .ccx handed to Creative Cloud.
-pub fn install_plugin(payload: &Payload, version: &str, cfg: &Config, log: Log) -> Result<String, String> {
+/// The list's text (a missing or empty file is an empty list).
+fn uxp_parse(list: &str) -> Result<serde_json::Value, String> {
+    let t = list.trim_start_matches('\u{feff}').trim();
+    let mut v: serde_json::Value = if t.is_empty() { serde_json::json!({}) } else { serde_json::from_str(t).map_err(|e| format!("Adobe 的插件列表 PS.json 看不懂：{e}"))? };
+    if !v.is_object() {
+        return Err("Adobe 的插件列表 PS.json 格式不对".into());
+    }
+    if !v["plugins"].is_array() {
+        v["plugins"] = serde_json::json!([]);
+    }
+    Ok(v)
+}
+
+/// PowerShell text: a single-quoted string.
+fn ps_quote(s: &str) -> String {
+    format!("'{}'", s.replace('\'', "''"))
+}
+
+/// Runs `body` as administrator (PowerShell, one Windows prompt) after the common preamble; Err
+/// with what went wrong.
+fn elevated_ps(work: &Path, body: &str, log: Log) -> Result<(), String> {
+    let script = work.join("step.ps1");
+    let err = work.join("step.err");
+    let _ = std::fs::remove_file(&err);
+    let text = format!(
+        "$ErrorActionPreference = 'Stop'\r\ntry {{\r\n$ext = Join-Path $env:CommonProgramFiles 'Adobe\\UXP\\Plugins\\External'\r\n$info = Join-Path $env:CommonProgramFiles 'Adobe\\UXP\\PluginsInfo\\v1'\r\nNew-Item -ItemType Directory -Force -Path $ext, $info | Out-Null\r\n{body}\r\n}} catch {{\r\n  Set-Content -LiteralPath {} -Value $_.Exception.Message -Encoding UTF8\r\n  exit 1\r\n}}\r\n",
+        ps_quote(&err.to_string_lossy())
+    );
+    // a BOM: Windows PowerShell 5.1 reads the file as UTF-8 then (paths with Chinese in them)
+    let mut bytes = vec![0xEF, 0xBB, 0xBF];
+    bytes.extend_from_slice(text.as_bytes());
+    std::fs::write(&script, bytes).map_err(|e| e.to_string())?;
+    log("Windows 会请求管理员权限（插件装在 Program Files 里）…".into());
+    let params = format!("-NoProfile -NonInteractive -ExecutionPolicy Bypass -File \"{}\"", script.display());
+    let code = sys::run_elevated("powershell.exe", &params, work)?;
+    if code == 0 {
+        return Ok(());
+    }
+    let why = std::fs::read(&err).map(|b| sys::decode(&b)).unwrap_or_default();
+    Err(format!("复制插件失败（{code}）：{}", why.trim().trim_start_matches('\u{feff}')))
+}
+
+fn work_dir(name: &str) -> Result<PathBuf, String> {
+    let d = std::env::temp_dir().join("WavePlug").join(name);
+    let _ = std::fs::remove_dir_all(&d);
+    std::fs::create_dir_all(&d).map_err(|e| format!("建不了临时文件夹 {}：{e}", d.display()))?;
+    Ok(d)
+}
+
+/// The plugin's files in `to`: from the payload's ps/ folder, or (an older installer) unpacked
+/// from its .ccx.
+fn stage_plugin(payload: &Payload, work: &Path, to: &Path) -> Result<(), String> {
+    let files: Vec<_> = payload.under("ps").collect();
+    if !files.is_empty() {
+        for (name, data) in &files {
+            let p = to.join(name.replace('/', std::path::MAIN_SEPARATOR_STR));
+            if let Some(parent) = p.parent() {
+                std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+            }
+            std::fs::write(&p, data).map_err(|e| format!("写不了 {}：{e}", p.display()))?;
+        }
+        return Ok(());
+    }
+    let ccx = payload.get("WavePlug.ccx").ok_or("安装包里没有 Photoshop 插件")?;
+    let zip = work.join("plugin.zip");
+    std::fs::write(&zip, ccx).map_err(|e| e.to_string())?;
+    let cmd = format!(
+        "Add-Type -AssemblyName System.IO.Compression.FileSystem; [IO.Compression.ZipFile]::ExtractToDirectory({}, {})",
+        ps_quote(&zip.to_string_lossy()),
+        ps_quote(&to.to_string_lossy())
+    );
+    let (code, out) = sys::run("powershell.exe", &["-NoProfile", "-NonInteractive", "-Command", &cmd])?;
+    if code != 0 {
+        return Err(format!("解不开插件包：{}", out.trim()));
+    }
+    Ok(())
+}
+
+/// The Photoshop plugin: copied into Adobe's plugin folder and registered in its plugin list.
+pub fn install_plugin(payload: &Payload, version: &str, _cfg: &Config, log: Log) -> Result<String, String> {
     if sys::is_running(App::Photoshop.exe_name()) {
         return Err("请先保存并完全关闭 Photoshop（安装插件时它不能开着）".into());
     }
-    // the helper runs from the plugin folder: its exe would stay locked
+    // the helper may run from the plugin folder: its exe would stay locked
     if sys::is_running(HELPER_EXE) {
-        log("关闭外置框架（它在插件文件夹里运行，不关闭文件会被占用）".into());
+        log("关闭插件文件夹里的外置框架（不关闭文件会被占用）".into());
         sys::kill(HELPER_EXE);
         std::thread::sleep(std::time::Duration::from_millis(500));
     }
-    let ccx = write_ccx(payload, version)?;
-    match find_upia(cfg) {
-        Some(u) => {
-            log(format!("用 Adobe 安装工具安装 Photoshop 插件 {version}…"));
-            let (code, text) = upia(&u, &format!("/install \"{}\"", ccx.display()), log)?;
-            let ok = code == 0 || text.to_lowercase().contains("installation successful");
-            let _ = std::fs::remove_file(&ccx);
-            if ok {
-                Ok(format!("Photoshop 插件 {version} 已安装：打开 Photoshop，在「增效工具」里打开 WavePlug"))
-            } else {
-                Err(format!("Adobe 安装工具返回 {code}（上面是它的输出）。也可以双击 {} 交给 Creative Cloud 安装", ccx.display()))
-            }
-        }
-        None => {
-            // without Creative Cloud nothing opens a .ccx: Windows only says 找不到应用程序
-            if !sys::has_handler(".ccx") {
-                return Err(format!(
-                    "没找到 Adobe 安装工具（UPIA），这台电脑也没有能打开 .ccx 的程序（Creative Cloud 没装或没注册）。\n\
-                     点 Photoshop 一栏的「指定…」选 UnifiedPluginInstallerAgent.exe 后再安装；插件包留在 {}",
-                    ccx.display()
-                ));
-            }
-            log("没找到 Adobe 安装工具（UPIA），交给 Creative Cloud 安装 .ccx".into());
-            sys::open(&ccx)?;
-            Ok("已打开 Creative Cloud 的插件安装：按它的提示完成。没有反应时在设置里指定 UnifiedPluginInstallerAgent.exe".into())
-        }
+    let work = work_dir("ps_install")?;
+    let staged = work.join("plugin");
+    stage_plugin(payload, &work, &staged)?;
+    let manifest: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(staged.join("manifest.json")).map_err(|_| "插件包里没有 manifest.json")?)
+        .map_err(|e| format!("插件的 manifest.json 看不懂：{e}"))?;
+    let id = manifest["id"].as_str().unwrap_or(PLUGIN_ID).to_string();
+    let name = manifest["name"].as_str().unwrap_or(PLUGIN_NAME).to_string();
+    let ver = manifest["version"].as_str().unwrap_or(version).to_string();
+    let host_min = manifest["host"]["minVersion"].as_str().unwrap_or("25.0.0").to_string();
+    let list = uxp_register(&std::fs::read_to_string(ps_list()).unwrap_or_default(), &id, &name, &ver, &host_min)?;
+    let list_file = work.join("PS.json");
+    std::fs::write(&list_file, list).map_err(|e| e.to_string())?;
+    log(format!("安装 Photoshop 插件 {ver}（不需要 Creative Cloud）…"));
+    let body = format!(
+        "Get-ChildItem -LiteralPath $ext -Directory -Filter {old} | Remove-Item -Recurse -Force -ErrorAction SilentlyContinue\r\n\
+         $to = Join-Path $ext {dir}\r\n\
+         if (Test-Path -LiteralPath $to) {{ Remove-Item -LiteralPath $to -Recurse -Force }}\r\n\
+         Copy-Item -LiteralPath {from} -Destination $to -Recurse -Force\r\n\
+         Copy-Item -LiteralPath {list} -Destination (Join-Path $info 'PS.json') -Force",
+        old = ps_quote(&format!("{id}_*")),
+        dir = ps_quote(&format!("{id}_{ver}")),
+        from = ps_quote(&staged.to_string_lossy()),
+        list = ps_quote(&list_file.to_string_lossy()),
+    );
+    elevated_ps(&work, &body, log)?;
+    let _ = std::fs::remove_dir_all(&work);
+    match installed_uxp(&id) {
+        Some((v, _)) if v == ver => Ok(format!("Photoshop 插件 {ver} 已安装：打开 Photoshop，在「增效工具」里打开 WavePlug")),
+        _ => Err("复制完了，Adobe 的插件列表里却没有它".into()),
     }
 }
 
-pub fn remove_plugin(cfg: &Config, log: Log) -> Result<String, String> {
+/// Takes plugin `id` out of Adobe's plugin list and deletes its folders.
+fn remove_uxp(id: &str, log: Log) -> Result<(), String> {
     if sys::is_running(App::Photoshop.exe_name()) {
         return Err("请先关闭 Photoshop".into());
     }
+    let work = work_dir("ps_remove")?;
+    let list = uxp_unregister(&std::fs::read_to_string(ps_list()).unwrap_or_default(), id)?;
+    let list_file = work.join("PS.json");
+    std::fs::write(&list_file, list).map_err(|e| e.to_string())?;
+    let body = format!(
+        "Get-ChildItem -LiteralPath $ext -Directory -Filter {old} | Remove-Item -Recurse -Force -ErrorAction SilentlyContinue\r\n\
+         Copy-Item -LiteralPath {list} -Destination (Join-Path $info 'PS.json') -Force",
+        old = ps_quote(&format!("{id}_*")),
+        list = ps_quote(&list_file.to_string_lossy()),
+    );
+    elevated_ps(&work, &body, log)?;
+    let _ = std::fs::remove_dir_all(&work);
+    Ok(())
+}
+
+pub fn remove_plugin(_cfg: &Config, log: Log) -> Result<String, String> {
     sys::kill(HELPER_EXE);
-    let u = find_upia(cfg).ok_or("没找到 Adobe 安装工具（UPIA）：请在 Creative Cloud 的「插件」里卸载 WavePlug Studio")?;
-    let (code, _) = upia(&u, &format!("/remove \"{PLUGIN_NAME}\""), log)?;
-    if code == 0 { Ok("Photoshop 插件已卸载".into()) } else { Err(format!("Adobe 安装工具返回 {code}")) }
+    remove_uxp(PLUGIN_ID, log)?;
+    Ok("Photoshop 插件已卸载".into())
 }
 
 /// The old development plugin, when it is still installed.
@@ -220,13 +307,9 @@ pub fn old_dev_plugin() -> Option<(String, bool)> {
     installed_uxp(OLD_DEV_ID)
 }
 
-pub fn remove_old_dev_plugin(cfg: &Config, log: Log) -> Result<String, String> {
-    if sys::is_running(App::Photoshop.exe_name()) {
-        return Err("请先关闭 Photoshop".into());
-    }
-    let u = find_upia(cfg).ok_or("没找到 Adobe 安装工具（UPIA）：请在 Creative Cloud 的「插件」里卸载 WavePlug Studio Dev")?;
-    let (code, _) = upia(&u, &format!("/remove \"{OLD_DEV_NAME}\""), log)?;
-    if code == 0 { Ok("旧的开发版插件已卸载".into()) } else { Err(format!("Adobe 安装工具返回 {code}")) }
+pub fn remove_old_dev_plugin(_cfg: &Config, log: Log) -> Result<String, String> {
+    remove_uxp(OLD_DEV_ID, log)?;
+    Ok("旧的开发版插件已卸载".into())
 }
 
 /// The Illustrator panel: copied into the user's CEP extensions folder (replacing what's there, a
@@ -395,15 +478,32 @@ mod tests {
     }
 
     #[test]
-    fn upia_is_looked_for_where_configured_first() {
-        let cfg = Config { upia: " D:\\UPIA\\UnifiedPluginInstallerAgent.exe ".into(), ..Default::default() };
-        let c = upia_candidates(&cfg);
-        assert_eq!(c[0], PathBuf::from("D:\\UPIA\\UnifiedPluginInstallerAgent.exe"));
-        assert!(c[1].to_string_lossy().ends_with("UnifiedPluginInstallerAgent.exe"));
-        // Creative Cloud's place first, then a hand-unpacked one on any drive
-        let d = upia_candidates(&Config::default());
-        assert!(d[0].to_string_lossy().contains("RemoteComponents"));
-        assert!(d.iter().any(|p| p.to_string_lossy().starts_with("D:\\App\\Adobe-UPIA-Extract")));
+    fn plugin_list_registers_like_adobes_installer() {
+        // what UPIA wrote on mainpc
+        let before = r#"{"plugins":[{"hostMinVersion":"25.0.0","name":"WavePlug Studio Dev","path":"$systemPlugins\\External\\com.waveplug.studio.dev_1.4.1","pluginId":"com.waveplug.studio.dev","status":"enabled","type":"uxp","versionString":"1.4.1"}]}"#;
+        let after: serde_json::Value = serde_json::from_str(&uxp_register(before, "com.waveplug.studio", "WavePlug Studio", "1.3.0", "25.0.0").unwrap()).unwrap();
+        let list = after["plugins"].as_array().unwrap();
+        assert_eq!(list.len(), 2);
+        assert_eq!(list[1]["path"], "$systemPlugins\\External\\com.waveplug.studio_1.3.0");
+        assert_eq!(list[1]["status"], "enabled");
+        assert_eq!(detect::uxp_plugin(&after.to_string(), "com.waveplug.studio"), Some(("1.3.0".into(), true)));
+        // a newer version replaces the entry; the other plugin stays
+        let again = uxp_register(&after.to_string(), "com.waveplug.studio", "WavePlug Studio", "1.3.1", "25.0.0").unwrap();
+        assert_eq!(detect::uxp_plugin(&again, "com.waveplug.studio"), Some(("1.3.1".into(), true)));
+        assert!(detect::uxp_plugin(&again, "com.waveplug.studio.dev").is_some());
+        // removing takes only that one out
+        let removed = uxp_unregister(&again, "com.waveplug.studio.dev").unwrap();
+        assert!(detect::uxp_plugin(&removed, "com.waveplug.studio.dev").is_none());
+        assert!(detect::uxp_plugin(&removed, "com.waveplug.studio").is_some());
+        // no list yet (no plugin ever installed), a BOM, garbage
+        assert!(detect::uxp_plugin(&uxp_register("", "a", "A", "1", "25").unwrap(), "a").is_some());
+        assert!(uxp_unregister("\u{feff}{\"plugins\":[]}", "a").is_ok());
+        assert!(uxp_register("<html>", "a", "A", "1", "25").is_err());
+    }
+
+    #[test]
+    fn powershell_quoting() {
+        assert_eq!(ps_quote("C:\\Users\\O'Neil\\x"), "'C:\\Users\\O''Neil\\x'");
     }
 
     #[test]

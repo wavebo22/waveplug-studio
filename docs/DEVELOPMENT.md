@@ -12,7 +12,11 @@ python scripts\package_ccx.py        # → releases\WavePlug_Studio_<版本>_loc
 
 `node_modules` 若在另一系统上安装过，需要补装对应平台的 esbuild（`@esbuild/win32-x64` / `@esbuild/darwin-x64`）。
 
-## 安装（Adobe UPIA）
+## 安装（WavePlug，不需要 UPIA）
+
+WavePlug 程序（安装与更新，或 `WavePlug.exe --install-ps`）自己安装插件：文件复制到 `%CommonProgramFiles%\Adobe\UXP\Plugins\External\com.waveplug.studio_<版本>`，在 `%CommonProgramFiles%\Adobe\UXP\PluginsInfo\v1\PS.json` 里登记（`$systemPlugins\External\…`，status enabled），和 UPIA 写的完全一样（`native/overlay/src/setup/install.rs`）。要管理员权限、Photoshop 关闭。下面的 UPIA 方式是以前的。
+
+## 安装（Adobe UPIA，旧方式）
 
 mainpc 不使用 UXP Developer Tool，而是使用 `D:\App\Adobe-UPIA-Extract\UPI64-unpacked\UnifiedPluginInstallerAgent\UnifiedPluginInstallerAgent.exe` 安装 `.ccx`：
 
