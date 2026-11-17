@@ -368,6 +368,13 @@ pub fn install_app(dir: &Path, exe: &[u8], pack: &[u8], version: &str, desktop: 
     write_new(&target, exe)?;
     write_new(&dir.join(PACK), pack)?;
     std::fs::write(dir.join(MARKER), version).map_err(|e| e.to_string())?;
+    // the place kept for the ComfyUI pack (paths::COMFY_DIR); a note says what goes there
+    let comfy = dir.join(paths::COMFY_DIR);
+    let _ = std::fs::create_dir_all(&comfy);
+    let note = comfy.join("把 ComfyUI 压缩包解压到这里.txt");
+    if !note.exists() {
+        let _ = std::fs::write(&note, "把 WavePlug 的 ComfyUI 压缩包解压到这个文件夹（解压后里面有 run_waveplug.bat）。\r\nWavePlug 会自动用它启动 ComfyUI，不用在插件里选启动文件。\r\n在插件里另外选了启动文件时，以你选的为准。\r\n");
+    }
     log(format!("WavePlug {version} 已放到 {}", dir.display()));
     let size_kb = ((exe.len() + pack.len()) / 1024) as u32;
     let exe_s = target.display().to_string();

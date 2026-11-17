@@ -755,6 +755,19 @@ impl AppWindow {
                 Some(d) => (leak(d.display().to_string()), theme::TEXT_2),
                 None => ("没有安装（开发版或插件自带的副本）", theme::TEXT_3),
             });
+            if let Some(dir) = paths::comfy_dir() {
+                let pack = paths::find_comfy_launcher(&dir);
+                ui.horizontal(|ui| {
+                    row(ui, "ComfyUI 包", match &pack {
+                        Some(p) => (leak(format!("已放入：{}", p.display())), theme::OK),
+                        None => (leak(format!("没有（把压缩包解压到 {}）", dir.display())), theme::TEXT_3),
+                    });
+                    if ui.small_button("打开文件夹").clicked() {
+                        let _ = std::fs::create_dir_all(&dir);
+                        let _ = sys::open(&dir);
+                    }
+                });
+            }
             row(ui, "ComfyUI", match (plugin_str("comfyUrl"), st.comfy_up) {
                 (None, _) => ("地址未知（Photoshop 面板连上后显示）", theme::TEXT_3),
                 (Some(u), Some(true)) => (leak(format!("{u} · 可以连接")), theme::OK),

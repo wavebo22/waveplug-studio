@@ -578,7 +578,7 @@ export function mountApp(root: HTMLElement, svc: Services) {
     replace(genBtn, icon(needsComfy ? "play" : "spark"), h("span", null, needsComfy ? "启动 ComfyUI" : actionLabel()));
     progEl.hidden = !why;
     replace(progEl, why ? h("div", { class: "stage muted" }, why,
-      conn.state === "down" && svc.launch ? h("button", { class: "link", onClick: () => void launchComfy() }, settings.comfyLaunch ? "  一键启动" : "  设置启动文件") : null) : null);
+      conn.state === "down" && svc.launch ? h("button", { class: "link", onClick: () => void launchComfy() }, "  一键启动") : null) : null);
   }
 
   function renderAdvanced() {
@@ -948,7 +948,8 @@ export function mountApp(root: HTMLElement, svc: Services) {
    *  (`restart`: the one it started is stopped first). Starts the helper first when needed. */
   async function launchComfy(report: (kind: "ok" | "error" | "info", text: string) => void = (k, t) => setStatus(t, k), restart = false) {
     if (launching) return;
-    if (!settings.comfyLaunch) { report("error", "请先在「ComfyUI 连接」中选择 ComfyUI 的启动文件"); openSettings(); return; }
+    // no launcher chosen: the helper uses the ComfyUI pack in WavePlug's install folder (comfyui\),
+    // and says so when there is none
     if (!overlay?.connected) {
       report("info", "正在启动 WavePlug 外置框架…");
       const error = await overlay?.launchHelper();

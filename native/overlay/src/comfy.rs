@@ -532,6 +532,8 @@ mod platform {
         start_if_missing: bool,
         restart: bool,
     ) {
+        // no launcher chosen: the ComfyUI pack unzipped into the install folder's comfyui\
+        let path = crate::paths::comfy_launcher(&path);
         let reconcile = RECONCILE.lock().ok();
         // Reconcile an instance previously started by this helper before probing for external
         // instances. This is what makes reconnects and repeated ⟳ idempotent.
@@ -720,7 +722,8 @@ mod platform {
             return;
         }
         if path.trim().is_empty() {
-            status("not-configured", "ComfyUI 尚未设置启动文件。外置框架已启动，选择 ComfyUI 的 .bat / .cmd / .exe 后即可自动启动。", false);
+            let hint = crate::paths::comfy_dir().map(|d| format!("，或把 WavePlug 的 ComfyUI 压缩包解压到 {}", d.display())).unwrap_or_default();
+            status("not-configured", format!("ComfyUI 尚未设置启动文件。外置框架已启动，选择 ComfyUI 的 .bat / .cmd / .exe{hint} 后即可自动启动。"), false);
             return;
         }
         if !Path::new(&path).is_file() {

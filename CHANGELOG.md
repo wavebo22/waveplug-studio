@@ -4,6 +4,7 @@
 - Photoshop 插件的安装和卸载不再需要 Adobe 的安装工具（UPIA）或 Creative Cloud：WavePlug 直接把插件放进 Adobe 的插件文件夹并登记到 Adobe 的插件列表，和 Adobe 安装工具的做法一样。Windows 会请求一次管理员权限。
 - 卸载旧开发版插件同样不需要 UPIA。
 - `WavePlug.exe --install-ps [安装包]` / `--remove-ps`：不开窗口安装或卸载 Photoshop 插件，结果写在 `data\logs\setup.log`。
+- 安装文件夹里预留 `comfyui\` 文件夹：把 WavePlug 的 ComfyUI 压缩包解压进去（里面有 `run_waveplug.bat`），没有另选启动文件时 WavePlug 自动用它启动 ComfyUI；「总览」显示是否已放入，可一键打开文件夹。
 
 ## 1.3.0（2026-11-16）
 **只有一个 Photoshop 插件**
