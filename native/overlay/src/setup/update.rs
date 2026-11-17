@@ -1,6 +1,7 @@
 // 检查更新: the update source is a GitHub repository (its newest release, with the installer
 // WavePlug_Setup_<version>.exe attached) or a latest.json address. A latest.json says the newest version and where its installer
-// is; the installer is downloaded (Windows' own curl.exe: https without bundling TLS) and started.
+// is; the installer is downloaded (Windows' own curl.exe: https without bundling TLS; PowerShell's
+// web client when curl can't get through) and started.
 // latest.json (scripts/package_setup.mjs writes it next to the installer):
 //   { "version": "1.2.1", "url": "https://…/WavePlug_Setup_1.2.1.exe", "notes": "…" }
 // `url` may be relative to latest.json's address.
@@ -86,16 +87,11 @@ pub fn latest(source: &str) -> Result<Latest, String> {
     match github_repo(source) {
         Some(repo) => {
             let api = format!("https://api.github.com/repos/{repo}/releases/latest");
-            let (code, out) = sys::run(
-                "curl.exe",
-                &["-sSL", "--max-time", "20", "-w", "\n%{http_code}", "-H", "Accept: application/vnd.github+json", "-H", "User-Agent: WavePlug-updater", &api],
-            )?;
-            let (body, status) = out.trim_end().rsplit_once('\n').unwrap_or(("", out.trim()));
-            match status.trim() {
-                "200" => parse_github_release(body),
-                "404" => Err(format!("{repo} 还没有发布版本（或仓库不公开、名字不对）")),
-                "403" | "429" => Err("GitHub 暂时限制了查询次数，过一会儿再试".into()),
-                _ if code != 0 => Err(format!("连不上 GitHub（curl {code}）：{}", body.trim())),
+            let (status, body) = http_text(&api, &["Accept: application/vnd.github+json", "User-Agent: WavePlug-updater"])?;
+            match status {
+                200 => parse_github_release(&body),
+                404 => Err(format!("{repo} 还没有发布版本（或仓库不公开、名字不对）")),
+                403 | 429 => Err("GitHub 暂时限制了查询次数，过一会儿再试".into()),
                 s => Err(format!("GitHub 返回 {s}")),
             }
         }
@@ -113,14 +109,75 @@ pub fn changelog_notes(changelog: &str, version: &str) -> String {
     }
 }
 
-/// Reads an address: http(s) through curl.exe, else a file (a shared folder works too).
+/// Options for every curl call. `--ssl-revoke-best-effort`: Windows' TLS checks whether the
+/// certificate was revoked and, by default, fails when the revocation server can't be reached
+/// (curl 35, CRYPT_E_REVOCATION_OFFLINE, seen on mainpc); best effort still checks when the server
+/// answers. Retries ride out a dropped connection.
+const CURL_COMMON: [&str; 9] = ["--ssl-revoke-best-effort", "--retry", "3", "--retry-all-errors", "--retry-delay", "2", "--connect-timeout", "15", "-sSL"];
+
+fn curl(args: &[&str]) -> Result<(i32, String), String> {
+    let all: Vec<&str> = CURL_COMMON.iter().copied().chain(args.iter().copied()).collect();
+    sys::run("curl.exe", &all)
+}
+
+/// PowerShell's own web client (.NET: no revocation check, its own proxy settings): the fallback
+/// when curl can't get through. `script` gets $u (the address) and $h (headers).
+fn powershell_web(url: &str, headers: &[&str], script: &str) -> Result<(i32, String), String> {
+    let hs: Vec<String> = headers
+        .iter()
+        .filter_map(|h| h.split_once(':'))
+        .map(|(k, v)| format!("'{}'='{}'", k.trim().replace('\'', "''"), v.trim().replace('\'', "''")))
+        .collect();
+    let cmd = format!(
+        "[Console]::OutputEncoding=[Text.Encoding]::UTF8; $ProgressPreference='SilentlyContinue'; [Net.ServicePointManager]::SecurityProtocol='Tls12'; $u='{}'; $h=@{{{}}}; {script}",
+        url.replace('\'', "''"),
+        hs.join(";")
+    );
+    sys::run("powershell.exe", &["-NoProfile", "-NonInteractive", "-Command", &cmd])
+}
+
+/// GET `url`: the HTTP status and the body (curl, then PowerShell when curl can't connect).
+fn http_text(url: &str, headers: &[&str]) -> Result<(u16, String), String> {
+    let mut args = vec!["--max-time", "30", "-w", "\n%{http_code}"];
+    for h in headers {
+        args.push("-H");
+        args.push(h);
+    }
+    args.push(url);
+    let (code, out) = curl(&args)?;
+    if code == 0 {
+        if let Some((body, status)) = out.trim_end().rsplit_once('\n') {
+            if let Ok(s) = status.trim().parse() {
+                return Ok((s, body.to_string()));
+            }
+        }
+    }
+    let curl_err = out.lines().rev().find(|l| !l.trim().is_empty()).unwrap_or("").trim().to_string();
+    let script = "try { $r = Invoke-WebRequest -Uri $u -Headers $h -UseBasicParsing -TimeoutSec 30; \"$($r.StatusCode)`n$($r.Content)\" } catch { $s = $_.Exception.Response.StatusCode.value__; if ($s) { \"$s`n\" } else { Write-Error $_.Exception.Message; exit 1 } }";
+    let (pc, pout) = powershell_web(url, headers, script)?;
+    if pc == 0 {
+        let t = pout.trim_start_matches('\u{feff}');
+        if let Some((status, body)) = t.split_once('\n') {
+            if let Ok(s) = status.trim().parse() {
+                return Ok((s, body.to_string()));
+            }
+        }
+    }
+    Err(format!("连不上 {}（curl {code}：{curl_err}；PowerShell：{}）", host_of(url), pout.trim().lines().last().unwrap_or("").trim()))
+}
+
+fn host_of(url: &str) -> &str {
+    url.split("://").nth(1).and_then(|r| r.split('/').next()).unwrap_or(url)
+}
+
+/// Reads an address: http(s) through curl.exe (PowerShell as the fallback), else a file (a shared
+/// folder works too).
 pub fn fetch_text(url: &str) -> Result<String, String> {
     if is_web(url) {
-        let (code, out) = sys::run("curl.exe", &["-fsSL", "--max-time", "20", url])?;
-        if code != 0 {
-            return Err(format!("读不到 {url}（curl {code}）：{}", out.trim()));
+        match http_text(url, &[])? {
+            (200, body) => Ok(body),
+            (s, _) => Err(format!("读不到 {url}（HTTP {s}）")),
         }
-        Ok(out)
     } else {
         std::fs::read_to_string(url).map_err(|e| format!("读不到 {url}：{e}"))
     }
@@ -133,9 +190,15 @@ pub fn download(url: &str, to: &Path) -> Result<(), String> {
     }
     if is_web(url) {
         let target = to.to_string_lossy().to_string();
-        let (code, out) = sys::run("curl.exe", &["-fL", "--max-time", "600", "-o", &target, url])?;
+        let (code, out) = curl(&["-f", "--max-time", "900", "-o", &target, url])?;
         if code != 0 {
-            return Err(format!("下载失败（curl {code}）：{}", out.lines().last().unwrap_or("").trim()));
+            let curl_err = out.lines().rev().find(|l| !l.trim().is_empty()).unwrap_or("").trim().to_string();
+            let _ = std::fs::remove_file(to);
+            let script = format!("Invoke-WebRequest -Uri $u -OutFile '{}' -UseBasicParsing -TimeoutSec 900", target.replace('\'', "''"));
+            let (pc, pout) = powershell_web(url, &[], &script)?;
+            if pc != 0 || !to.is_file() {
+                return Err(format!("下载失败（curl {code}：{curl_err}；PowerShell：{}）", pout.trim().lines().last().unwrap_or("").trim()));
+            }
         }
     } else {
         std::fs::copy(url, to).map_err(|e| format!("复制 {url} 失败：{e}"))?;
