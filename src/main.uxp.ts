@@ -18,7 +18,7 @@ declare const require: (m: string) => any;
 const uxp = require("uxp");
 const { localFileSystem: fs, formats } = uxp.storage;
 declare const __BUILT_AT__: string;
-const VERSION = "1.3.0";
+const VERSION = "1.3.1";
 // one plugin for users and development: the loader (plugin/loader.js) runs either the build in the
 // development folder ("dev": live reload, logs mirrored to reports\) or the one inside the plugin
 // The old separate development plugin (com.waveplug.studio.dev) runs this code through its old
