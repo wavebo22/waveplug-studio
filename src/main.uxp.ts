@@ -10,7 +10,6 @@ import { mountApp } from "./ui/app.ts";
 import { mountLayersPanel } from "./ui/layersPanel.ts";
 import { disposeGlobals } from "./ui/dom.ts";
 import * as bridgePs from "./ps/uxpBridge.ts";
-import { startLibraryProbe } from "./ps/libraryProbe.ts";
 import { diagnose, uxpFetch } from "./ps/net.ts";
 import { dumpStorage, importPlan, MOVED_FLAG } from "./core/storageMove.ts";
 
@@ -114,9 +113,7 @@ if (DEV) {
     } finally { busy = false; }
   }, 2000);
 }
-// WaveLibrary POC probe, development build only (temporary)
-const stopProbe = DEV ? startLibraryProbe() : null;
-(globalThis as any).__waveplugDispose =() => { if (devWatch) clearInterval(devWatch); stopProbe?.(); host.dispose(); layerTree.dispose(); disposeGlobals(); };
+(globalThis as any).__waveplugDispose =() => { if (devWatch) clearInterval(devWatch); host.dispose(); layerTree.dispose(); disposeGlobals(); };
 
 const services: Services = {
   host,

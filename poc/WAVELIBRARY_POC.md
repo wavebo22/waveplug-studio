@@ -177,7 +177,23 @@
 - 同一个文件用网络路径保存、再用本地路径 `F:\` 打开：链接自动变成 `F:\…\WaveLibrary\…`，相对路径照样生效。
 - 重新链接耗时：4K 1.62 秒、8K 约 2.87 秒，和本地盘一样（回环）。真实 NAS 上的速度要等有 NAS 时再测。
 
-## P0-3、P2-12 插件里的事件：待测
+## P0-3、P2-12 插件里的事件：通过
 
-开发版加了临时探针 `src/ps/libraryProbe.ts`（只在开发版运行），把保存、关闭、打开、历史记录变化、重新链接时插件收到的内容，以及当前图层的链接路径写进 `uxp_runtime.log`（`wavelibrary probe`）。POC 结束后删掉。
+开发版加了临时探针（`src/ps/libraryProbe.ts`，提交 29e8fa7，测完已删除），监听 `save`、`close`、`open`、`historyStateChanged`、`placedLayerRelinkToFile`、`placedLayerConvertToLinked`，收到时用只读 `smartObject` 属性的 `get` 读当前图层的链接路径，写进 `uxp_runtime.log`。
+
+**先发现的一点**：通过 MCP（ExtendScript）执行的打开、重新链接、历史记录跳转、保存、关闭，插件**一个事件都收不到**，连平时打开文档必有的面板刷新记录也没有。所以这两项由用户在 Photoshop 界面里手动操作（2026-11-17 14:29~14:33）。这也说明：以后用 MCP 测插件相关的行为，结果不可信，要在界面里操作。
+
+| 操作 | 插件收到的 | 读到的链接 |
+|---|---|---|
+| 打开 `proj.psd` | `open`（带路径、`documentID`）+ `historyStateChanged`（"Open"） | 正确；打开后第一次读取 807 ms，之后都在 0~4 ms |
+| 重新链接到文件 | `placedLayerRelinkToFile`（带新路径、`layerID`）+ `historyStateChanged`（"Relink to File"） | 新路径 |
+| Ctrl+Z、Ctrl+Shift+Z、在历史记录面板点「打开」和最后一行 | 每次一条 `historyStateChanged`（带状态名和 `itemIndex`） | 每次都准确对应那个状态（「打开」= `v0001.png`，「重新链接」= `source.png`）；从事件到读完 47~83 ms |
+| Ctrl+S | 两条 `save`：`saveBegin`、`saveSucceeded`，都带 `in`（路径）和 `documentID` | — |
+| 存储为 `proj_手动.psd` | 两条 `save`，`in` 是新路径，`as` 是格式；`saveSucceeded` 时 `doc.path` 已经是新路径 | — |
+| 关闭 | `close`，**只有 `documentID`**，事件到达时文档已经不在了 | 读不到 |
+
+结论：
+
+- **P0-3 在插件里复核通过**：撤销、重做、历史记录跳转后，插件立刻能读到正确的链接路径，「当前变体从链接路径读」（规格 7.1）成立，变体栏可以在 0.1 秒内刷新。
+- **P2-12 通过**：保存、另存为能拿到文档 ID 和路径；`saveSucceeded` 里 `in` 和原路径不同，就是「另存到其他位置」（规格 2.4）。关闭事件只有 `documentID`，所以插件要在 `open` / `save` 时自己记下「文档 ID → 路径」，关闭时据此找到素材库，弹回收站提示、写 `documents[].uses`（规格 7.5）。
 
