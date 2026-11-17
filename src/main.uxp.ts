@@ -173,6 +173,14 @@ const services: Services = {
     }
     return { name: f.name, bytes, url };
   },
+  async writeTextAt(nativePath, text) {
+    const p = nativePath.replace(/\\/g, "/");
+    for (const url of [`file:${p}`, `file:///${p}`]) {
+      try { const f = await fs.createEntryWithUrl(url, { overwrite: true }); await f.write(text, { format: formats.utf8 }); return true; }
+      catch { /* next form */ }
+    }
+    return false;
+  },
   async saveText(text, suggested) {
     const f = await fs.getFileForSaving(suggested, { types: ["txt"] });
     if (!f) return false;

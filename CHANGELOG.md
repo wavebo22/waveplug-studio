@@ -1,5 +1,10 @@
 # 更新记录
 
+## 1.3.3（未发布）
+- 设置全部搬到 WavePlug 程序的「功能设置」：ComfyUI 地址和启动文件（可「选择…」）、启动 / 重启 ComfyUI、随 Photoshop 启动 / 关闭、外置框架、性能监视、卡死保护、保存调试文件、导出诊断信息（连同 Photoshop 插件的诊断报告）、开发者开关。Photoshop 面板里不再有设置页：点右上角的连接状态，会在 WavePlug 程序里打开设置（程序没运行时先启动它）。
+- Photoshop 关着也能改设置：WavePlug 记住面板上次的设置，修改在面板打开时自动生效。
+- WavePlug 程序 0.17.0。
+
 ## 1.3.2（2026-11-17）
 - 下载更新更稳：网络不好时自动重试；Windows 连不上证书吊销服务器时不再直接失败；curl 不行时改用 PowerShell 下载。
 - GitHub 下载不了时，按顺序换下载节点（GitHub 加速代理，内置 12 个：先用 mirrors.git-zh.com 推荐的 gh-proxy.com、ghfast.top，再用 github.akams.cn 的节点；「安装与更新 › 更新 › 下载节点」里可以改）。每个文件都要和 GitHub 公布的 SHA-256 一致才会安装，节点换不了文件；拿不到 GitHub 公布的校验值时不用节点。

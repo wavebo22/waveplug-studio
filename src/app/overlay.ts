@@ -8,7 +8,7 @@
 
 import { onDispose } from "../ui/dom.ts";
 import { log, setLogContext } from "./log.ts";
-import { EXPECTED_HELPER_VERSION, OVERLAY_URL, type ComfyManagerStatus, type ExternalDragEvent, type ExternalDragFile, HANG_SECONDS, type HangDoc, type MenuNode, type OverlayCommand, MENU_HELPER_VERSION, type ScreenRect, TRASH_HELPER_VERSION, WEBDROP_HELPER_VERSION, type WebDropEvent, helperOutdated, parseOverlayEvent } from "../core/overlay/protocol.ts";
+import { EXPECTED_HELPER_VERSION, OVERLAY_URL, type ComfyManagerStatus, type ExternalDragEvent, type ExternalDragFile, HANG_SECONDS, type HangDoc, type MenuNode, type OverlayCommand, MENU_HELPER_VERSION, OPEN_APP_HELPER_VERSION, type ScreenRect, TRASH_HELPER_VERSION, WEBDROP_HELPER_VERSION, type WebDropEvent, helperOutdated, parseOverlayEvent } from "../core/overlay/protocol.ts";
 import { type Hub, createHub } from "../core/overlay/hub.ts";
 
 const RETRY_MS = 3000;
@@ -78,6 +78,10 @@ export interface Overlay {
    *  (only when it changed) */
   sendAppSettings(settings: Record<string, string | boolean>): void;
   onAppSettingsSet(cb: (changes: Record<string, string | boolean>) => void): () => void;
+  /** opens the WavePlug app window on `tab` ("settings"); false when no helper or one too old */
+  openApp(tab: string): boolean;
+  /** 导出诊断信息 in the app window asks for the plugin's report in `folder` */
+  onPluginReport(cb: (folder: string) => void): () => void;
   /** web-drop / web-drop-leave from the helper */
   onWebDrop(cb: (event: WebDropEvent) => void): () => void;
   /** external-drag-cached / -files-copied / -finished from the helper */
@@ -96,6 +100,7 @@ export function connectOverlay(opts: { launch?: () => Promise<string | null>; au
   const trashListeners = new Set<() => void>();
   const webDropListeners = new Set<(event: WebDropEvent) => void>();
   const appSettingsListeners = new Set<(changes: Record<string, string | boolean>) => void>();
+  const reportListeners = new Set<(folder: string) => void>();
   let appSettings: Record<string, string | boolean> | null = null, appSettingsSent = "";
   const bridgeListeners = new Set<(msg: unknown) => void>();
   const peerListeners = new Set<(connected: boolean) => void>();
@@ -190,6 +195,10 @@ export function connectOverlay(opts: { launch?: () => Promise<string | null>; au
         appSettingsListeners.forEach(cb => { try { cb(m.changes); } catch (err) { log("warn", "app settings listener", err); } });
         return;
       }
+      if (m?.type === "plugin-report") {
+        reportListeners.forEach(cb => { try { cb(m.folder); } catch (err) { log("warn", "plugin report listener", err); } });
+        return;
+      }
       if (m?.type === "web-drop" || m?.type === "web-drop-leave") {
         webDropListeners.forEach(cb => { try { cb(m); } catch (err) { log("warn", "web drop listener", err); } });
         return;
@@ -268,6 +277,14 @@ export function connectOverlay(opts: { launch?: () => Promise<string | null>; au
     onAppSettingsSet(cb) {
       appSettingsListeners.add(cb);
       return () => appSettingsListeners.delete(cb);
+    },
+    openApp(tab) {
+      if (!connected || helperVersion === null || helperOutdated(helperVersion, OPEN_APP_HELPER_VERSION)) return false;
+      return sendChecked({ type: "open-app", tab });
+    },
+    onPluginReport(cb) {
+      reportListeners.add(cb);
+      return () => reportListeners.delete(cb);
     },
     webCatch(at) {
       if (!at) { if (connected) send({ type: "web-catch", on: false }); return true; }

@@ -14,7 +14,7 @@ import { MAX_REFERENCES, findReferenceSlots, planLayerReferenceDrop, type LayerR
 import { MAX_UPSCALE_EDGE, type RefSource, type RunResult, StashedResult, runInpaint } from "../app/generate.ts";
 import { type ProfileState, type Services, type Settings, store } from "../app/services.ts";
 import type { DocInfo, FillGroup, Pads, Variation } from "../ps/host.ts";
-import { crumb, diagnosticReport, log, logProblems, withTimeout } from "../app/log.ts";
+import { crumb, diagnosticReport, log, withTimeout } from "../app/log.ts";
 import { openCalibration } from "./calibrate.ts";
 import { h, icon, listen, replace } from "./dom.ts";
 import { encodePng } from "../core/image/png.ts";
@@ -24,7 +24,7 @@ import { RATIOS, createExpandEditor } from "./expandEditor.ts";
 import { createToolsView } from "./tools.ts";
 import { type Overlay, connectOverlay } from "../app/overlay.ts";
 import type { PanelParam } from "../core/overlay/generatePanel.ts";
-import { EXPECTED_HELPER_VERSION, HANG_HELPER_VERSION, HANG_SECONDS, MONITOR_HELPER_VERSION, appSettingsOf, hangDocs, helperOutdated } from "../core/overlay/protocol.ts";
+import { EXPECTED_HELPER_VERSION, HANG_HELPER_VERSION, HANG_SECONDS, MONITOR_HELPER_VERSION, OPEN_APP_HELPER_VERSION, appSettingsOf, hangDocs, helperOutdated } from "../core/overlay/protocol.ts";
 import { attachGenerateSurface } from "./generateSurface.ts";
 import { attachIllustratorBridge } from "../app/illustratorBridge.ts";
 import { attachVariantsSurface } from "./variantsSurface.ts";
@@ -138,7 +138,7 @@ export function mountApp(root: HTMLElement, svc: Services) {
   const padTotal = () => pads.left + pads.right + pads.top + pads.bottom;
 
   // ── skeleton ──
-  const connEl = h("button", { class: "conn", title: "ComfyUI 连接设置", onClick: () => openSettings() });
+  const connEl = h("button", { class: "conn", title: "设置（在 WavePlug 程序里打开）", onClick: () => void openAppSettings() });
   const targetEl = h("span", { class: "target" });
   const flowName = h("span", { class: "flow-name" });
   const flowBtn = h("button", { class: "flow-btn", title: "切换、导入或校准工作流", onClick: () => openWorkflows() }, icon("flow", 14), flowName, icon("chevron", 12));
@@ -743,7 +743,7 @@ export function mountApp(root: HTMLElement, svc: Services) {
       onAutoLaunchFailed: error => {
         conn = { state: "down", text: "未连接" };
         renderConn(); renderAction();
-        setStatus("WavePlug 外置框架没有随 Photoshop 启动：" + error + "。可在「ComfyUI 连接」里点「启动」", "error");
+        setStatus("WavePlug 外置框架没有随 Photoshop 启动：" + error + "。点右上角的连接状态可以重新启动它", "error");
       },
     });
     svc.overlay = overlay;
@@ -754,20 +754,37 @@ export function mountApp(root: HTMLElement, svc: Services) {
       syncComfyManager(settings.comfyAutoStartWithPhotoshop !== false);
     });
     // the WavePlug app window's 功能设置: the same settings, shown and edited there
-    const shareAppSettings = () => overlay?.sendAppSettings(appSettingsOf(settings as unknown as Record<string, unknown>));
+    // 从开发文件夹加载代码 only where it applies (someone who ran from the development folder)
+    const devLoadShown = () => !!svc.loadFrom && (svc.loadFrom.source === "dev" || (() => { try { return localStorage.getItem("wp.loadFrom") === "bundled"; } catch { return false; } })());
+    const shareAppSettings = () => overlay?.sendAppSettings({
+      ...appSettingsOf(settings as unknown as Record<string, unknown>),
+      ...(devLoadShown() ? { devLoad: svc.loadFrom!.source === "dev" } : {}),
+    });
     shareAppSettings();
     setInterval(shareAppSettings, 2000);
     overlay.onAppSettingsSet(changes => {
+      if (typeof changes.devLoad === "boolean") {
+        const to = changes.devLoad ? "dev" : "bundled";
+        delete changes.devLoad;
+        if (svc.loadFrom && svc.loadFrom.source !== to) { svc.loadFrom.set(to); return; }
+      }
       const keys = Object.keys(changes);
       if (!keys.length) return;
+      if (typeof changes.comfyUrl === "string") changes.comfyUrl = normalizeUrl(changes.comfyUrl);
       Object.assign(settings, changes);
       store.saveSettings(settings);
       log("info", "settings from the WavePlug app", JSON.stringify(changes));
       if (keys.includes("perfMonitor") || keys.includes("comfyUrl")) syncMonitor();
       if (keys.includes("hangGuard") || keys.includes("hangAutoBackup")) void syncHangGuard();
+      if (keys.includes("comfyUrl")) { comfy = svc.comfy(settings.comfyUrl); void checkConn(); }
       if (keys.some(k => k.startsWith("comfy"))) syncComfyManager(settings.comfyAutoStartWithPhotoshop !== false);
       shareAppSettings();
       setStatus("已按 WavePlug 程序里的修改更新设置", "info");
+    });
+    // 导出诊断信息 in the app window: this panel's part (environment, every problem, recent log)
+    overlay.onPluginReport(folder => {
+      void svc.writeTextAt?.(folder.replace(/[\\/]+$/, "") + "\\Photoshop插件诊断报告.txt", diagnosticReport())
+        .then(ok => log(ok ? "info" : "warn", "plugin report for the app", folder, ok));
     });
     overlay.onComfyStatus(status => {
       if (status.state === "starting") {
@@ -988,168 +1005,17 @@ export function mountApp(root: HTMLElement, svc: Services) {
     } finally { launching = false; renderAction(); }
   }
 
-  function openSettings() {
-    const url = h("input", { class: "field", value: settings.comfyUrl, placeholder: "127.0.0.1:8188" }) as HTMLInputElement;
-    const result = h("div", { class: "conn-result" });
-    const launchPath = h("input", { class: "field grow", value: settings.comfyLaunch, placeholder: "ComfyUI 启动文件路径" }) as HTMLInputElement;
-    launchPath.addEventListener("change", () => { settings.comfyLaunch = launchPath.value.trim().replace(/^"|"$/g, ""); store.saveSettings(settings); });
-    const show = (kind: "ok" | "error" | "info", text: string) => replace(result, h("span", { class: "dot " + kind }), h("span", null, text));
-    const connect = async () => {
-      show("info", "正在保存…");
-      settings.comfyUrl = normalizeUrl(url.value); syncMonitor();
-      url.value = settings.comfyUrl;
-      store.saveSettings(settings);
-      comfy = svc.comfy(settings.comfyUrl);
-      syncComfyManager(settings.comfyAutoStartWithPhotoshop !== false);
-      show("info", "正在连接 " + settings.comfyUrl + " …");
-      const error = await checkConn();
-      if (error) show("error", error);
-      else { show("ok", conn.text + " · 已连接"); setStatus("已连接 " + settings.comfyUrl, "ok"); setTimeout(() => sheet.remove(), 700); }
-    };
-    // 启动与关闭: what runs now, with 启动 / 重启 for when starting with Photoshop didn't happen
-    const checkRow = (label: string, tip: string, checked: boolean, change: (on: boolean) => void) =>
-      h("label", { class: "check-row", title: tip },
-        h("input", { type: "checkbox", checked, onChange: (e: Event) => change((e.target as HTMLInputElement).checked) }),
-        h("span", null, label));
-    const helperState = h("span", { class: "grow small" });
-    const comfyState = h("span", { class: "grow small" });
-    let busy = false;
-    const lifeAction = (what: () => Promise<void>) => async () => {
-      if (busy) return;
-      busy = true; renderLife();
-      try { await what(); } finally { busy = false; renderLife(); }
-    };
-    const helperBtn = h("button", { class: "btn", title: "外置框架没在运行时启动它；在运行时重启它（换成磁盘上的最新版本，ComfyUI 不会被关闭）", onClick: lifeAction(async () => {
-      const restart = !!overlay?.connected;
-      show("info", restart ? "正在重启外置框架…" : "正在启动外置框架…");
-      const error = restart ? await overlay!.restartHelper() : await overlay?.launchHelper();
-      if (error === undefined) show("error", "这个环境不能启动外置框架");
-      else if (error) show("error", (restart ? "重启" : "启动") + "外置框架失败：" + error);
-      else show("ok", `外置框架已${restart ? "重启" : "启动"}（${overlay?.helperVersion ?? ""}）`);
-    }) }, "启动");
-    const comfyBtn = h("button", { class: "btn", title: "用上面的启动文件启动 ComfyUI；在运行时重启它（只能重启 WavePlug 启动的 ComfyUI）", onClick: lifeAction(async () => {
-      settings.comfyLaunch = launchPath.value.trim().replace(/^"|"$/g, ""); store.saveSettings(settings);
-      settings.comfyUrl = normalizeUrl(url.value); syncMonitor(); url.value = settings.comfyUrl; comfy = svc.comfy(settings.comfyUrl);
-      await launchComfy(show, conn.state === "ok");
-    }) }, "启动");
-    function renderLife() {
-      const up = !!overlay?.connected;
-      const stale = up && helperOutdated(overlay?.helperVersion ?? null);
-      replace(helperState, "外置框架：" + (up ? `运行中 · ${overlay?.helperVersion ?? ""}` : "未运行")
-        + (stale ? `（需要 ${EXPECTED_HELPER_VERSION}：在 Windows 运行 native/overlay/build.cmd）` : "")
-        + (up && !stale ? (overlay?.illustrator ? " · Illustrator 已连接" : " · Illustrator 未连接") : ""));
-      replace(helperBtn, up ? "重启" : "启动");
-      replace(comfyState, "ComfyUI：" + (conn.state === "ok" ? conn.text : conn.state === "checking" ? conn.text : "未连接"));
-      replace(comfyBtn, conn.state === "ok" ? "重启" : "启动");
-      helperBtn.classList.toggle("is-disabled", busy);
-      comfyBtn.classList.toggle("is-disabled", busy);
+  /** 设置 lives in the WavePlug program's window (功能设置: ComfyUI, 启动与关闭, 性能监视, 卡死保护,
+   *  排查问题, 开发者); the panel only opens it, starting the program first when needed. */
+  async function openAppSettings() {
+    if (!overlay || !svc.launch) { setStatus("这个环境没有 WavePlug 程序，设置在 WavePlug 程序里", "error"); return; }
+    if (!overlay.connected) {
+      setStatus("正在启动 WavePlug 程序…", "info");
+      const error = await overlay.launchHelper();
+      if (error !== null) { setStatus("WavePlug 程序没有启动：" + (error ?? "未知原因"), "error"); return; }
     }
-    renderLife();
-    // the helper / ComfyUI may come or go while the page is open
-    const lifeTimer = setInterval(() => { if (!sheet.parentNode) clearInterval(lifeTimer); else renderLife(); }, 1000);
-    const sheet = h("div", { class: "sheet" },
-      h("div", { class: "sheet-head" }, h("span", { class: "sheet-title" }, "ComfyUI 连接"),
-        h("button", { class: "icon-btn", onClick: () => sheet.remove() }, icon("close"))),
-      h("div", { class: "sheet-body" },
-        h("div", { class: "group-label" }, "地址"), url,
-        h("div", { class: "muted small" }, "可以只填 IP 和端口，例如 127.0.0.1:8188。插件只调用 ComfyUI 自带的接口，不需要安装节点或修改启动参数。"),
-        result,
-        svc.launch ? h("div", { class: "group-label" }, "启动与关闭") : null,
-        svc.launch ? h("div", { class: "row launch-row" }, helperState, helperBtn) : null,
-        svc.launch ? checkRow("随 Photoshop 启动外置框架", "Photoshop 启动时自动打开 WavePlug 外置框架（外置面板和 ComfyUI 进程管理，不显示命令行窗口）。外置框架总是随 Photoshop 退出。关闭后可用上面的「启动」手动打开。",
-          settings.helperAutoStart !== false, on => {
-            settings.helperAutoStart = on;
-            store.saveSettings(settings);
-            show("info", on ? "下次启动 Photoshop 时会自动打开外置框架。" : "外置框架不再随 Photoshop 启动；ComfyUI 的自动启动也要等外置框架打开后才会进行。");
-          }) : null,
-        svc.launch ? checkRow("在画布右下角显示性能监视", "由外置框架在 Photoshop 画布右下角显示一个小浮窗：CPU、内存、显卡占用和显存、Photoshop 占用的内存、暂存盘文件大小和剩余空间、ComfyUI 占用的显存。接近上限时数字变黄 / 变红。浮窗不挡鼠标和快捷键，只在 Photoshop 位于前台时显示。显卡数据目前只支持 NVIDIA。",
-          settings.perfMonitor !== false, on => {
-            settings.perfMonitor = on;
-            store.saveSettings(settings);
-            syncMonitor();
-            const old = overlay?.helperVersion ? helperOutdated(overlay.helperVersion, MONITOR_HELPER_VERSION) : false;
-            show("info", !on ? "已关闭性能监视。"
-              : !overlay?.connected ? "已开启；外置框架启动后显示。"
-              : old ? `已开启，但当前外置框架 ${overlay.helperVersion} 不支持（需要 ${MONITOR_HELPER_VERSION}：在 Windows 运行 native/overlay/build.cmd）。`
-              : "已开启性能监视。");
-          }) : null,
-        svc.launch ? checkRow("Photoshop 卡死时提示并备份恢复文件", `Photoshop ${HANG_SECONDS} 秒没有响应时，外置框架弹出提示：继续等待、备份自动恢复文件、或关闭 Photoshop（会先确认）。卡死时插件本身也动不了，没法保存文档；能救回的是 Photoshop 定时写的自动恢复文件（首选项 › 文件处理 › 自动存储恢复信息间隔，建议 5 分钟）。备份放在对应文档旁边，文件名加「_卡死备份_时间」；没保存过的文档放在恢复文件夹旁的 PSAutoRecover_卡死备份 里。`,
-          settings.hangGuard !== false, on => {
-            settings.hangGuard = on;
-            store.saveSettings(settings);
-            void syncHangGuard();
-            const old = overlay?.helperVersion ? helperOutdated(overlay.helperVersion, HANG_HELPER_VERSION) : false;
-            show("info", !on ? "已关闭卡死保护。"
-              : old ? `已开启，但当前外置框架 ${overlay!.helperVersion} 不支持（需要 ${HANG_HELPER_VERSION}：在 Windows 运行 native/overlay/build.cmd）。`
-              : "已开启卡死保护。");
-          }) : null,
-        svc.launch ? checkRow("发现卡死时立即备份", "不等你点按钮，一发现 Photoshop 没有响应就开始复制自动恢复文件。",
-          settings.hangAutoBackup !== false, on => {
-            settings.hangAutoBackup = on;
-            store.saveSettings(settings);
-            void syncHangGuard();
-          }) : null,
-        svc.launch ? h("div", { class: "row launch-row" }, launchPath,
-          h("button", { class: "icon-btn", title: "选择启动文件（.bat / .cmd / .exe）", onClick: async () => {
-            const p = await svc.pickLauncher?.();
-            if (p) { launchPath.value = p; settings.comfyLaunch = p; store.saveSettings(settings); }
-          } }, icon("folder"))) : null,
-        svc.launch ? h("div", { class: "row launch-row" }, comfyState, comfyBtn) : null,
-        svc.launch ? checkRow("随 Photoshop 启动 ComfyUI", "外置框架打开后，如果本机 ComfyUI 没有在运行，就用上面的启动文件把它启动起来。已经在运行的 ComfyUI 直接连接。",
-          settings.comfyAutoStartWithPhotoshop !== false, on => {
-            settings.comfyAutoStartWithPhotoshop = on;
-            store.saveSettings(settings);
-            syncComfyManager(false);
-            show("info", on ? "下次启动 Photoshop 时会自动启动 ComfyUI。" : "ComfyUI 不再随 Photoshop 启动，需要时点「启动」。");
-          }) : null,
-        svc.launch ? checkRow("随 Photoshop 一同关闭 ComfyUI", "只关闭 WavePlug 自己启动的 ComfyUI，用别的方式启动的不会被关闭。开启时 ComfyUI 不显示终端；关闭后 ComfyUI 独立运行并显示终端。外置框架更新、重启时不会关闭 ComfyUI。",
-          settings.comfyCloseWithPhotoshop !== false, on => {
-            settings.comfyCloseWithPhotoshop = on;
-            store.saveSettings(settings);
-            syncComfyManager(false, true);
-            show("info", on ? "已开启：WavePlug 启动的 ComfyUI 随 Photoshop 关闭，终端将隐藏。" : "已关闭：ComfyUI 将独立运行；若当前空闲，会安全重启以显示终端。");
-          }) : null,
-        svc.launch ? checkRow("启动时不自动打开网页", "启动 ComfyUI 时传入 --disable-auto-launch，关闭自动打开浏览器的行为。",
-          settings.comfyNoBrowser !== false, on => {
-            settings.comfyNoBrowser = on;
-            store.saveSettings(settings);
-            show("info", on ? "下次启动 ComfyUI 时将不自动打开网页。" : "已允许 ComfyUI 按其启动脚本设置打开网页，下次启动生效。");
-          }) : null,
-        h("div", { class: "group-label" }, "排查问题"),
-        h("div", { class: "muted small", title: "错误和警告会连同可能的原因、出错前的操作一起记录" }, (() => {
-          const p = logProblems(), e = p.filter(x => x.level === "error").length;
-          return p.length ? `本次运行记录到 ${e} 种错误、${p.length - e} 种警告` : "本次运行没有记录到错误或警告";
-        })()),
-        svc.saveText ? h("button", { class: "btn", title: "把环境信息、每个错误（次数、可能的原因、出错前的操作）和最近的日志存成一个文本文件，发给开发者。\n里面会有图层名、文件名和提示词，不含图片", onClick: async () => {
-          try {
-            const stamp = new Date().toISOString().slice(0, 16).replace(/[-:T]/g, "");
-            const ok = await svc.saveText!(diagnosticReport(), `waveplug-report-${stamp}.txt`);
-            if (ok) show("ok", "诊断报告已保存，把这个文件发给开发者");
-          } catch (e) { log("warn", "save report", e); show("error", "保存诊断报告失败：" + (e as Error).message); }
-        } }, "导出诊断报告…") : null,
-        svc.debugSave && h("label", { class: "check-row", title: "每次生成时把发送的图片、返回的图片和提交的工作流保存到 G:\\waveplug\\studio\\reports\\debug_*。大图一张可达几十 MB，排查完请关闭" },
-          h("input", { type: "checkbox", checked: settings.debugFiles, onChange: (e: Event) => { settings.debugFiles = (e.target as HTMLInputElement).checked; store.saveSettings(settings); } }),
-          h("span", null, "保存调试文件（图片较大，仅排查时打开）")),
-        // one plugin for users and development: only someone who has run it from the development
-        // folder (or turned that off) sees the switch
-        svc.loadFrom && (svc.loadFrom.source === "dev" || (() => { try { return localStorage.getItem("wp.loadFrom") === "bundled"; } catch { return false; } })())
-          ? h("div", null,
-            h("div", { class: "group-label" }, "开发者"),
-            checkRow("从开发文件夹加载代码", `开启时运行 ${svc.loadFrom.devRoot.replace(/\//g, "\\")} 里的最新构建（update.cmd 构建后自动载入，日志写到 reports\\）；关闭时运行插件自带的版本，和用户装到的完全一样。文件夹打不开时自动用自带的版本。`,
-              svc.loadFrom.source === "dev", on => svc.loadFrom!.set(on ? "dev" : "bundled")),
-            svc.loadFrom.source === "bundled" && svc.loadFrom.devMissing ? h("div", { class: "muted small" }, "开发文件夹现在打不开，正在用插件自带的版本") : null)
-          : null),
-      h("div", { class: "sheet-foot" },
-        svc.diagnose ? h("button", { class: "btn", title: "逐项测试 fetch / XHR / WebSocket，结果同时写入日志", onClick: async () => {
-          settings.comfyUrl = normalizeUrl(url.value); syncMonitor(); url.value = settings.comfyUrl;
-          show("info", "诊断中…");
-          const lines = await svc.diagnose!(settings.comfyUrl).catch(e => ["诊断失败：" + (e as Error).message]);
-          replace(result, h("pre", { class: "diag" }, lines.join("\n")));
-        } }, "诊断") : null,
-        h("button", { class: "btn", onClick: () => sheet.remove() }, "关闭"),
-        h("button", { class: "btn primary", onClick: () => void connect() }, "保存并连接")));
-    sheetHost.append(sheet);
-    if (conn.state === "down" && status.kind === "error") show("error", status.text);
+    if (overlay.openApp("settings")) setStatus("设置已在 WavePlug 程序里打开", "info");
+    else setStatus(`WavePlug 程序 ${overlay.helperVersion ?? ""} 太旧，打不开设置：请更新 WavePlug（需要 ${OPEN_APP_HELPER_VERSION}）`, "error");
   }
 
   // ── workflows ──

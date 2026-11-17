@@ -80,7 +80,9 @@ export type OverlayCommand =
   | { type: "web-catch"; on: false }
   /** The settings for what the helper does (APP_SETTING_KEYS), for the WavePlug app window's
    *  功能设置: sent on connect and whenever one changes. Answered by app-settings-set. */
-  | { type: "app-settings"; settings: Record<string, string | boolean> };
+  | { type: "app-settings"; settings: Record<string, string | boolean> }
+  /** open the WavePlug app window on a page ("settings": 功能设置, where all settings live) */
+  | { type: "open-app"; tab: string };
 
 /** An open document for 卡死保护: its name and file path ("" when never saved). */
 export interface HangDoc { name: string; path: string }
@@ -162,6 +164,8 @@ export type OverlayEvent =
   | { type: "bridge"; from: string; msg: unknown }
   /** 功能设置 changed in the WavePlug app window: apply and save these */
   | { type: "app-settings-set"; changes: Record<string, string | boolean> }
+  /** 导出诊断信息 in the app window: write the plugin's report into `folder` (a native path) */
+  | { type: "plugin-report"; folder: string }
   /** 从网页拖入: let go over the helper's catcher, or it left */
   | WebDropEvent
   /** the Illustrator panel connected to the helper or went away */
@@ -183,17 +187,23 @@ export const HANG_HELPER_VERSION = "0.14.0";
 export const BRIDGE_HELPER_VERSION = "0.15.0";
 
 /** The plugin settings the WavePlug app window shows and edits, with their kind. */
-export const APP_SETTING_KEYS: Record<string, "flag" | "text"> = {
+/** flag: on unless set off; off: off unless set on; text; dev: the 从开发文件夹加载代码 switch, not
+ *  a setting (plugin/loader.js keeps it), sent only where it applies */
+export const APP_SETTING_KEYS: Record<string, "flag" | "off" | "text" | "dev"> = {
   helperAutoStart: "flag", perfMonitor: "flag", hangGuard: "flag", hangAutoBackup: "flag",
   comfyUrl: "text", comfyLaunch: "text", comfyAutoStartWithPhotoshop: "flag", comfyCloseWithPhotoshop: "flag", comfyNoBrowser: "flag",
+  debugFiles: "off", devLoad: "dev",
 };
+
+/** open-app (the panel's settings button opens the app window's 功能设置) needs at least this helper */
+export const OPEN_APP_HELPER_VERSION = "0.17.0";
 
 /** Only known keys with the right kind of value (what the app window sent). */
 export function appSettingChanges(raw: Record<string, unknown>): Record<string, string | boolean> {
   const out: Record<string, string | boolean> = {};
   for (const [k, kind] of Object.entries(APP_SETTING_KEYS)) {
     const v = raw[k];
-    if (kind === "flag" && typeof v === "boolean") out[k] = v;
+    if (kind !== "text" && typeof v === "boolean") out[k] = v;
     if (kind === "text" && typeof v === "string") out[k] = v.trim().slice(0, 1000);
   }
   return out;
@@ -202,7 +212,10 @@ export function appSettingChanges(raw: Record<string, unknown>): Record<string, 
 /** The app window's view of `settings`: every APP_SETTING_KEYS key, flags defaulting to on. */
 export function appSettingsOf(settings: Record<string, unknown>): Record<string, string | boolean> {
   const out: Record<string, string | boolean> = {};
-  for (const [k, kind] of Object.entries(APP_SETTING_KEYS)) out[k] = kind === "flag" ? settings[k] !== false : String(settings[k] ?? "");
+  for (const [k, kind] of Object.entries(APP_SETTING_KEYS)) {
+    if (kind === "dev") continue;
+    out[k] = kind === "flag" ? settings[k] !== false : kind === "off" ? settings[k] === true : String(settings[k] ?? "");
+  }
   return out;
 }
 
@@ -255,6 +268,7 @@ export function parseOverlayEvent(text: string): OverlayEvent | null {
   if (m?.type === "layer-drag-trash-drop") return { type: "layer-drag-trash-drop" };
   if (m?.type === "web-drop-leave") return { type: "web-drop-leave" };
   if (m?.type === "app-settings-set" && m.changes && typeof m.changes === "object") return { type: "app-settings-set", changes: appSettingChanges(m.changes) };
+  if (m?.type === "plugin-report" && typeof m.folder === "string" && /^[A-Za-z]:\\/.test(m.folder)) return { type: "plugin-report", folder: m.folder };
   if (m?.type === "web-drop" && Array.isArray(m.files)) {
     const str = (v: unknown) => (typeof v === "string" ? v : "");
     const files = m.files.filter((f: any) => f && typeof f.file === "string" && f.file && !/[\\/]/.test(f.file)).map((f: any) => ({ file: f.file, name: str(f.name) || f.file }));

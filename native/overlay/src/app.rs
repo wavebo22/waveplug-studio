@@ -41,6 +41,16 @@ pub enum Tab {
 }
 
 impl Tab {
+    /// "settings" / "install" / "help" / anything else: the overview
+    pub fn named(name: &str) -> Tab {
+        match name {
+            "settings" => Tab::Settings,
+            "install" => Tab::Install,
+            "help" => Tab::Help,
+            _ => Tab::Overview,
+        }
+    }
+
     fn from(n: u8) -> Tab {
         match n {
             1 => Tab::Install,
@@ -58,6 +68,10 @@ static ASK_UNINSTALL: AtomicBool = AtomicBool::new(false);
 static PINNED: AtomicBool = AtomicBool::new(false);
 static QUIT: AtomicBool = AtomicBool::new(false);
 static PLUGIN_SETTINGS: Mutex<Option<Map<String, Value>>> = Mutex::new(None);
+/// Photoshop's panel is connected (else PLUGIN_SETTINGS is what it had last)
+static PLUGIN_ONLINE: AtomicBool = AtomicBool::new(false);
+/// 功能设置 changes made while the panel was closed
+static PENDING: std::sync::LazyLock<Mutex<Map<String, Value>>> = std::sync::LazyLock::new(|| Mutex::new(Map::new()));
 
 /// Opens the window (on `tab`).
 pub fn open(tab: Option<Tab>) {
@@ -98,18 +112,89 @@ pub fn quitting() -> bool {
 }
 
 /// The plugin's settings for this program (app-settings).
-pub fn set_plugin_settings(v: Map<String, Value>) {
+pub fn set_plugin_settings(mut v: Map<String, Value>) {
+    PLUGIN_ONLINE.store(true, Ordering::SeqCst);
+    // what was changed here while the panel was closed goes to it now
+    let pending = std::mem::take(&mut *PENDING.lock().unwrap());
+    if !pending.is_empty() {
+        for (k, val) in &pending {
+            v.insert(k.clone(), val.clone());
+        }
+        crate::log::line(format!("app settings sent on connect: {}", Value::Object(pending.clone())));
+        crate::server::send(&Event::AppSettingsSet { changes: Value::Object(pending) });
+    }
+    save_known(&v);
     if let Ok(mut s) = PLUGIN_SETTINGS.lock() {
         *s = Some(v);
     }
     crate::host::wake();
 }
 
-/// Photoshop's panel went away: its settings are unknown until it is back.
+/// Photoshop's panel went away: its last settings stay shown (and editable: PENDING).
 pub fn plugin_gone() {
-    if let Ok(mut s) = PLUGIN_SETTINGS.lock() {
-        *s = None;
+    PLUGIN_ONLINE.store(false, Ordering::SeqCst);
+}
+
+/// the plugin's settings as last seen, kept so 功能设置 works with Photoshop closed
+fn known_file() -> PathBuf {
+    paths::data_root().join("plugin-settings.json")
+}
+
+fn save_known(v: &Map<String, Value>) {
+    let f = known_file();
+    let _ = std::fs::create_dir_all(paths::data_root());
+    let tmp = f.with_extension("json.new");
+    if std::fs::write(&tmp, serde_json::to_string_pretty(v).unwrap_or_default()).is_ok() {
+        let _ = std::fs::rename(&tmp, &f);
     }
+}
+
+/// What a panel that never connected starts with (src/app/services.ts defaults).
+fn default_settings() -> Map<String, Value> {
+    let v = json!({
+        "helperAutoStart": true, "perfMonitor": true, "hangGuard": true, "hangAutoBackup": true,
+        "comfyUrl": "http://127.0.0.1:8188", "comfyLaunch": "", "comfyAutoStartWithPhotoshop": true,
+        "comfyCloseWithPhotoshop": true, "comfyNoBrowser": true, "debugFiles": false,
+    });
+    v.as_object().cloned().unwrap_or_default()
+}
+
+/// The settings to show: the panel's (live or last seen), else the defaults.
+fn known_settings() -> Map<String, Value> {
+    let mut s = PLUGIN_SETTINGS.lock().unwrap();
+    if s.is_none() {
+        let mut base = default_settings();
+        if let Some(saved) = std::fs::read_to_string(known_file()).ok().and_then(|t| serde_json::from_str::<Map<String, Value>>(&t).ok()) {
+            base.extend(saved);
+        }
+        *s = Some(base);
+    }
+    s.clone().unwrap_or_default()
+}
+
+/// Changes from 功能设置: to the panel now, or kept for when it connects.
+fn apply_plugin_changes(changes: Map<String, Value>) {
+    if changes.is_empty() {
+        return;
+    }
+    let mut cur = known_settings();
+    for (k, v) in &changes {
+        cur.insert(k.clone(), v.clone());
+    }
+    save_known(&cur);
+    *PLUGIN_SETTINGS.lock().unwrap() = Some(cur);
+    crate::log::line(format!("app settings changed: {}", Value::Object(changes.clone())));
+    if PLUGIN_ONLINE.load(Ordering::SeqCst) {
+        crate::server::send(&Event::AppSettingsSet { changes: Value::Object(changes) });
+    } else {
+        PENDING.lock().unwrap().extend(changes);
+    }
+}
+
+/// "127.0.0.1:8188" → "http://127.0.0.1:8188" (what the panel does with the address)
+fn normalize_url(u: &str) -> String {
+    let t = u.trim().trim_end_matches('/');
+    if t.is_empty() || t.contains("://") { t.to_string() } else { format!("http://{t}") }
 }
 
 /// The program's icon (window and tray): a teal rounded square with a white wave, `n` px.
@@ -161,6 +246,7 @@ enum Pick {
     Ai,
     Dev,
     Installer,
+    Launcher,
 }
 
 #[derive(Default)]
@@ -365,6 +451,7 @@ impl AppWindow {
                 Pick::Ai => ("选择 Illustrator.exe", ("Illustrator", "Illustrator.exe")),
                 Pick::Dev => ("选择源码文件夹里的 package.json", ("package.json", "package.json")),
                 Pick::Installer => ("选择新的 WavePlug 安装程序", ("WavePlug 安装程序", "*.exe")),
+                Pick::Launcher => ("选择 ComfyUI 的启动文件", ("启动文件（.bat / .cmd / .exe）", "*.bat;*.cmd;*.exe")),
             };
             if let Some(p) = sys::pick_file(title, filter) {
                 shared.lock().unwrap().picked = Some((what, p));
@@ -388,6 +475,13 @@ impl AppWindow {
             Pick::Dev => self.cfg.dev_source = p.parent().map(|d| d.display().to_string()).unwrap_or_default(),
             Pick::Installer => {
                 self.start_installer(&p);
+                return;
+            }
+            Pick::Launcher => {
+                let mut c = Map::new();
+                c.insert("comfyLaunch".into(), json!(s));
+                apply_plugin_changes(c);
+                self.comfy_launch = None;
                 return;
             }
         }
@@ -714,7 +808,7 @@ impl AppWindow {
             egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| match self.tab {
                 Tab::Overview => self.overview(ui, &st),
                 Tab::Install => self.install_page(ui, &st, &busy),
-                Tab::Settings => self.settings_page(ui),
+                Tab::Settings => self.settings_page(ui, &st),
                 Tab::Help => self.help_page(ui, &st),
             });
         });
@@ -971,7 +1065,9 @@ impl AppWindow {
         });
     }
 
-    fn settings_page(&mut self, ui: &mut egui::Ui) {
+    /// 功能设置: everything that used to be the Photoshop panel's settings page, plus this program's
+    /// own. Saved in the panel (sent to it, or kept until it connects: apply_plugin_changes).
+    fn settings_page(&mut self, ui: &mut egui::Ui, st: &Status) {
         let mut keep = self.cfg.keep_running;
         card(ui, "WavePlug 程序", |ui| {
             if ui.checkbox(&mut keep, "关闭 Photoshop 后继续在托盘运行").on_hover_text("不勾：Photoshop 退出时 WavePlug 一起退出（主窗口开着时除外）").changed() {
@@ -979,55 +1075,105 @@ impl AppWindow {
                 self.cfg.save();
             }
         });
-        let Some(s) = PLUGIN_SETTINGS.lock().ok().and_then(|s| s.clone()) else {
-            card(ui, "插件设置", |ui| {
-                ui.label(small("在 Photoshop 里打开 WavePlug 面板后，这里可以修改它的设置（性能监视、卡死保护、ComfyUI）。", theme::TEXT_3));
-            });
-            return;
-        };
+        let s = known_settings();
+        let online = PLUGIN_ONLINE.load(Ordering::SeqCst);
+        if !online {
+            ui.label(small("Photoshop 的 WavePlug 面板现在没打开：这里的修改会在面板打开时生效。", theme::WARN));
+        }
         let flag = |k: &str| s.get(k).and_then(Value::as_bool).unwrap_or(true);
+        let text = |k: &str| s.get(k).and_then(Value::as_str).unwrap_or("").to_string();
         let mut changes = Map::new();
+        let busy = self.shared.lock().unwrap().busy.is_some();
+
+        card(ui, "ComfyUI", |ui| {
+            let url = self.comfy_url.get_or_insert_with(|| text("comfyUrl"));
+            ui.label(small("地址（可以只填 IP 和端口，例如 127.0.0.1:8188）", theme::TEXT_3));
+            if ui.add(egui::TextEdit::singleline(url).desired_width(f32::INFINITY)).lost_focus() {
+                changes.insert("comfyUrl".into(), json!(normalize_url(url)));
+            }
+            ui.label(small("启动文件（.bat / .cmd / .exe）", theme::TEXT_3));
+            ui.horizontal(|ui| {
+                let launch = self.comfy_launch.get_or_insert_with(|| text("comfyLaunch"));
+                let w = (ui.available_width() - 70.0).max(120.0);
+                if ui.add(egui::TextEdit::singleline(launch).hint_text("不选：用 WavePlug 的 ComfyUI 包").desired_width(w)).lost_focus() {
+                    changes.insert("comfyLaunch".into(), json!(launch.trim().trim_matches('"')));
+                }
+                if ui.button("选择…").clicked() {
+                    self.pick(Pick::Launcher);
+                }
+            });
+            let chosen = text("comfyLaunch");
+            let used = paths::comfy_launcher(&chosen);
+            ui.label(small(
+                if !chosen.trim().is_empty() { format!("启动：{chosen}") }
+                else if !used.is_empty() { format!("没有选启动文件：用 WavePlug 的 ComfyUI 包 {used}") }
+                else { format!("没有选启动文件，也没有 ComfyUI 包{}", paths::comfy_dir().map(|d| format!("（解压到 {}）", d.display())).unwrap_or_default()) },
+                theme::TEXT_3,
+            ));
+            ui.horizontal(|ui| {
+                let (state, color) = match st.comfy_up {
+                    Some(true) => ("ComfyUI：可以连接", theme::OK),
+                    Some(false) => ("ComfyUI：没有运行", theme::TEXT_3),
+                    None => ("ComfyUI：正在检查…", theme::TEXT_3),
+                };
+                ui.label(small(state, color));
+                let up = st.comfy_up == Some(true);
+                let label = if up { "重启" } else { "启动" };
+                if ui.add_enabled(!busy && !used.is_empty(), egui::Button::new(label)).on_hover_text("只能重启由 WavePlug 启动的 ComfyUI").clicked() {
+                    crate::comfy::manage(chosen.clone(), normalize_url(&text("comfyUrl")), flag("comfyCloseWithPhotoshop"), true, flag("comfyNoBrowser"), true, up);
+                    self.logger().put(format!("{} ComfyUI：{used}", if up { "重启" } else { "启动" }), theme::TEXT_2);
+                    self.last_refresh = None;
+                }
+            });
+            toggle(ui, &mut changes, "comfyAutoStartWithPhotoshop", flag("comfyAutoStartWithPhotoshop"), "随 Photoshop 启动 ComfyUI", "WavePlug 打开后，本机 ComfyUI 没在运行就启动它；已经在运行的直接连接");
+            toggle(ui, &mut changes, "comfyCloseWithPhotoshop", flag("comfyCloseWithPhotoshop"), "随 Photoshop 一同关闭 ComfyUI", "只关闭 WavePlug 自己启动的；开启时不显示终端");
+            toggle(ui, &mut changes, "comfyNoBrowser", flag("comfyNoBrowser"), "启动时不自动打开网页", "");
+        });
         card(ui, "外置框架", |ui| {
-            toggle(ui, &mut changes, "helperAutoStart", flag("helperAutoStart"), "随 Photoshop 启动", "Photoshop 打开 WavePlug 面板时自动启动本程序");
-            toggle(ui, &mut changes, "perfMonitor", flag("perfMonitor"), "在画布右下角显示性能监视", "CPU、内存、显卡、Photoshop 内存、暂存盘、ComfyUI 显存");
+            let (_, ai_on) = crate::server::connected();
+            ui.label(small(format!("运行中 · {}（就是本程序）· Illustrator {}", env!("CARGO_PKG_VERSION"), if ai_on { "已连接" } else { "未连接" }), theme::OK));
+            toggle(ui, &mut changes, "helperAutoStart", flag("helperAutoStart"), "随 Photoshop 启动外置框架", "Photoshop 打开 WavePlug 面板时自动启动本程序");
+            toggle(ui, &mut changes, "perfMonitor", flag("perfMonitor"), "在画布右下角显示性能监视", "CPU、内存、显卡、Photoshop 内存、暂存盘、ComfyUI 显存；只在 Photoshop 在前台时显示");
         });
         card(ui, "卡死保护", |ui| {
             toggle(ui, &mut changes, "hangGuard", flag("hangGuard"), "Photoshop 卡死时提示并备份恢复文件", "没有响应时弹出提示：等待、备份自动恢复文件或关闭 Photoshop");
             toggle(ui, &mut changes, "hangAutoBackup", flag("hangAutoBackup"), "发现卡死时立即备份", "不等点按钮就开始复制自动恢复文件");
         });
-        card(ui, "ComfyUI", |ui| {
-            let url = self.comfy_url.get_or_insert_with(|| s.get("comfyUrl").and_then(Value::as_str).unwrap_or("").to_string());
-            ui.label(small("地址", theme::TEXT_3));
-            if ui.add(egui::TextEdit::singleline(url).desired_width(f32::INFINITY)).lost_focus() {
-                changes.insert("comfyUrl".into(), json!(url.trim()));
+        card(ui, "排查问题", |ui| {
+            toggle(ui, &mut changes, "debugFiles", s.get("debugFiles").and_then(Value::as_bool).unwrap_or(false), "保存调试文件（图片较大，仅排查时打开）", "每次生成时把发送、返回的图片和提交的工作流存到 reports\\debug_*（从开发文件夹加载时）");
+            if ui.button("导出诊断信息").on_hover_text("日志、设置和 Photoshop 插件的诊断报告复制到桌面上的一个文件夹，发给开发者").clicked() {
+                self.export_diag();
             }
-            let launch = self.comfy_launch.get_or_insert_with(|| s.get("comfyLaunch").and_then(Value::as_str).unwrap_or("").to_string());
-            ui.label(small("启动文件（.bat / .cmd / .exe）", theme::TEXT_3));
-            if ui.add(egui::TextEdit::singleline(launch).desired_width(f32::INFINITY)).lost_focus() {
-                changes.insert("comfyLaunch".into(), json!(launch.trim().trim_matches('"')));
-            }
-            toggle(ui, &mut changes, "comfyAutoStartWithPhotoshop", flag("comfyAutoStartWithPhotoshop"), "随 Photoshop 启动 ComfyUI", "");
-            toggle(ui, &mut changes, "comfyCloseWithPhotoshop", flag("comfyCloseWithPhotoshop"), "Photoshop 退出时关闭 ComfyUI", "只关闭由 WavePlug 启动的那个");
-            toggle(ui, &mut changes, "comfyNoBrowser", flag("comfyNoBrowser"), "启动 ComfyUI 时不打开浏览器", "");
         });
-        ui.label(small("这些设置保存在 Photoshop 插件里，和插件「设置」页是同一份。", theme::TEXT_3));
+        if let Some(dev) = s.get("devLoad").and_then(Value::as_bool) {
+            card(ui, "开发者", |ui| {
+                toggle(ui, &mut changes, "devLoad", dev, "从开发文件夹加载代码", "开启时 Photoshop 插件运行源码 dist\\plugin 里的最新构建；关闭时运行插件自带的版本，和用户装到的一样");
+            });
+        }
+        if changes.contains_key("comfyUrl") {
+            self.comfy_url = None;
+        }
+        if changes.contains_key("comfyLaunch") {
+            self.comfy_launch = None;
+        }
         if !changes.is_empty() {
-            if let Ok(mut cur) = PLUGIN_SETTINGS.lock() {
-                if let Some(c) = cur.as_mut() {
-                    for (k, v) in &changes {
-                        c.insert(k.clone(), v.clone());
-                    }
-                }
-            }
-            if changes.contains_key("comfyUrl") {
-                self.comfy_url = None;
-            }
-            if changes.contains_key("comfyLaunch") {
-                self.comfy_launch = None;
-            }
-            crate::log::line(format!("app settings changed: {}", Value::Object(changes.clone())));
-            crate::server::send(&Event::AppSettingsSet { changes: Value::Object(changes) });
+            apply_plugin_changes(changes);
             self.last_refresh = None;
+        }
+    }
+
+    fn export_diag(&self) {
+        let log = self.logger();
+        match export_diagnostics(&self.cfg) {
+            Ok(p) => {
+                log.put(format!("诊断信息已复制到 {}", p.display()), theme::OK);
+                if PLUGIN_ONLINE.load(Ordering::SeqCst) {
+                    crate::server::send(&Event::PluginReport { folder: p.display().to_string() });
+                    log.put("Photoshop 插件的诊断报告也会写进这个文件夹".into(), theme::TEXT_2);
+                }
+                let _ = sys::open(&p);
+            }
+            Err(e) => log.put(format!("导出失败：{e}"), theme::ERR),
         }
     }
 
@@ -1055,15 +1201,8 @@ impl AppWindow {
                 if ui.button("打开数据文件夹").clicked() {
                     let _ = sys::open(&paths::data_root());
                 }
-                if ui.button("导出诊断信息").on_hover_text("把日志和设置复制到桌面上的一个文件夹，发给开发者").clicked() {
-                    let log = self.logger();
-                    match export_diagnostics(&self.cfg) {
-                        Ok(p) => {
-                            log.put(format!("诊断信息已复制到 {}", p.display()), theme::OK);
-                            let _ = sys::open(&p);
-                        }
-                        Err(e) => log.put(format!("导出失败：{e}"), theme::ERR),
-                    }
+                if ui.button("导出诊断信息").on_hover_text("日志、设置和 Photoshop 插件的诊断报告复制到桌面上的一个文件夹，发给开发者").clicked() {
+                    self.export_diag();
                 }
                 if ui.button("清理缓存").on_hover_text("删除拖拽导出和下载的临时文件").clicked() {
                     let dir = paths::data_root().join("cache");
@@ -1245,6 +1384,17 @@ fn primary(text: &str) -> egui::Button<'static> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn settings_work_without_the_panel() {
+        assert_eq!(normalize_url(" 127.0.0.1:8188/ "), "http://127.0.0.1:8188");
+        assert_eq!(normalize_url("https://x:1"), "https://x:1");
+        let d = default_settings();
+        assert_eq!(d.get("debugFiles"), Some(&json!(false)));
+        assert_eq!(d.get("comfyUrl"), Some(&json!("http://127.0.0.1:8188")));
+        assert_eq!(Tab::named("settings"), Tab::Settings);
+        assert_eq!(Tab::named("x"), Tab::Overview);
+    }
 
     #[test]
     fn the_icon_is_a_rounded_square_with_a_wave() {

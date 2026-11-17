@@ -32,6 +32,8 @@ export interface Services {
   launch?(path: string): Promise<string | null>;
   /** Ensures the native overlay helper is running; the helper then manages ComfyUI itself. */
   launchOverlay?(): Promise<string | null>;
+  /** Writes `text` (UTF-8) to a native path, replacing the file; false when it couldn't. */
+  writeTextAt?(nativePath: string, text: string): Promise<boolean>;
   /** present only in the development build: reloads the code from disk */
   devReload?(): void;
   /** where the loader took this build from (plugin/loader.js): the development folder or the

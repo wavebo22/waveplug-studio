@@ -140,6 +140,10 @@ fn on_command(c: Command) {
         crate::app::set_plugin_settings(settings);
         return;
     }
+    if let Command::OpenApp { tab } = c {
+        crate::app::open(Some(crate::app::Tab::named(&tab)));
+        return;
+    }
     if let Command::HangGuard { on, auto_backup, seconds, docs } = c {
         crate::hang::configure(on, auto_backup, seconds, docs);
         return;
@@ -472,7 +476,7 @@ impl Host {
                 Command::Monitor { .. } => {}    // monitor.rs, on its own thread
                 Command::HangGuard { .. } => {}  // hang.rs, on its own thread
                 Command::WebCatch { .. } => {}   // webdrop.rs, on its own thread
-                Command::AppSettings { .. } => {} // app.rs
+                Command::AppSettings { .. } | Command::OpenApp { .. } => {} // app.rs
                 Command::ExternalDragPrepare { .. }
                 | Command::ExternalDragReady { .. }
                 | Command::ExternalDragCancel { .. }

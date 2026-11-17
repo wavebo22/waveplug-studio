@@ -188,6 +188,12 @@ pub enum Command {
     AppSettings {
         settings: Map<String, Value>,
     },
+    /// The panel's settings button: open the app window on `tab` ("settings": 功能设置, where all
+    /// the settings live now).
+    OpenApp {
+        #[serde(default)]
+        tab: String,
+    },
     /// 从网页拖入 (webdrop.rs): a drag without files entered the WaveLayer panel — put the catcher
     /// over the drop area (`left`/`top`/`width`/`height`, CSS px of the panel) so that the point
     /// `clientX`/`clientY` is under the cursor; images go into `folder`. `on: false` takes it away.
@@ -279,6 +285,10 @@ pub enum Event {
     /// 功能设置 changed in the app window: the plugin applies and saves `changes` (its settings keys).
     AppSettingsSet {
         changes: Value,
+    },
+    /// 导出诊断信息 in the app window: the plugin writes its own report into `folder`.
+    PluginReport {
+        folder: String,
     },
     /// 从网页拖入: the drag left the catcher (or never reached it): the plugin hides its overlay.
     WebDropLeave,
