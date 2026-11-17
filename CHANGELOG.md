@@ -1,5 +1,10 @@
 # 更新记录
 
+## 1.3.2（未发布）
+- 下载更新更稳：网络不好时自动重试；Windows 连不上证书吊销服务器时不再直接失败；curl 不行时改用 PowerShell 下载。
+- GitHub 下载不了时，按顺序换下载节点（GitHub 加速代理，内置 12 个，来自 github.akams.cn；「安装与更新 › 更新 › 下载节点」里可以改）。每个文件都要和 GitHub 公布的 SHA-256 一致才会安装，节点换不了文件；拿不到 GitHub 公布的校验值时不用节点。
+- `WavePlug.exe --download-update [--nodes-only]`：只下载并校验最新安装包，不安装（测试用）。
+
 ## 1.3.1（2026-11-17）
 - Photoshop 插件的安装和卸载不再需要 Adobe 的安装工具（UPIA）或 Creative Cloud：WavePlug 直接把插件放进 Adobe 的插件文件夹并登记到 Adobe 的插件列表，和 Adobe 安装工具的做法一样。Windows 会请求一次管理员权限。
 - 卸载旧开发版插件同样不需要 UPIA。

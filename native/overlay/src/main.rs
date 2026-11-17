@@ -37,6 +37,9 @@ mod win;
 
 fn main() {
     let args: Vec<String> = std::env::args().collect();
+    if args.iter().any(|a| a == "--download-update") {
+        std::process::exit(download_cli(&args));
+    }
     if let Some(i) = args.iter().position(|a| a == "--install-ps" || a == "--remove-ps") {
         std::process::exit(plugin_cli(&args, i));
     }
@@ -45,6 +48,40 @@ fn main() {
         return;
     }
     host::run();
+}
+
+/// `--download-update [--nodes-only]`: downloads the newest installer from the default source the
+/// way 下载并安装 does (`--nodes-only` skips GitHub to test the download nodes), checks it, keeps it
+/// in the cache and installs nothing. Log in <data>\logs\setup.log; exit code 0 when it worked.
+fn download_cli(args: &[String]) -> i32 {
+    use setup::{install, update};
+    let file = paths::logs_dir().join("setup.log");
+    let _ = std::fs::create_dir_all(paths::logs_dir());
+    let log = |t: String| {
+        use std::io::Write;
+        if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(&file) {
+            let _ = writeln!(f, "{t}");
+        }
+    };
+    log("── 下载更新（命令行测试） ──".into());
+    let cfg = install::Config::load();
+    let source = if cfg.update_url.trim().is_empty() { update::DEFAULT_SOURCE.to_string() } else { cfg.update_url.clone() };
+    let result = update::latest(&source).and_then(|l| {
+        log(format!("最新版本 {}，SHA-256 {}", l.version, l.sha256.as_deref().unwrap_or("（没有公布）")));
+        let to = paths::cache_dir("downloads").join(format!("WavePlug_Setup_{}.exe", l.version));
+        let from = update::download_checked(&l, &to, &update::mirror_list(&cfg.mirrors), !args.iter().any(|a| a == "--nodes-only"), &log)?;
+        Ok(format!("{}（来自{from}）", to.display()))
+    });
+    match result {
+        Ok(m) => {
+            log(format!("完成：{m}"));
+            0
+        }
+        Err(e) => {
+            log(format!("失败：{e}"));
+            1
+        }
+    }
 }
 
 /// `--install-ps [installer or WavePlug.pak]` / `--remove-ps`: the Photoshop plugin without the

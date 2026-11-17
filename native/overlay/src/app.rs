@@ -528,10 +528,11 @@ impl AppWindow {
 
     fn download_update(&self, l: Latest) {
         let dir = paths::install_dir().map(|d| d.display().to_string()).unwrap_or_default();
+        let nodes = update::mirror_list(&self.cfg.mirrors);
         self.task("下载更新", move |log| {
             let to = paths::cache_dir("downloads").join(format!("WavePlug_Setup_{}.exe", l.version));
-            log(format!("下载 {} …", l.url));
-            update::download(&l.url, &to)?;
+            let from = update::download_checked(&l, &to, &nodes, true, log)?;
+            log(format!("已下载（来自{from}）"));
             if payload::read_exe(&to)?.is_none() {
                 return Err("下载的文件不是 WavePlug 安装程序".into());
             }
@@ -862,6 +863,14 @@ impl AppWindow {
                 }
                 if ui.add_enabled(busy.is_none(), egui::Button::new("用安装程序更新…")).on_hover_text("别人发给你的新版 WavePlug_Setup_版本.exe").clicked() {
                     self.pick(Pick::Installer);
+                }
+            });
+            egui::CollapsingHeader::new(small("下载节点（GitHub 下载不了时用）", theme::TEXT_2)).id_salt("mirrors").show(ui, |ui| {
+                ui.label(small(format!("直接从 GitHub 下载失败时，按顺序换这些节点下载。每个文件都要和 GitHub 公布的 SHA-256 一致才会安装，节点换不了文件。每行一个，留空用内置的 {} 个（来自 github.akams.cn）。", update::DEFAULT_MIRRORS.len()), theme::TEXT_3));
+                let hint = update::DEFAULT_MIRRORS.join("\n");
+                let r = ui.add(egui::TextEdit::multiline(&mut self.cfg.mirrors).hint_text(hint).desired_rows(4).desired_width(f32::INFINITY));
+                if r.lost_focus() {
+                    self.cfg.save();
                 }
             });
         });

@@ -22,6 +22,53 @@ pub struct Latest {
     pub url: String,
     #[serde(default)]
     pub notes: String,
+    /// the installer's SHA-256 (lowercase hex) as GitHub publishes it: a copy fetched through a
+    /// download node must match it. None: no node is used (nothing to check a copy against).
+    #[serde(default)]
+    pub sha256: Option<String>,
+}
+
+/// Download nodes (GitHub proxies volunteers run, from github.akams.cn): used only when GitHub
+/// itself can't be reached, and only for a file whose SHA-256 GitHub published, so a node can't
+/// slip in anything else. `https://<node>/https://github.com/…`. The user can set their own list.
+pub const DEFAULT_MIRRORS: &[&str] = &[
+    "gh.dpik.top",
+    "ghfast.top",
+    "ghproxy.net",
+    "gh-proxy.com",
+    "cdn.gh-proxy.com",
+    "github.tbap.top",
+    "ghfile.geekertao.top",
+    "ghpr.cc",
+    "gh.ddlc.top",
+    "gitproxy.click",
+    "gh.monlor.com",
+    "fastgit.cc",
+];
+
+/// The node list: the user's (one per line, or separated by spaces / commas / semicolons; # starts a
+/// comment), else DEFAULT_MIRRORS.
+pub fn mirror_list(user: &str) -> Vec<String> {
+    let own: Vec<String> = user
+        .lines()
+        .map(|l| l.split('#').next().unwrap_or(""))
+        .flat_map(|l| l.split([' ', ',', ';', '\t']))
+        .map(|n| n.trim().trim_start_matches("https://").trim_start_matches("http://").trim_end_matches('/').to_string())
+        .filter(|n| !n.is_empty())
+        .collect();
+    if own.is_empty() { DEFAULT_MIRRORS.iter().map(|s| s.to_string()).collect() } else { own }
+}
+
+/// `url` fetched through `node`; None for an address a GitHub proxy doesn't serve.
+pub fn mirror_url(node: &str, url: &str) -> Option<String> {
+    let github = ["https://github.com/", "https://objects.githubusercontent.com/", "https://raw.githubusercontent.com/"];
+    github.iter().any(|g| url.starts_with(g)).then(|| format!("https://{}/{url}", node.trim_end_matches('/')))
+}
+
+/// "sha256:ABC…" (GitHub's digest field) → "abc…"; None for anything else.
+pub fn parse_digest(d: &str) -> Option<String> {
+    let hex = d.trim().strip_prefix("sha256:")?.to_lowercase();
+    (hex.len() == 64 && hex.chars().all(|c| c.is_ascii_hexdigit())).then_some(hex)
 }
 
 pub fn parse_latest(text: &str, from: &str) -> Result<Latest, String> {
@@ -69,16 +116,16 @@ pub fn parse_github_release(text: &str) -> Result<Latest, String> {
     let tag = v.get("tag_name").and_then(|t| t.as_str()).ok_or("GitHub 的回答里没有版本号")?;
     let version = tag.trim().trim_start_matches(['v', 'V']).to_string();
     let notes = v.get("body").and_then(|b| b.as_str()).unwrap_or("").trim().to_string();
-    let url = v
+    let asset = v
         .get("assets")
         .and_then(|a| a.as_array())
         .into_iter()
         .flatten()
         .find(|a| a.get("name").and_then(|n| n.as_str()).is_some_and(|n| n.starts_with("WavePlug_Setup") && n.to_lowercase().ends_with(".exe")))
-        .and_then(|a| a.get("browser_download_url").and_then(|u| u.as_str()))
-        .ok_or_else(|| format!("GitHub 上的 {tag} 没有附带 WavePlug_Setup_*.exe"))?
-        .to_string();
-    Ok(Latest { version, url, notes })
+        .ok_or_else(|| format!("GitHub 上的 {tag} 没有附带 WavePlug_Setup_*.exe"))?;
+    let url = asset.get("browser_download_url").and_then(|u| u.as_str()).ok_or("GitHub 的回答里没有下载地址")?.to_string();
+    let sha256 = asset.get("digest").and_then(|d| d.as_str()).and_then(parse_digest);
+    Ok(Latest { version, url, notes, sha256 })
 }
 
 /// The newest version at the update source: a GitHub repository's latest release, or latest.json.
@@ -183,6 +230,63 @@ pub fn fetch_text(url: &str) -> Result<String, String> {
     }
 }
 
+/// The file's SHA-256, lowercase hex (Windows' own Get-FileHash; shasum elsewhere).
+pub fn file_sha256(p: &Path) -> Result<String, String> {
+    let path = p.to_string_lossy().to_string();
+    let (code, out) = if cfg!(windows) {
+        sys::run("powershell.exe", &["-NoProfile", "-NonInteractive", "-Command", &format!("(Get-FileHash -Algorithm SHA256 -LiteralPath '{}').Hash", path.replace('\'', "''"))])?
+    } else {
+        sys::run("shasum", &["-a", "256", &path])?
+    };
+    let hex = out.split_whitespace().next().unwrap_or("").to_lowercase();
+    if code != 0 || hex.len() != 64 {
+        return Err(format!("算不出 {} 的校验值：{}", p.display(), out.trim()));
+    }
+    Ok(hex)
+}
+
+/// The installer of `l` at `to`: from GitHub, else through the download nodes, a node's copy kept
+/// only when its SHA-256 is the one GitHub published. Returns where it came from. `direct`: try
+/// GitHub first (false only for testing the nodes).
+pub fn download_checked(l: &Latest, to: &Path, nodes: &[String], direct: bool, log: &dyn Fn(String)) -> Result<String, String> {
+    let ok = |p: &Path| -> Result<bool, String> {
+        match &l.sha256 {
+            Some(want) => Ok(&file_sha256(p)? == want),
+            None => Ok(true),
+        }
+    };
+    let direct = if !direct {
+        "跳过了 GitHub（测试下载节点）".to_string()
+    } else {
+        log(format!("下载 {} …", l.url));
+        match download(&l.url, to) {
+            Ok(()) if ok(to)? => return Ok("GitHub".into()),
+            Ok(()) => "下载的文件和 GitHub 公布的校验值不一致".to_string(),
+            Err(e) => e,
+        }
+    };
+    let _ = std::fs::remove_file(to);
+    let Some(want) = &l.sha256 else {
+        return Err(direct);
+    };
+    log(format!("直接下载不成功（{direct}），改用下载节点（每个文件都核对 GitHub 公布的 SHA-256：{}…）", &want[..12]));
+    for node in nodes {
+        let Some(url) = mirror_url(node, &l.url) else { break };
+        let (code, out) = curl(&["-f", "--max-time", "600", "-o", &to.to_string_lossy(), &url])?;
+        if code != 0 {
+            log(format!("  {node}：连不上（curl {code}）{}", out.lines().last().map(|s| format!(" {}", s.trim())).unwrap_or_default()));
+            continue;
+        }
+        if ok(to)? {
+            log(format!("  {node}：下载完成，校验值和 GitHub 一致"));
+            return Ok(format!("下载节点 {node}"));
+        }
+        log(format!("  {node}：文件和 GitHub 公布的不一致，已丢弃"));
+        let _ = std::fs::remove_file(to);
+    }
+    Err(format!("GitHub 和 {} 个下载节点都没能下载（{direct}）。可以在「下载节点」里换一批再试", nodes.len()))
+}
+
 /// Puts the file at `url` at `to`.
 pub fn download(url: &str, to: &Path) -> Result<(), String> {
     if let Some(p) = to.parent() {
@@ -233,6 +337,18 @@ mod tests {
     }
 
     #[test]
+    fn download_nodes() {
+        assert_eq!(mirror_list("").len(), DEFAULT_MIRRORS.len());
+        assert_eq!(mirror_list(" https://a.example/ \nb.example, c.example # mine\n# off.example"), vec!["a.example", "b.example", "c.example"]);
+        let u = "https://github.com/a/b/releases/download/v1/WavePlug_Setup_1.exe";
+        assert_eq!(mirror_url("gh.dpik.top/", u).as_deref(), Some("https://gh.dpik.top/https://github.com/a/b/releases/download/v1/WavePlug_Setup_1.exe"));
+        assert_eq!(mirror_url("gh.dpik.top", "https://example.com/x.exe"), None);
+        assert_eq!(parse_digest("sha256:2E8F442241AB10FB2E62DBDD25B5B4BBA02ED5B41EED928A2EAD722C9FDB9CA6").as_deref(), Some("2e8f442241ab10fb2e62dbdd25b5b4bba02ed5b41eed928a2ead722c9fdb9ca6"));
+        assert_eq!(parse_digest("md5:abc"), None);
+        assert_eq!(parse_digest("sha256:xyz"), None);
+    }
+
+    #[test]
     fn github_sources() {
         assert_eq!(github_repo("wave/waveplug").as_deref(), Some("wave/waveplug"));
         assert_eq!(github_repo(" https://github.com/wave/waveplug.git/ ").as_deref(), Some("wave/waveplug"));
@@ -249,6 +365,9 @@ mod tests {
         let l = parse_github_release(text).unwrap();
         assert_eq!((l.version.as_str(), l.notes.as_str()), ("1.3.1", "修了安装"));
         assert!(l.url.ends_with("WavePlug_Setup_1.3.1.exe"));
+        assert_eq!(l.sha256, None);
+        let with = r#"{"tag_name":"v1.3.1","assets":[{"name":"WavePlug_Setup_1.3.1.exe","browser_download_url":"https://github.com/x","digest":"sha256:2e8f442241ab10fb2e62dbdd25b5b4bba02ed5b41eed928a2ead722c9fdb9ca6"}]}"#;
+        assert_eq!(parse_github_release(with).unwrap().sha256.as_deref(), Some("2e8f442241ab10fb2e62dbdd25b5b4bba02ed5b41eed928a2ead722c9fdb9ca6"));
         assert!(parse_github_release(r#"{"tag_name":"v2","assets":[]}"#).is_err());
     }
 

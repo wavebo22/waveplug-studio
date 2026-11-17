@@ -30,6 +30,8 @@ pub struct Config {
     pub upia: String,
     /// latest.json of the published version (scripts/package_setup.mjs writes one)
     pub update_url: String,
+    /// download nodes for when GitHub can't be reached (update::mirror_list; empty: the defaults)
+    pub mirrors: String,
     /// the studio source folder (developer): 从源码更新 / 生成安装包
     pub dev_source: String,
     /// WavePlug keeps running in the tray after Photoshop closes
