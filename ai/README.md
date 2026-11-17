@@ -7,7 +7,7 @@ WavePlug 的 Illustrator 版，第一个面板是 **WaveLayer**：代替 Illustr
 **WavePlug.exe** 是一个程序：外置框架（外置面板、拖拽卡片、性能监视、卡死保护、ComfyUI 管理、两边面板的连接、从网页拖入）加上主窗口。平时在右下角托盘里，点托盘图标、开始菜单或桌面的「WavePlug」打开主窗口：
 
 - **总览**：Photoshop / Illustrator 是否在运行、插件和面板装了哪个版本、是否已连上本程序、安装位置、ComfyUI 能否连接。
-- **安装与更新**：安装 / 更新 / 卸载 Photoshop 插件和 Illustrator 面板（从安装文件夹里的 `WavePlug.pak`）；检查更新（`latest.json`）、「用安装程序更新…」；「卸载 WavePlug」删除整个程序；开发者区（从源码更新、从源码重新安装、生成安装包、发布到 GitHub、AI 面板用开发版）。更新来源可填 GitHub 仓库 `owner/仓库名`（`setup/update.rs`：`github_repo`、`latest` 读 `releases/latest`，找 `WavePlug_Setup_*.exe` 附件）或 latest.json；窗口每次打开自动检查一次。默认来源 `update::DEFAULT_SOURCE`（现在为空）。
+- **安装与更新**：安装 / 更新 / 卸载 Photoshop 插件和 Illustrator 面板（从安装文件夹里的 `WavePlug.pak`）；检查更新（`latest.json`）、「用安装程序更新…」；「卸载 WavePlug」删除整个程序；开发者区（从源码更新、从源码重新安装、生成安装包、发布到 GitHub、AI 面板用开发版）。更新来源可填 GitHub 仓库 `owner/仓库名`（`setup/update.rs`：`github_repo`、`latest` 读 `releases/latest`，找 `WavePlug_Setup_*.exe` 附件）或 latest.json；窗口每次打开自动检查一次。默认来源 `update::DEFAULT_SOURCE` = 公开仓库 `wavebo22/waveplug-studio`。
 - **功能设置**：随 Photoshop 启动、性能监视、卡死保护、ComfyUI 地址 / 启动文件 / 自动启动等。和 Photoshop 插件「设置」页是同一份（插件连上后才能改），改了插件马上生效。另有「关闭 Photoshop 后继续在托盘运行」。
 - **帮助与日志**：各部分说明、打开日志 / 数据文件夹、导出诊断信息（复制到桌面）、清理缓存。
 
