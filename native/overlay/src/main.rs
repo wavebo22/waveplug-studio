@@ -15,6 +15,7 @@ mod anim;
 mod app;
 mod host;
 mod comfy;
+mod devgit;
 mod drag;
 mod drag_target;
 mod frame;

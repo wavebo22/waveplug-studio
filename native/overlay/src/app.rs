@@ -20,6 +20,7 @@ use eframe::egui::{self, CornerRadius, Frame, Margin, RichText, Stroke};
 use serde_json::{json, Map, Value};
 
 use crate::panel::theme;
+use crate::devgit::{self, Git};
 use crate::paths;
 use crate::protocol::Event;
 use crate::setup::detect::{self, App, Found};
@@ -174,6 +175,10 @@ struct Shared {
     picked: Option<(Pick, PathBuf)>,
     /// removed: quit once the log has been seen for a moment
     removed: Option<Instant>,
+    /// the source folder's GitHub connection (devgit.rs); asked again after every task
+    git: Git,
+    git_checking: bool,
+    git_stale: bool,
 }
 
 #[derive(Clone)]
@@ -224,6 +229,7 @@ pub struct AppWindow {
     /// the update source has been asked once since the window opened
     auto_checked: bool,
     confirm_publish: bool,
+    last_git: Option<Instant>,
 }
 
 fn pack_path() -> Option<PathBuf> {
@@ -284,6 +290,7 @@ impl AppWindow {
             comfy_launch: None,
             auto_checked: false,
             confirm_publish: false,
+            last_git: None,
         }
     }
 
@@ -311,6 +318,7 @@ impl AppWindow {
             let mut s = log.shared.lock().unwrap();
             s.busy = None;
             s.status.read = false;
+            s.git_stale = true;
             drop(s);
             log.ctx.request_repaint();
         });
@@ -538,12 +546,48 @@ impl AppWindow {
         });
     }
 
+    /// The source folder's GitHub state, asked in the background: when the window opens, every
+    /// 2 minutes, and after each task.
+    fn check_git(&mut self) {
+        let dir = PathBuf::from(self.cfg.dev_source.trim());
+        if self.cfg.dev_source.trim().is_empty() {
+            return;
+        }
+        {
+            let mut s = self.shared.lock().unwrap();
+            let due = self.last_git.map_or(true, |t| t.elapsed() > Duration::from_secs(120)) || s.git_stale;
+            if !due || s.git_checking || s.busy.is_some() {
+                return;
+            }
+            s.git_checking = true;
+            s.git_stale = false;
+        }
+        self.last_git = Some(Instant::now());
+        let (shared, ctx) = (self.shared.clone(), self.ctx.clone());
+        std::thread::spawn(move || {
+            let g = devgit::check(&dir);
+            let mut s = shared.lock().unwrap();
+            s.git = g;
+            s.git_checking = false;
+            drop(s);
+            ctx.request_repaint();
+        });
+    }
+
+    fn git_login(&self) {
+        let dir = PathBuf::from(self.cfg.dev_source.trim());
+        self.task("登录 GitHub", move |log| devgit::login(&dir, log));
+    }
+
     /// Builds the installer from the source (release.mjs) and runs it as an update of this
     /// folder: the plugin, the Illustrator panel and this program, all from the source.
     fn dev_reinstall(&self) {
         let dir = PathBuf::from(self.cfg.dev_source.trim());
         let target = paths::install_dir().map(|d| d.display().to_string()).unwrap_or_default();
         self.task("从源码重新安装", move |log| {
+            if dir.join(".git").exists() {
+                log(devgit::pull(&dir, log)?);
+            }
             let setup = dev_build_setup(&dir, log)?;
             if target.is_empty() {
                 sys::launch(&setup, &[])?;
@@ -606,6 +650,7 @@ impl AppWindow {
         self.take_picked();
         self.refresh();
         self.auto_check();
+        self.check_git();
         if let Some(t) = self.shared.lock().unwrap().removed {
             if t.elapsed() > Duration::from_secs(3) {
                 quit();
@@ -850,9 +895,31 @@ impl AppWindow {
                 }
             });
             let ok = busy.is_none() && !self.cfg.dev_source.is_empty();
+            // GitHub: where every change made on the Mac arrives
+            let git = self.shared.lock().unwrap().git.clone();
+            ui.horizontal_wrapped(|ui| {
+                let (text, color) = match &git {
+                    Git::Unknown => ("GitHub：正在检查…".to_string(), theme::TEXT_3),
+                    Git::NoRepo(why) => (format!("GitHub：{why}"), theme::TEXT_3),
+                    Git::SignedOut => ("GitHub：这台电脑还没登录（仓库是私有的，登录一次就行）".to_string(), theme::WARN),
+                    Git::Online { behind: 0, .. } => ("GitHub：已连接，代码是最新的".to_string(), theme::OK),
+                    Git::Online { behind, latest } => (format!("GitHub：有 {behind} 个新改动，最新：{latest}"), theme::ACCENT_HI),
+                    Git::Error(e) => (format!("GitHub：连不上（{e}）"), theme::WARN),
+                };
+                ui.label(small(text, color));
+                if matches!(git, Git::SignedOut) && ui.add_enabled(ok, primary("登录 GitHub")).clicked() {
+                    self.git_login();
+                }
+                if matches!(git, Git::Online { behind, .. } if behind > 0) && ui.add_enabled(ok, primary("取最新代码并更新")).on_hover_text("从 GitHub 取改动，再编译、构建（和「从源码更新」一样）").clicked() {
+                    self.dev_run("从源码更新", "node", &["scripts/update.mjs"]);
+                }
+                if !matches!(git, Git::NoRepo(_)) && ui.small_button("刷新").clicked() {
+                    self.shared.lock().unwrap().git_stale = true;
+                }
+            });
             ui.label(small("改了代码点「从源码更新」：打开着的面板 2 秒内载入新版本。改了插件 manifest、或要把程序和插件都换成源码里的版本时点「从源码重新安装」。", theme::TEXT_3));
             ui.horizontal_wrapped(|ui| {
-                if ui.add_enabled(ok, egui::Button::new("从源码更新")).on_hover_text("编译改过的程序、构建插件和 Illustrator 面板（不用再双击 update.cmd）").clicked() {
+                if ui.add_enabled(ok, egui::Button::new("从源码更新")).on_hover_text("先从 GitHub 取最新代码，再编译改过的程序、构建插件和 Illustrator 面板（不用再双击 update.cmd）").clicked() {
                     self.dev_run("从源码更新", "node", &["scripts/update.mjs"]);
                 }
                 if ui.add_enabled(ok, egui::Button::new("从源码重新安装")).on_hover_text("生成安装包，再用它更新本机的 WavePlug、Photoshop 插件和 Illustrator 面板（不用再双击 release.cmd）").clicked() {

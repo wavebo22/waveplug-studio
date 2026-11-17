@@ -57,6 +57,20 @@ pub fn run(program: &str, args: &[&str]) -> Result<(i32, String), String> {
     Ok((out.status.code().unwrap_or(-1), text))
 }
 
+/// Runs a program without a window in `dir` with extra environment variables: its exit code and
+/// everything it printed.
+pub fn run_in(program: &str, args: &[&str], dir: &Path, env: &[(&str, &str)]) -> Result<(i32, String), String> {
+    let mut cmd = Command::new(program);
+    hidden(&mut cmd).args(args).current_dir(dir).stdin(Stdio::null());
+    for (k, v) in env {
+        cmd.env(k, v);
+    }
+    let out = cmd.output().map_err(|e| format!("{program} 没能运行：{e}"))?;
+    let mut text = decode(&out.stdout);
+    text.push_str(&decode(&out.stderr));
+    Ok((out.status.code().unwrap_or(-1), text))
+}
+
 /// Runs a program without a window in `dir`, handing each printed line to `line` as it comes.
 pub fn run_stream(program: &str, args: &[&str], dir: &Path, line: &dyn Fn(String)) -> Result<i32, String> {
     let mut child = hidden(&mut Command::new(program))
