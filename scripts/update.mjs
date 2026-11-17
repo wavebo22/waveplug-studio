@@ -60,7 +60,16 @@ const remote = existsSync(".git") ? git("remote", "get-url", "origin") : null;
 if (!remote || remote.status !== 0) console.log("  不是从 GitHub 克隆的文件夹，跳过");
 else {
   const before = git("rev-parse", "HEAD").stdout.trim();
-  // inherit: Git's sign-in window and its messages reach the user
+  // the repository is private: without a saved GitHub login, sign in once through the browser
+  // (Git Credential Manager keeps it in Windows' credential store) before pulling
+  const env = { ...process.env, GIT_TERMINAL_PROMPT: "0", GCM_INTERACTIVE: "never" };
+  const reach = () => spawnSync("git", ["ls-remote", "--heads", "origin"], { encoding: "utf8", env });
+  if (win && reach().status !== 0) {
+    console.log("  还没登录 GitHub：正在打开浏览器登录（只需要一次），在网页里点 Authorize…");
+    spawnSync("git", ["credential-manager", "github", "login", "--browser"], { stdio: "inherit" });
+    if (reach().status !== 0) console.log("  还是连不上 GitHub：" + (reach().stderr || "").trim().split("\n").pop());
+  }
+  // inherit: Git's messages reach the user
   const r = spawnSync("git", ["pull", "--ff-only"], { stdio: "inherit" });
   if (r.error) console.log("  没找到 git：安装 Git for Windows（https://git-scm.com），跳过");
   else if (r.status !== 0) {
