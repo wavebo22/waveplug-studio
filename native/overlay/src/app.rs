@@ -866,7 +866,7 @@ impl AppWindow {
                 }
             });
             egui::CollapsingHeader::new(small("下载节点（GitHub 下载不了时用）", theme::TEXT_2)).id_salt("mirrors").show(ui, |ui| {
-                ui.label(small(format!("直接从 GitHub 下载失败时，按顺序换这些节点下载。每个文件都要和 GitHub 公布的 SHA-256 一致才会安装，节点换不了文件。每行一个，留空用内置的 {} 个（来自 github.akams.cn）。", update::DEFAULT_MIRRORS.len()), theme::TEXT_3));
+                ui.label(small(format!("直接从 GitHub 下载失败时，按顺序换这些节点下载。每个文件都要和 GitHub 公布的 SHA-256 一致才会安装，节点换不了文件。每行一个，留空用内置的 {} 个（先 gh-proxy.com、ghfast.top）。", update::DEFAULT_MIRRORS.len()), theme::TEXT_3));
                 let hint = update::DEFAULT_MIRRORS.join("\n");
                 let r = ui.add(egui::TextEdit::multiline(&mut self.cfg.mirrors).hint_text(hint).desired_rows(4).desired_width(f32::INFINITY));
                 if r.lost_focus() {

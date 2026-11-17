@@ -28,15 +28,17 @@ pub struct Latest {
     pub sha256: Option<String>,
 }
 
-/// Download nodes (GitHub proxies volunteers run, from github.akams.cn): used only when GitHub
-/// itself can't be reached, and only for a file whose SHA-256 GitHub published, so a node can't
-/// slip in anything else. `https://<node>/https://github.com/…`. The user can set their own list.
+/// Download nodes (GitHub proxies): used only when GitHub itself can't be reached, and only for a
+/// file whose SHA-256 GitHub published, so a node can't slip in anything else.
+/// `https://<node>/https://github.com/…`. The user can set their own list. First the two that
+/// mirrors.git-zh.com uses for release downloads (both worked from mainpc while GitHub reset the
+/// connection); then volunteers' nodes from github.akams.cn.
 pub const DEFAULT_MIRRORS: &[&str] = &[
-    "gh.dpik.top",
-    "ghfast.top",
-    "ghproxy.net",
     "gh-proxy.com",
+    "ghfast.top",
+    "gh.dpik.top",
     "cdn.gh-proxy.com",
+    "ghproxy.net",
     "github.tbap.top",
     "ghfile.geekertao.top",
     "ghpr.cc",
