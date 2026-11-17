@@ -93,7 +93,7 @@ export interface Profile {
   createdAt: number;
   updatedAt: number;
   /** Where the workflow came from; ComfyUI-saved workflows are re-read before every run. */
-  source?: { kind: "comfy"; path: string } | { kind: "file" };
+  source?: { kind: "comfy"; path: string } | { kind: "file" } | { kind: "builtin" };
   api: ApiGraph;
   bindings: Binding[];
   options: {

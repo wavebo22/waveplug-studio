@@ -4,6 +4,7 @@
 import { type Comfy, ComfyError } from "../core/comfy/client.ts";
 import type { Rect } from "../core/image/region.ts";
 import { asApiGraph } from "../core/workflow/api.ts";
+import { missingBuiltins } from "../core/workflow/builtin.ts";
 import { MAX_SEED, randomSeed } from "../core/workflow/inject.ts";
 import { normalizeVariationCount, stepVariationCountByWheel } from "../core/workflow/variationCount.ts";
 import { type Binding, type Profile, type TaskType, ROLE_LABEL, carryOver, inpaintLike, newProfile, validateProfile } from "../core/workflow/profile.ts";
@@ -89,6 +90,15 @@ export function mountApp(root: HTMLElement, svc: Services) {
     localStorage.setItem(DEV_LIFECYCLE_KEY, "1");
   }
   let profiles: Profile[] = store.profiles();
+  // a panel that never had workflows starts with WavePlug's built-in ones (once: deleting them
+  // later sticks; 导入工作流 › WavePlug 内置工作流 brings them back)
+  const BUILTIN_SEEDED_KEY = "wp.builtinsSeeded.v1";
+  if (!profiles.length && localStorage.getItem(BUILTIN_SEEDED_KEY) !== "1") {
+    profiles = missingBuiltins(profiles);
+    store.saveProfiles(profiles);
+    log("info", "built-in workflows added", profiles.length);
+  }
+  try { localStorage.setItem(BUILTIN_SEEDED_KEY, "1"); } catch { /* storage off */ }
   // Each mode (局部重绘 / 融图 / 扩图 / 文生图 / 放大) has its own current workflow.
   const modeOf = (p: Profile): TaskType => p.taskType ?? "inpaint";
   // 融图 workflows imported under 局部重绘 before the 融图 mode existed move over
@@ -529,7 +539,7 @@ export function mountApp(root: HTMLElement, svc: Services) {
   }
 
   function blockedReason(text = prompt.value): string | null {
-    if (!profile) return mode === "outpaint" ? "请先导入扩图工作流（含「外补画板」节点）" : mode === "txt2img" ? "请先导入文生图工作流" : mode === "upscale" ? "请先导入放大工作流" : mode === "blend" ? "请先导入融图工作流（含融图 LoRA）" : mode === "extract" ? "请先导入抠图工作流（如心宝强化抠图）" : "请先导入工作流";
+    if (!profile) return (mode === "outpaint" ? "请先导入扩图工作流（含「外补画板」节点）" : mode === "txt2img" ? "请先导入文生图工作流" : mode === "upscale" ? "请先导入放大工作流" : mode === "blend" ? "请先导入融图工作流（含融图 LoRA）" : mode === "extract" ? "请先导入抠图工作流（如心宝强化抠图）" : "请先导入工作流") + "。「导入工作流」里有 WavePlug 内置工作流";
     const problems = validateProfile(profile);
     if (problems.length) return "工作流需要校准：" + problems[0];
     if (conn.state !== "ok") return "未连接 ComfyUI";
@@ -1057,7 +1067,7 @@ export function mountApp(root: HTMLElement, svc: Services) {
           return h("button", { class: "menu-item flow-item" + (p.id === profile?.id ? " on" : ""), onClick: () => { selectProfile(p.id); sheet.remove(); } },
             icon(p.id === profile?.id ? "check" : "flow"),
             h("span", { class: "grow" }, h("b", null, p.name), h("span", { class: "muted small block" },
-              (modeOf(p) === "outpaint" ? "扩图 · " : modeOf(p) === "txt2img" ? "文生图 · " : modeOf(p) === "upscale" ? "放大 · " : modeOf(p) === "blend" ? "融图 · " : modeOf(p) === "extract" ? "抠图 · " : "局部重绘 · ") + (p.source?.kind === "comfy" ? "ComfyUI 已保存的工作流" : "API JSON") + (bad ? " · 需要校准" : ""))));
+              (modeOf(p) === "outpaint" ? "扩图 · " : modeOf(p) === "txt2img" ? "文生图 · " : modeOf(p) === "upscale" ? "放大 · " : modeOf(p) === "blend" ? "融图 · " : modeOf(p) === "extract" ? "抠图 · " : "局部重绘 · ") + (p.source?.kind === "comfy" ? "ComfyUI 已保存的工作流" : p.source?.kind === "builtin" ? "WavePlug 内置" : "JSON 文件") + (bad ? " · 需要校准" : ""))));
         })),
       h("div", { class: "sheet-foot" },
         profile ? h("button", { class: "btn", onClick: () => { sheet.remove(); void calibrate(); } }, "校准当前") : null,
@@ -1070,18 +1080,42 @@ export function mountApp(root: HTMLElement, svc: Services) {
       h("div", { class: "sheet-head" }, h("span", { class: "sheet-title" }, "导入工作流"),
         h("button", { class: "icon-btn", onClick: () => menu.remove() }, icon("close"))),
       h("div", { class: "sheet-body" },
+        h("button", { class: "menu-item", onClick: () => { menu.remove(); addBuiltins(); } },
+          icon("flow"), h("span", null, h("b", null, "WavePlug 内置工作流"), h("span", { class: "muted small block" }, "局部重绘、扩图、文生图、放大、融图、抠图，已绑定好，配合 WavePlug 的 ComfyUI 包"))),
         h("button", { class: "menu-item", onClick: async () => { menu.remove(); await importFromFile(); } },
-          icon("folder"), h("span", null, h("b", null, "API 格式 JSON 文件"), h("span", { class: "muted small block" }, "ComfyUI 菜单 → 导出 (API)"))),
+          icon("folder"), h("span", null, h("b", null, "工作流 JSON 文件"), h("span", { class: "muted small block" }, "ComfyUI 保存的工作流或「导出 (API)」都可以；前者需要已连接 ComfyUI"))),
         h("button", { class: "menu-item", onClick: async () => { menu.remove(); await importFromComfy(); } },
           icon("flow"), h("span", null, h("b", null, "ComfyUI 中已保存的工作流"), h("span", { class: "muted small block" }, "需要已连接 ComfyUI，自动转换为 API 格式")))));
     sheetHost.append(menu);
+  }
+
+  /** WavePlug 内置工作流: the ones not there yet (by id); each mode gets its built-in if it has none */
+  function addBuiltins() {
+    const add = missingBuiltins(profiles);
+    if (!add.length) { setStatus("内置工作流都已经在列表里了", "info"); return; }
+    profiles.push(...add);
+    store.saveProfiles(profiles);
+    selectProfile((add.find(p => modeOf(p) === mode) ?? add[0]).id);
+    setStatus(`已添加 ${add.length} 个内置工作流：${add.map(p => p.name).join("、")}`, "ok");
   }
 
   async function importFromFile() {
     try {
       const f = await svc.pickJson();
       if (!f) return;
-      await adopt(f.name.replace(/\.json$/i, ""), asApiGraph(JSON.parse(f.text)), []);
+      const json = JSON.parse(f.text.replace(/^\uFEFF/, ""));
+      const name = f.name.replace(/\.json$/i, "");
+      // ComfyUI's own saved format (nodes + links): converted like a workflow read from ComfyUI,
+      // which needs ComfyUI's node list
+      if (json && Array.isArray(json.nodes) && Array.isArray(json.links)) {
+        setStatus("转换为 API 格式（需要 ComfyUI 的节点信息）…");
+        const info = await comfy.objectInfo().catch(() => { throw new Error("这是 ComfyUI 保存的工作流，转换需要先连上 ComfyUI（或者在 ComfyUI 里用「导出 (API)」保存后再导入）"); });
+        const { api, warnings } = uiToApi(json, info);
+        if (warnings.length) log("warn", "conversion", warnings);
+        await adopt(name, api, warnings);
+        return;
+      }
+      await adopt(name, asApiGraph(json), []);
     } catch (e) { setStatus("导入失败：" + (e as Error).message, "error"); }
   }
 
@@ -1461,7 +1495,7 @@ export function mountApp(root: HTMLElement, svc: Services) {
    * recorded source are matched to a saved workflow of the same name. Returns an error or null.
    */
   async function syncProfile(p: Profile): Promise<string | null> {
-    if (p.source?.kind === "file") return null;
+    if (p.source?.kind === "file" || p.source?.kind === "builtin") return null;
     let path = p.source?.kind === "comfy" ? p.source.path : null;
     if (!path) {
       const list = await comfy.listWorkflows().catch(() => [] as string[]);
