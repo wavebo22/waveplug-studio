@@ -1,6 +1,6 @@
 # 更新记录
 
-## 1.3.0（未发布）
+## 1.3.0（2026-11-16）
 **只有一个 Photoshop 插件**
 - 正式版和开发版合成一个插件 `WavePlug Studio`（`com.waveplug.studio`）。电脑上有源码文件夹 `G:\waveplug\studio\dist\plugin` 时，它从那里加载最新构建（构建后自动载入）；没有时运行插件自带的版本。设置 › 开发者里可以切换「从开发文件夹加载代码」。
 - 旧的 `WavePlug Studio Dev` 不再需要：用它打开一次 WavePlug，工作流和设置会交给新插件；之后在 WavePlug 程序 › 安装与更新 › 开发者里卸载它。
