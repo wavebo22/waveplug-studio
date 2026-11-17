@@ -70,7 +70,8 @@ else {
     if (reach().status !== 0) console.log("  还是连不上 GitHub：" + (reach().stderr || "").trim().split("\n").pop());
   }
   // inherit: Git's messages reach the user
-  const r = spawnSync("git", ["pull", "--ff-only"], { stdio: "inherit" });
+  // no console password prompt (WavePlug runs this without a console); Git's own sign-in window may still appear
+  const r = spawnSync("git", ["pull", "--ff-only"], { stdio: "inherit", env: { ...process.env, GIT_TERMINAL_PROMPT: "0" } });
   if (r.error) console.log("  没找到 git：安装 Git for Windows（https://git-scm.com），跳过");
   else if (r.status !== 0) {
     failed = true;
