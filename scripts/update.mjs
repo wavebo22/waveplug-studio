@@ -18,7 +18,10 @@ import { buildHelper } from "./helper_build.mjs";
 
 const ROOT = fileURLToPath(new URL("..", import.meta.url));
 process.chdir(ROOT);
-const STATE = "dist/.update-state.json";
+// no leading dot: a dot file made through the shared folder gets Windows' hidden attribute, and
+// Node can't overwrite a hidden file (EPERM). The old name is still read once.
+const STATE = "dist/update-state.json";
+const OLD_STATE = "dist/.update-state.json";
 const win = process.platform === "win32";
 
 /** newest modification time under `paths` (files or folders), 0 if none */
@@ -46,7 +49,7 @@ function cmd(file) {
 }
 
 let state = {};
-try { state = JSON.parse(readFileSync(STATE, "utf8")); } catch { /* first run */ }
+for (const f of [STATE, OLD_STATE]) { try { state = JSON.parse(readFileSync(f, "utf8")); break; } catch { /* first run */ } }
 const notes = [];
 let failed = false;
 
@@ -113,7 +116,11 @@ else {
 const now = { pluginManifest: hash("plugin/manifest.json"), aiManifest: hash("ai/CSXS/manifest.xml") };
 if (state.pluginManifest && state.pluginManifest !== now.pluginManifest) notes.push("Photoshop 插件的 manifest 改了：需要重启 Photoshop（权限有变化时还要用 WavePlug 重新安装插件）");
 if (state.aiManifest && state.aiManifest !== now.aiManifest && installed) notes.push("Illustrator 面板的 manifest 改了：需要重启 Illustrator");
-if (!failed) writeFileSync(STATE, JSON.stringify(now, null, 2));
+if (!failed) {
+  // only remembers what was built (for the "manifest changed" note): never fails the update
+  try { writeFileSync(STATE, JSON.stringify(now, null, 2)); }
+  catch (e) { console.log(`  （没能记下构建状态 ${STATE}：${e.message}；不影响使用）`); }
+}
 
 console.log("");
 for (const n of notes) console.log("注意：" + n);
