@@ -3109,8 +3109,9 @@ export const BUILTIN_PROFILES: readonly Profile[] = [
  }
 ];
 
-/** Fresh copies of the built-ins not in `profiles` (matched by id, so a re-add never duplicates). */
+/** Fresh copies of the built-ins not in `profiles` (matched by id, so a re-add never duplicates).
+ *  A JSON copy: UXP has no structuredClone (the panel failed to start with it). */
 export function missingBuiltins(profiles: readonly Profile[]): Profile[] {
   const have = new Set(profiles.map(p => p.id));
-  return BUILTIN_PROFILES.filter(b => !have.has(b.id)).map(b => structuredClone(b) as Profile);
+  return BUILTIN_PROFILES.filter(b => !have.has(b.id)).map(b => JSON.parse(JSON.stringify(b)) as Profile);
 }
