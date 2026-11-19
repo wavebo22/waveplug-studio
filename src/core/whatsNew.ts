@@ -9,12 +9,15 @@ export interface Change {
   body: string;
 }
 
-/** Commits that only touch docs, experiments, tests or tooling are not shown to users. */
+/** Commits that only touch docs, experiments, tests or tooling are not shown to users either. */
 const HIDDEN = /^(docs|poc|test|tests|chore|refactor|ci|build|style|wip)(\([^)]*\))?!?\s*[:：]/i;
 const KIND: Record<string, string> = { feat: "新功能", fix: "修复", perf: "优化" };
 
+/** Changes are written for users in Chinese; older English-only commits are left out. */
+const CHINESE = /[\u4e00-\u9fff]/;
+
 export function userVisible(c: Change): boolean {
-  return !HIDDEN.test(c.subject);
+  return !HIDDEN.test(c.subject) && CHINESE.test(c.subject);
 }
 
 /** "feat: 生图…" → { kind: "新功能", text: "生图…" } */
