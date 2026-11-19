@@ -30,6 +30,11 @@ import { EXPECTED_HELPER_VERSION, HANG_HELPER_VERSION, HANG_SECONDS, MONITOR_HEL
 import { attachGenerateSurface } from "./generateSurface.ts";
 import { attachIllustratorBridge } from "../app/illustratorBridge.ts";
 import { attachVariantsSurface } from "./variantsSurface.ts";
+import { type Change, describe, unseenChanges, userVisible } from "../core/whatsNew.ts";
+
+declare const __CHANGES__: Change[] | undefined;
+const CHANGES: Change[] = typeof __CHANGES__ !== "undefined" && Array.isArray(__CHANGES__) ? __CHANGES__ : [];
+const SEEN_KEY = "wp.seenChange";
 
 type Conn = { state: "checking" | "ok" | "down"; text: string };
 
@@ -328,7 +333,7 @@ export function mountApp(root: HTMLElement, svc: Services) {
         h("div", { class: "gen-row" }, countLabel, countInput, genBtn),
         progEl),
       h("section", { class: "card adv" }, advHead, advBody)), genView), toolsView.el), mainEl),
-    (footEl.append(statusEl, h("span", { class: "ver" }, svc.version)), footEl),
+    (footEl.append(statusEl, h("button", { class: "ver link", title: "查看更新记录", onClick: () => openChanges(CHANGES.filter(userVisible).slice(0, 30), "更新记录") }, svc.version)), footEl),
     sheetHost);
 
   // re-check the 生成 button as the user types (a required prompt enables it)
@@ -1800,6 +1805,32 @@ export function mountApp(root: HTMLElement, svc: Services) {
   listen(window, "error", e => { log("error", "uncaught", (e as ErrorEvent).error ?? (e as ErrorEvent).message); setStatus("插件内部错误：" + ((e as ErrorEvent).message ?? ""), "error"); });
   listen(window, "unhandledrejection", e => { log("error", "unhandled", (e as PromiseRejectionEvent).reason); setStatus("插件内部错误：" + String((e as PromiseRejectionEvent).reason?.message ?? (e as PromiseRejectionEvent).reason), "error"); });
   log("info", "start", svc.version, svc.host.kind, settings.comfyUrl);
+
+  // ── 更新内容: after an update, list what changed since the last build the user saw ──
+  function openChanges(list: Change[], title: string) {
+    const markSeen = () => { try { if (CHANGES[0]) localStorage.setItem(SEEN_KEY, CHANGES[0].hash); } catch { /* storage off */ } };
+    const items = list.map(c => {
+      const d = describe(c);
+      return h("li", { class: "change" },
+        h("div", { class: "change-top" }, h("span", { class: "change-kind" }, d.kind), h("span", { class: "change-text" }, d.text)),
+        h("div", { class: "change-date muted small" }, c.date.slice(0, 10)),
+        ...d.detail.map(l => h("div", { class: "change-detail small" }, l)));
+    });
+    const close = () => { markSeen(); sheet.remove(); };
+    const sheet: HTMLElement = h("div", { class: "sheet" },
+      h("div", { class: "sheet-head" }, h("span", { class: "sheet-title" }, title),
+        h("button", { class: "icon-btn sm", title: "关闭", onClick: close }, icon("close"))),
+      h("div", { class: "sheet-body" }, items.length ? h("ul", { class: "change-list" }, ...items) : h("div", { class: "muted small" }, "这个版本没有附带更新记录")),
+      h("div", { class: "sheet-foot" }, h("button", { class: "btn primary", onClick: close }, "知道了")));
+    sheetHost.append(sheet);
+  }
+  {
+    let seen: string | null = null;
+    try { seen = localStorage.getItem(SEEN_KEY); } catch { /* storage off */ }
+    const fresh = unseenChanges(CHANGES, seen);
+    if (fresh.length) { log("info", "whats new", fresh.length, CHANGES[0].hash.slice(0, 7)); openChanges(fresh, "WavePlug 已更新"); }
+    else if (CHANGES[0] && seen !== CHANGES[0].hash) { try { localStorage.setItem(SEEN_KEY, CHANGES[0].hash); } catch { /* storage off */ } }
+  }
   renderAll();
   svc.host.onChange(() => { void refresh(); void syncHangGuard(); if (toolsMode()) void toolsView.refresh(); });
   const managedColdStart = svc.host.kind === "uxp"

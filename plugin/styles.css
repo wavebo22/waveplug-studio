@@ -320,6 +320,16 @@ button, .ub { font: inherit; color: inherit; background: none; border: 0; paddin
   background: var(--c-surface); }
 .sheet-foot .btn { margin-left: var(--sp-3); }
 .sheet-msg { flex: 1; color: var(--c-err); font-size: var(--fs-s); }
+.change-list { list-style: none; margin: 0; padding: 0; }
+.change { padding: var(--sp-4) 0; border-bottom: 1px solid var(--c-line-row); }
+.change:first-child { padding-top: 0; }
+.change-top { display: flex; align-items: baseline; }
+.change-kind { flex: none; margin-right: var(--sp-3); padding: 0 var(--sp-2); border-radius: var(--r); background: var(--c-accent-wash-strong); color: var(--c-text-hi); font-size: var(--fs-s); line-height: var(--h-xs); }
+.change-text { color: var(--c-text); font-size: var(--fs); line-height: 1.5; }
+.change-date { margin-top: var(--sp-1); }
+.change-detail { margin-top: var(--sp-2); color: var(--c-text-2); line-height: 1.5; }
+.ver.link { background: none; border: 0; padding: 0; font: inherit; font-size: inherit; color: var(--c-text-3); text-decoration: none; cursor: pointer; }
+.ver.link:hover { color: var(--c-text); text-decoration: underline; }
 .menu-item { display: flex; align-items: center; justify-content: flex-start; width: 100%; min-height: 40px; margin-bottom: var(--sp-3); padding: var(--sp-4) var(--sp-5);
   text-align: left; background: var(--c-surface); border: 1px solid var(--c-line-soft); border-radius: var(--r-l); }
 .menu-item .icon { margin-right: var(--sp-5); color: var(--c-accent-hi); }

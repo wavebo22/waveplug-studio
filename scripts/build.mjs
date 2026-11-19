@@ -1,10 +1,19 @@
 // Builds the UXP plugin into dist/plugin and the browser preview into dist/preview.
 import { build, context } from "esbuild";
+import { execFileSync } from "node:child_process";
 import { cpSync, existsSync, mkdirSync, readdirSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
 
 const watch = process.argv.includes("--watch");
 const BUILT_AT = new Date().toISOString().slice(5, 16).replace("T", " ");
-const common = { define: { __BUILT_AT__: JSON.stringify(BUILT_AT) }, bundle: true, external: ["photoshop", "uxp"], format: "iife", target: "es2020", charset: "utf8", logLevel: "info", sourcemap: false };
+// 更新内容: the latest commits go into the build, the panel lists the unseen ones after an update
+// (src/core/whatsNew.ts). No git (a copied source folder) = no list.
+function recentChanges() {
+  try {
+    const out = execFileSync("git", ["log", "-n", "80", "--format=%H%x1f%cI%x1f%s%x1f%b%x1e"], { encoding: "utf8" });
+    return out.split("\x1e").map(r => r.trim()).filter(Boolean).map(r => { const [hash, date, subject, body = ""] = r.split("\x1f"); return { hash, date, subject, body: body.trim() }; });
+  } catch (e) { console.warn("git log failed, no 更新内容 in this build:", e.message); return []; }
+}
+const common = { define: { __BUILT_AT__: JSON.stringify(BUILT_AT), __CHANGES__: JSON.stringify(recentChanges()) }, bundle: true, external: ["photoshop", "uxp"], format: "iife", target: "es2020", charset: "utf8", logLevel: "info", sourcemap: false };
 
 mkdirSync("dist/plugin", { recursive: true });
 mkdirSync("dist/preview", { recursive: true });
