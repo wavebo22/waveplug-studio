@@ -374,6 +374,7 @@ class MockComfy implements Comfy {
       "图像缩放V2_孤海": { input: { required: { "图像": ["IMAGE"] }, optional: { "遮罩": ["MASK"] } }, output: ["IMAGE", "INT", "INT", "MASK"] },
     } as any;
   }
+  async loraNames() { return ["Qwen-Image-2.1-Lightning-8steps.safetensors", "人像/胶片质感_v2.safetensors", "产品/白底商品图.safetensors"]; }
   async listWorkflows() { return ["孤海 Qwen2.1 Turbo PS专用/Qwen-2.1-移除、局部重绘_PS插件连接本地comfyui专用_本机适配.json", "孤海 Qwen2.1 Turbo PS专用/Qwen-2.1-移除、局部重绘、扩图.json", "Qwen Image 2.1 文生图.json", "▶▷VOSR2-图像放大.json"]; }
   async readWorkflow(path?: string) { return path && /扩图/.test(path) ? outpaintUi : path && /文生图/.test(path) ? txt2imgUi : path && /放大/.test(path) ? upscaleUi : fixtureUi; }
   last = { width: 16, height: 10 };

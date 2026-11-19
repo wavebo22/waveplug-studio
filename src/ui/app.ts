@@ -11,6 +11,7 @@ import { type Binding, type Profile, type TaskType, ROLE_LABEL, carryOver, inpai
 import { isBlendGraph, recognize } from "../core/workflow/recognize.ts";
 import { uiToApi } from "../core/workflow/uiToApi.ts";
 import { findLocalMaskLinks } from "../core/workflow/localMask.ts";
+import { LORA_MAX, LORA_MIN, MAX_LORAS, type LoraSlot, loraLabel, loraTargets } from "../core/workflow/loras.ts";
 import { MAX_REFERENCES, findReferenceSlots, planLayerReferenceDrop, type LayerReferenceCandidate } from "../core/workflow/references.ts";
 import { MAX_UPSCALE_EDGE, type RefSource, type RunResult, StashedResult, runInpaint } from "../app/generate.ts";
 import { type ProfileState, type Services, type Settings, store } from "../app/services.ts";
@@ -56,6 +57,12 @@ function effectiveParams(p: Profile, ps: ProfileState): Record<string, number | 
     if (d !== p.api[b.nodeId]?.inputs[b.input]) out[k] = d;
   }
   return { ...out, ...ps.params };
+}
+
+/** "lora:2" / "lora:2:on" from the external panel → that LoRA slot */
+function loraSlotOf(ps: ProfileState, key: string): LoraSlot | undefined {
+  const m = /^lora:(\d+)(:on)?$/.exec(key);
+  return m ? ps.loras?.[Number(m[1])] : undefined;
 }
 
 const OLD_HINTS = ["描述要画进选区的内容；留空 = 移除选区内的内容", "描述要画进选区的内容"];
@@ -620,6 +627,7 @@ export function mountApp(root: HTMLElement, svc: Services) {
         k in ps.params && ps.params[k] !== base ? h("button", { class: "link small", title: "恢复工作流中的原始值", onClick: () => { delete ps.params[k]; save(); renderAdvanced(); } }, "复原") : null),
         h("div", { class: "param-ctl" }, range, num)));
     }
+    if (loraTargets(p.api).length) rows.push(loraSection(p, ps));
     if (p.bindings.some(b => b.role === "seed")) {
       const seedNum = h("input", { class: "num wide", type: "number", value: String(ps.seed), disabled: ps.seedMode === "random" }) as HTMLInputElement;
       seedNum.addEventListener("change", () => { ps.seed = Math.max(0, Math.min(MAX_SEED, Math.floor(Number(seedNum.value) || 0))); save(); });
@@ -689,6 +697,50 @@ export function mountApp(root: HTMLElement, svc: Services) {
     if (again) { again = false; void refresh(); }
   }
 
+  // ── LoRA (高级参数): extra LoRAs inserted into the execution copy, see core/workflow/loras.ts ──
+  let loraFiles: string[] | null = null, loraLoading = false, loraError = "";
+  async function loadLoraFiles() {
+    if (loraLoading) return;
+    loraLoading = true; loraError = "";
+    try { loraFiles = await comfy.loraNames(); log("info", "lora files", loraFiles.length); }
+    catch (e) { loraError = "读取 LoRA 列表失败：" + (e as Error).message; log("warn", "lora files", e); }
+    finally { loraLoading = false; renderAdvanced(); }
+  }
+  function loraSection(p: Profile, ps: ProfileState): HTMLElement {
+    const slots = ps.loras ??= [];
+    const save = () => store.saveState(p.id, ps);
+    if (loraFiles === null && !loraLoading && !loraError) void loadLoraFiles();
+    const files = loraFiles ?? [];
+    const rows: HTMLElement[] = [];
+    slots.forEach((s, i) => {
+      const sel = h("select", { class: "field", title: s.name || "选择 LoRA 文件", disabled: !s.on },
+        h("option", { value: "" }, files.length ? "选择 LoRA…" : loraLoading ? "读取中…" : "（ComfyUI 里没有 LoRA）"),
+        ...(s.name && !files.includes(s.name) ? [h("option", { value: s.name }, loraLabel(s.name) + "（未找到）")] : []),
+        ...files.map(f => h("option", { value: f }, f.replace(/\.(safetensors|ckpt|pt|pth|bin|gguf)$/i, "")))) as HTMLSelectElement;
+      sel.value = s.name;
+      sel.addEventListener("change", () => { s.name = sel.value; sel.title = s.name; save(); });
+      const on = h("input", { type: "checkbox", checked: s.on, title: "开启 / 关闭这个 LoRA（关闭后不会加进工作流）",
+        onChange: (e: Event) => { s.on = (e.target as HTMLInputElement).checked; save(); renderAdvanced(); } });
+      const num = h("input", { class: "num", type: "number", value: String(s.strength), step: "0.05", min: String(LORA_MIN), max: String(LORA_MAX), disabled: !s.on }) as HTMLInputElement;
+      const range = h("input", { type: "range", min: String(LORA_MIN), max: String(LORA_MAX), step: "0.05", value: String(s.strength), disabled: !s.on }) as HTMLInputElement;
+      const set = (v: number) => { if (!Number.isFinite(v)) return; v = Math.max(LORA_MIN, Math.min(LORA_MAX, Math.round(v * 100) / 100)); s.strength = v; num.value = String(v); range.value = String(v); save(); };
+      range.addEventListener("input", () => set(Number(range.value)));
+      num.addEventListener("change", () => set(Number(num.value)));
+      rows.push(h("div", { class: "param lora" + (s.on ? "" : " off") },
+        h("div", { class: "param-top lora-top" }, on, sel,
+          h("button", { class: "icon-btn sm", title: "移除这个 LoRA", onClick: () => { slots.splice(i, 1); save(); renderAdvanced(); } }, icon("close"))),
+        h("div", { class: "param-ctl" }, range, num)));
+    });
+    const head = h("div", { class: "param-top" },
+      h("span", { class: "param-label", title: "额外的 LoRA 只加进本次提交给 ComfyUI 的副本：接在模型加载节点后面，工作流里原有的 LoRA 照常生效。不修改 ComfyUI 中的工作流" }, "LoRA"),
+      h("span", { class: "lora-actions" },
+        h("button", { class: "icon-btn sm", title: "重新读取 ComfyUI 的 LoRA 列表（放进 models/loras 的新文件）", onClick: () => { loraFiles = null; loraError = ""; void loadLoraFiles(); } }, icon("refresh")),
+        h("button", { class: "icon-btn sm", title: slots.length >= MAX_LORAS ? `最多 ${MAX_LORAS} 个` : "添加一个 LoRA", disabled: slots.length >= MAX_LORAS,
+          onClick: () => { slots.push({ name: "", strength: 1, on: true } satisfies LoraSlot); save(); renderAdvanced(); } }, icon("plus"))));
+    return h("div", { class: "lora-group" }, head, ...rows,
+      loraError ? h("div", { class: "muted small" }, loraError) : !slots.length ? h("div", { class: "muted small" }, "点 + 添加 LoRA，最多 " + MAX_LORAS + " 个") : null);
+  }
+
   /** 高级参数 as the external panel lists them (same order and rules as renderAdvanced) */
   function panelParams(): PanelParam[] {
     if (!profile || !pstate) return [];
@@ -701,6 +753,11 @@ export function mountApp(root: HTMLElement, svc: Services) {
       const { int, lo, hi } = paramRange(b, base);
       out.push({ kind: "number", key, label, value: Number(val), base: Number(base), min: lo, max: hi, int });
     }
+    if (loraTargets(p.api).length) (ps.loras ?? []).forEach((s, i) => {
+      if (!s.name) return;
+      out.push({ kind: "toggle", key: `lora:${i}:on`, label: "LoRA · " + loraLabel(s.name), value: s.on, tip: "开启 / 关闭这个 LoRA" });
+      if (s.on) out.push({ kind: "number", key: `lora:${i}`, label: "LoRA 强度 · " + loraLabel(s.name), value: s.strength, base: 1, min: LORA_MIN, max: LORA_MAX, int: false });
+    });
     if (p.bindings.some(b => b.role === "seed")) out.push({ kind: "seed", random: ps.seedMode === "random", value: ps.seed });
     if (p.options.localMask?.links.length) out.push({ kind: "toggle", key: "localMask", label: "只重绘选区内", value: p.options.localMask.enabled, tip: "把遮罩接到工作流，让模型只在选区内生成" });
     if (modeOf(p) === "blend" || modeOf(p) === "extract") out.push({ kind: "toggle", key: "keepDetail", label: "保留原图细节", value: ps.keepDetail !== false, tip: "纹理和文字等细节用原图" });
@@ -843,11 +900,11 @@ export function mountApp(root: HTMLElement, svc: Services) {
       setMode: m => { if (MODES.some(([x]) => x === m)) setMode(m as TaskType); },
       setPrompt: text => setPromptText(text),
       setCount: n => { countInput.value = String(n); saveCount(n); renderAction(); },
-      setNumber: (key, value) => setParam((_, ps) => { ps.params[key] = value; }),
-      resetNumber: key => setParam((_, ps) => { delete ps.params[key]; }),
+      setNumber: (key, value) => setParam((_, ps) => { const l = loraSlotOf(ps, key); if (l) l.strength = Math.max(LORA_MIN, Math.min(LORA_MAX, value)); else ps.params[key] = value; }),
+      resetNumber: key => setParam((_, ps) => { const l = loraSlotOf(ps, key); if (l) l.strength = 1; else delete ps.params[key]; }),
       setToggle: (key, value) => {
         if (key === "localMask") { if (profile?.options.localMask) { profile.options.localMask.enabled = value; store.saveProfiles(profiles); renderAdvanced(); } return; }
-        setParam((_, ps) => { if (key === "keepDetail") ps.keepDetail = value; else if (key === "fullRun") ps.fullRun = value; else ps.params[key] = value; });
+        setParam((_, ps) => { if (key === "keepDetail") ps.keepDetail = value; else if (key === "fullRun") ps.fullRun = value; else if (loraSlotOf(ps, key)) loraSlotOf(ps, key)!.on = value; else ps.params[key] = value; });
       },
       setSeed: (random, value) => setParam((_, ps) => { ps.seedMode = random ? "random" : "fixed"; ps.seed = Math.max(0, Math.min(MAX_SEED, Math.floor(value))); }),
       newSeed: () => setParam((_, ps) => { ps.seed = randomSeed(); ps.seedMode = "fixed"; }),
@@ -1592,7 +1649,7 @@ export function mountApp(root: HTMLElement, svc: Services) {
     renderAll();
     try {
       const res = await runInpaint(svc.host, comfy, {
-        profile: p, prompt: cleanPrompt(prompt.value), seed: ps.seedMode === "fixed" ? ps.seed : null, params: effectiveParams(p, ps),
+        profile: p, prompt: cleanPrompt(prompt.value), seed: ps.seedMode === "fixed" ? ps.seed : null, params: effectiveParams(p, ps), loras: ps.loras,
         addTo: willAdd() ? group ?? undefined : undefined,
         pads: modeOf(p) === "outpaint" ? { ...pads } : undefined,
         size: modeOf(p) === "txt2img" ? t2iSize() : undefined,
@@ -1696,7 +1753,7 @@ export function mountApp(root: HTMLElement, svc: Services) {
     try {
       const rps = store.state(rp.id);
       const res = await runInpaint(svc.host, comfy, {
-        profile: rp, prompt: "", seed: null, params: effectiveParams(rp, rps), references: {}, count: 1,
+        profile: rp, prompt: "", seed: null, params: effectiveParams(rp, rps), loras: rps.loras, references: {}, count: 1,
         selectionMask: mask, hide: cut,
       }, {
         signal: current.signal,

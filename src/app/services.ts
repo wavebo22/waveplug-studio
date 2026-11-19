@@ -2,6 +2,7 @@
 
 import type { Comfy } from "../core/comfy/client.ts";
 import type { Profile, TaskType } from "../core/workflow/profile.ts";
+import type { LoraSlot } from "../core/workflow/loras.ts";
 import type { LayerTools, LayerTree, PsHost } from "../ps/host.ts";
 import type { Overlay } from "./overlay.ts";
 
@@ -80,7 +81,7 @@ export interface Settings {
   /** 抠图: afterwards remove the object from the original with the 局部重绘 workflow (拆图) */
   extractRemove?: boolean;
 }
-export interface ProfileState { prompt: string; params: Record<string, number | boolean>; seedMode: "random" | "fixed"; seed: number; count?: number; fullRun?: boolean; keepDetail?: boolean }
+export interface ProfileState { prompt: string; params: Record<string, number | boolean>; seedMode: "random" | "fixed"; seed: number; count?: number; fullRun?: boolean; keepDetail?: boolean; loras?: LoraSlot[] }
 
 const KEY = { settings: "wp.settings", profiles: "wp.profiles", state: "wp.state.", thumb: "wp.thumb.", favorites: "wp.favorites" };
 

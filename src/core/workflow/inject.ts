@@ -4,6 +4,7 @@ import { type ApiGraph, cloneGraph } from "./api.ts";
 import { type Binding, type Profile, type Side, checkBinding, inpaintLike, validateProfile } from "./profile.ts";
 import { applyMaskLinks } from "./localMask.ts";
 import { MAX_REFERENCES, applyReferences } from "./references.ts";
+import { type LoraSlot, applyLoras } from "./loras.ts";
 
 export interface RunValues {
   /** uploaded file name (as returned by /upload/image, including subfolder) */
@@ -25,6 +26,8 @@ export interface RunValues {
   size?: { width: number; height: number };
   /** upscale: factor */
   scale?: number;
+  /** extra LoRAs from the panel, inserted after the base-model loader (execution copy only) */
+  loras?: LoraSlot[];
 }
 
 export const MAX_SEED = 2 ** 50;
@@ -114,5 +117,6 @@ export function prepareRun(p: Profile, v: RunValues): Prepared {
     const files = Array.from({ length: MAX_REFERENCES }, (_, i) => v.references![i + 1]).filter((f): f is string => !!f);
     if (files.length) applyReferences(api, p.options.refSlots, files, v.variant ?? 0);
   }
+  applyLoras(api, v.loras);
   return { api, seed, outputs: p.bindings.filter(b => b.role === "output") };
 }

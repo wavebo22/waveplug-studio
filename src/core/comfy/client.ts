@@ -3,6 +3,7 @@
 
 import type { ApiGraph } from "../workflow/api.ts";
 import type { ObjectInfo } from "../workflow/uiToApi.ts";
+import { loraNamesFrom } from "../workflow/loras.ts";
 
 export interface ComfyDeps {
   fetch: typeof fetch;
@@ -67,6 +68,11 @@ export class ComfyClient {
 
   systemStats() { return this.json<{ system: { comfyui_version?: string; python_version?: string }; devices: { name: string; vram_total: number; vram_free: number }[] }>("/system_stats"); }
   objectInfo() { return this.json<ObjectInfo>("/object_info"); }
+  /** LoRA files ComfyUI can load (re-read each time so new files show up without a restart). */
+  async loraNames(): Promise<string[]> {
+    const info = await this.json<ObjectInfo>("/object_info/LoraLoaderModelOnly").catch(() => this.json<ObjectInfo>("/object_info/LoraLoader"));
+    return loraNamesFrom(info);
+  }
 
   /** Saved UI-format workflows from ComfyUI's user directory (native userdata API). */
   async listWorkflows(): Promise<string[]> {
@@ -214,7 +220,7 @@ export class ComfyClient {
 }
 
 /** The surface the app uses — lets the browser preview swap in a fake backend. */
-export type Comfy = Pick<ComfyClient, "base" | "systemStats" | "objectInfo" | "listWorkflows" | "readWorkflow" | "uploadImage" | "queue" | "history" | "view" | "cancel" | "waitFor" | "freeCache">;
+export type Comfy = Pick<ComfyClient, "base" | "systemStats" | "objectInfo" | "loraNames" | "listWorkflows" | "readWorkflow" | "uploadImage" | "queue" | "history" | "view" | "cancel" | "waitFor" | "freeCache">;
 
 export interface HistoryEntry {
   outputs: Record<string, { images?: ImageRef[] }>;

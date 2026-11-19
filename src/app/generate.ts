@@ -12,6 +12,7 @@ import { sameMaskAt } from "../core/image/maskIdentity.ts";
 import { type Comfy, type JobEvent, outputImage, pngSize, utf8 } from "../core/comfy/client.ts";
 import { log } from "./log.ts";
 import { prepareRun } from "../core/workflow/inject.ts";
+import type { LoraSlot } from "../core/workflow/loras.ts";
 import type { Profile } from "../core/workflow/profile.ts";
 import type { FillGroup, Pads, PsHost, Variation } from "../ps/host.ts";
 
@@ -25,6 +26,8 @@ export interface RunInput {
   negative?: string;
   seed: number | null;
   params: Record<string, number | boolean>;
+  /** extra LoRAs chosen in 高级参数 (only the enabled ones are applied) */
+  loras?: LoraSlot[];
   references: Record<number, RefSource | undefined>;
   /** variations to generate in this run (each with its own seed) */
   count: number;
@@ -262,7 +265,7 @@ export async function runInpaint(host: PsHost, comfy: Comfy, input: RunInput, ho
       const src = input.references[slot];
       if (src) values.references[slot] = await uploadRef(slot, src, k);
     }
-    const run = prepareRun(profile, { ...values, prompt, negative: input.negative, seed: input.seed === null ? null : input.seed + k, params: input.params, variant: k });
+    const run = prepareRun(profile, { ...values, prompt, negative: input.negative, seed: input.seed === null ? null : input.seed + k, params: input.params, loras: input.loras, variant: k });
     log("info", "run", JSON.stringify({ prompt: input.prompt, seed: run.seed, profile: profile.name, localMask: !!profile.options.localMask?.enabled, continued: !!target }));
     if (input.fullRun) { hooks.stage("清空 ComfyUI 缓存" + tag); await comfy.freeCache(); }
     // the exact execution copy — can be dragged into ComfyUI to inspect or re-run it there
@@ -418,7 +421,7 @@ async function runOutpaint(host: PsHost, comfy: Comfy, input: RunInput, hooks: R
   for (let k = 0; k < count; k++) {
     const tag = count > 1 ? `（${k + 1}/${count}）` : "";
     const references = await refs.forVariation(k);
-    const run = prepareRun(profile, { image, references, prompt: input.prompt, negative: input.negative, seed: input.seed === null ? null : input.seed + k, params: input.params, variant: k, pads });
+    const run = prepareRun(profile, { image, references, prompt: input.prompt, negative: input.negative, seed: input.seed === null ? null : input.seed + k, params: input.params, loras: input.loras, variant: k, pads });
     log("info", "run", JSON.stringify({ task: "outpaint", prompt: input.prompt, seed: run.seed, pads, profile: profile.name, continued: !!target }));
     if (input.fullRun) { hooks.stage("清空 ComfyUI 缓存" + tag); await comfy.freeCache(); }
     hooks.debug?.(`${stamp}_workflow${k ? "_" + k : ""}.json`, utf8(JSON.stringify(run.api, null, 1)));
@@ -523,7 +526,7 @@ async function runTxt2img(host: PsHost, comfy: Comfy, input: RunInput, hooks: Ru
   for (let k = 0; k < count; k++) {
     const tag = count > 1 ? `（${k + 1}/${count}）` : "";
     const references = await refs.forVariation(k);
-    const run = prepareRun(profile, { references, prompt: input.prompt, negative: input.negative, seed: input.seed === null ? null : input.seed + k, params: input.params, variant: k, size });
+    const run = prepareRun(profile, { references, prompt: input.prompt, negative: input.negative, seed: input.seed === null ? null : input.seed + k, params: input.params, loras: input.loras, variant: k, size });
     log("info", "run", JSON.stringify({ task: "txt2img", prompt: input.prompt, seed: run.seed, size, profile: profile.name, continued: !!target }));
     if (input.fullRun) { hooks.stage("清空 ComfyUI 缓存" + tag); await comfy.freeCache(); }
     hooks.debug?.(`${stamp}_workflow${k ? "_" + k : ""}.json`, utf8(JSON.stringify(run.api, null, 1)));
@@ -597,7 +600,7 @@ async function runUpscale(host: PsHost, comfy: Comfy, input: RunInput, hooks: Ru
   const count = Math.max(1, Math.min(4, Math.floor(input.count) || 1));
   for (let k = 0; k < count; k++) {
     const tag = count > 1 ? `（${k + 1}/${count}）` : "";
-    const run = prepareRun(profile, { image, prompt: input.prompt, negative: input.negative, seed: input.seed === null ? null : input.seed + k, params: input.params, variant: k, scale });
+    const run = prepareRun(profile, { image, prompt: input.prompt, negative: input.negative, seed: input.seed === null ? null : input.seed + k, params: input.params, loras: input.loras, variant: k, scale });
     log("info", "run", JSON.stringify({ task: "upscale", scale, rect, seed: run.seed, profile: profile.name }));
     if (input.fullRun) { hooks.stage("清空 ComfyUI 缓存" + tag); await comfy.freeCache(); }
     hooks.debug?.(`${stamp}_workflow${k ? "_" + k : ""}.json`, utf8(JSON.stringify(run.api, null, 1)));
@@ -682,7 +685,7 @@ async function runUpscaleLayer(host: PsHost, comfy: Comfy, input: RunInput, hook
   const image = await comfy.uploadImage(png0, `wp_${stamp}_image.png`);
   check();
 
-  const run = prepareRun(profile, { image, prompt: input.prompt, negative: input.negative, seed: input.seed, params: input.params, scale });
+  const run = prepareRun(profile, { image, prompt: input.prompt, negative: input.negative, seed: input.seed, params: input.params, loras: input.loras, scale });
   log("info", "run", JSON.stringify({ task: "upscale-layer", scale, layer: layer.id, rect: src.rect, transparent, seed: run.seed, profile: profile.name }));
   if (input.fullRun) { hooks.stage("清空 ComfyUI 缓存"); await comfy.freeCache(); }
   hooks.debug?.(`${stamp}_workflow.json`, utf8(JSON.stringify(run.api, null, 1)));
