@@ -184,6 +184,12 @@ export function createLayerTreeView(tree: LayerTree, status: Status, tools?: Lay
   /** what of the active layer Photoshop paints on (its pixels unless a mask was clicked); framed in
    *  green on every selected layer */
   let focus: { id: number; part: TargetPart } | null = null;
+  /** the part Photoshop last reported as targeted (onTarget), waiting for the read that tells which layer */
+  let targetHint: { part: TargetPart; at: number } | null = null;
+  const setFocusPart = (id: number, part: TargetPart) => {
+    focus = part === "layer" ? null : { id, part };
+    for (const r of pool) if (r.id === id) r.key = "";
+  };
   const partOf = (id: number): TargetPart => focus?.id === id ? focus.part : "layer";
   const framed = (l: TreeLayer): TargetPart | null => selected.has(l.id) ? partOf(l.id) : null;
   const targetActionForPart = (part: TargetPart): LayerAction =>
@@ -598,10 +604,13 @@ export function createLayerTreeView(tree: LayerTree, status: Status, tools?: Lay
     advancedButton.classList.toggle("on", isShown(advancedBox));
   });
   const clearFilterBtn = h("button", { class: "lt-filter-clear", title: "清空所有搜索和过滤条件" }, "清除筛选");
-  clearFilterBtn.addEventListener("click", () => {
+  /** no search, no filter (filtering switched back on); the caller renders */
+  function resetFilters() {
+    if (searchTimer) { clearTimeout(searchTimer); searchTimer = null; }
     query.kinds.clear(); query.advanced.clear(); query.text = ""; searchBox.value = ""; filter = "all";
-    firstRow = 0; render();
-  });
+    filterEnabled = true; firstRow = 0;
+  }
+  clearFilterBtn.addEventListener("click", () => { resetFilters(); render(); });
   const filterPopup = h("div", { class: "lt-top-popup lt-filter-popup" },
     h("div", { class: "lt-filter-title" }, h("span", {}, "图层类型"), clearFilterBtn),
     h("div", { class: "lt-filter-grid" }, ...kindBtns),
@@ -1174,7 +1183,8 @@ export function createLayerTreeView(tree: LayerTree, status: Status, tools?: Lay
       case "filters": return l.filters.length > 0;
       case "fx": return l.effects;
       case "chain": return l.links.length > 0;
-      case "lock": return l.kind !== "group" && (l.lockAll || l.lockTransparency);
+      // groups take 锁定全部 only (like Photoshop); layers show any of their locks
+      case "lock": return l.lockAll || (l.kind !== "group" && (l.lockTransparency || l.lockPixels || l.lockPosition));
     }
   }
 
@@ -1200,11 +1210,12 @@ export function createLayerTreeView(tree: LayerTree, status: Status, tools?: Lay
       case "chain": return box("lt-chain" + (peer ? " peer" : ""), peer ? "和选中的图层链接在一起" : `和 ${l.links.length} 个图层链接（一起移动、变换）`, ic("link", 13));
       case "lock": {
         const background = l.kind === "background";
+        const parts = [l.lockTransparency && "透明像素", l.lockPixels && "图像像素", l.lockPosition && "位置"].filter(Boolean).join("、");
         const tip = background
           ? "背景图层（双击此锁图标：转换为普通图层并解锁）"
           : l.lockAll
-            ? "锁定全部（双击此锁图标：解除该图层的全部锁定）"
-            : "锁定透明像素（双击此锁图标：解除该图层的全部锁定）";
+            ? (l.kind === "group" ? "图层组已锁定全部（组内图层一起锁定；双击此锁图标：解锁）" : "锁定全部（双击此锁图标：解除该图层的全部锁定）")
+            : `锁定${parts}（双击此锁图标：解除该图层的全部锁定）`;
         return zoneOf(box("lt-lock" + (l.lockAll ? "" : " part"), tip, ic("lock", 13)), l.id, "lock");
       }
     }
@@ -1404,12 +1415,14 @@ export function createLayerTreeView(tree: LayerTree, status: Status, tools?: Lay
     queueThumbs(0);
   }
   // a mask or the pixels targeted in Photoshop's own panel: on the (first) selected layer
+  // The event names the part only. A click on another layer's mask in Photoshop selects that layer in
+  // the same moment, so `selected` (the last read) may still be the old layer: the part is kept and
+  // put on the layer the next read finds selected (applyTargetHint), not on the old one.
   tree.onTarget(part => {
-    const id = [...selected][0];
-    if (id === undefined) return;
-    focus = part === "layer" ? null : { id, part };
-    for (const r of pool) if (r.id === id) r.key = "";
-    render();
+    targetHint = { part, at: Date.now() };
+    const id = selected.size === 1 ? [...selected][0] : undefined;
+    if (id !== undefined) setFocusPart(id, part);
+    void refresh();
   });
   tree.onEdited(ids => {
     const keys = ids === "all" ? "all" : [...ids, ...ids.map(maskKey), ...ids.map(vmaskKey)];
@@ -1591,6 +1604,8 @@ export function createLayerTreeView(tree: LayerTree, status: Status, tools?: Lay
           }
           if (r.docId !== docId) {
             firstRow = 0; anchor = null; hideFrame(); focus = null; maskView = null;
+            // another document: last document's search and filters would hide its layers
+            if (docId !== null) resetFilters();
             // thumbnails (data URLs) are kept for the last few documents only: most recent last
             const c = thumbsByDoc.get(r.docId);
             if (c) { thumbsByDoc.delete(r.docId); thumbsByDoc.set(r.docId, c); }
@@ -1605,6 +1620,10 @@ export function createLayerTreeView(tree: LayerTree, status: Status, tools?: Lay
             thumbs().invalidate(r.layers.filter(l => l.mask && !old.get(l.id)?.mask).map(l => maskKey(l.id)));
             // masks show the whole canvas: a new canvas size redraws the thumbnails
             if (r.width !== canvas.width || r.height !== canvas.height) thumbs().invalidate("all");
+          }
+          if (!stale && targetHint && Date.now() - targetHint.at < 2000 && r.selected.length === 1) {
+            setFocusPart(r.selected[0], targetHint.part);
+            targetHint = null;
           }
           if (!stale && focus && !r.selected.includes(focus.id)) focus = null;
           if (!stale && maskView && !r.selected.includes(maskView.id)) maskView = null;
@@ -1788,6 +1807,9 @@ export function createLayerTreeView(tree: LayerTree, status: Status, tools?: Lay
       } else {
         const result = await tree.run(doc, action, ids, arg,
           action === "delete" ? { ...opts, afterDeleteSelect, artboardIds } : opts);
+        // Photoshop targets a mask it has just added (no event reaches the plugin for its own
+        // command): mark it, so the panel leaves the keyboard to Photoshop's brush / mask shortcuts
+        if ((action === "addMask" || action === "addMaskHide") && ids.length === 1 && docId === doc) setFocusPart(ids[0], "mask");
         if (action === "delete" && result && result.kind === "delete") {
           deleteReported = true;
           if (result.skipped.length) {
@@ -2844,15 +2866,20 @@ export function createLayerTreeView(tree: LayerTree, status: Status, tools?: Lay
   const popup = createPopup(el);
   /** y (px from the panel section's top) just below row `idx` */
   const rowBottom = (idx: number) => list.offsetTop + yOf(idx + 1);
+  /** y of the bottom toolbar from the panel section's top. `bar.offsetTop` alone is relative to
+   *  `.lt-foot` (position: relative), which put the ☰ / fx / adjustment menus at the panel's top. */
+  const barTop = () => offsetIn(bar, el)?.y ?? bar.offsetTop;
 
   /** The right-click menu (core/layers/contextMenu.ts): a native menu at the mouse when the helper
    *  is running (outside the panel, submenus to the side), else the panel's own popup. */
   function openRowMenu(id: number) {
     if (docId === null) return;
     // like Photoshop: right-clicking a layer outside the selection selects it first
-    if (!selected.has(id)) void clickRow(id, { ctrl: false, shift: false });
-    const doc = docId, ids = selectedLayers().map(l => l.id);
-    const menu = contextMenu({ layers, selected, users, smartTools: !!tools, colors: LABELS.map(([k, name]) => [k, name] as const),
+    const wasSelected = selected.has(id);
+    if (!wasSelected) void clickRow(id, { ctrl: false, shift: false });
+    // clickRow may first leave a mask view (async): the menu is for the right-clicked row then
+    const doc = docId, ids = wasSelected ? selectedLayers().map(l => l.id) : [id];
+    const menu = contextMenu({ layers, selected: new Set(ids), users, smartTools: !!tools, colors: LABELS.map(([k, name]) => [k, name] as const),
       send: { docs: workbench.docs().filter(d => d.docId !== docId).map(d => ({ id: d.docId, name: d.name })), prefs: workbenchState().prefs, illustrator: !!illustrator?.ready(), illustratorLink: !!illustrator?.linkOf(doc, id) } });
     const native = overlay?.openMenu(menu.title, menu.items) ?? null;
     if (native) {
@@ -2985,7 +3012,7 @@ export function createLayerTreeView(tree: LayerTree, status: Status, tools?: Lay
       hint: c.enabled ? c.hint : c.disabledReason, enabled: c.enabled,
       run: () => void selectIds(c.ids, c.label),
     }))];
-    if (id === undefined) popup.open(items, bar.offsetTop - 2, { upward: true });
+    if (id === undefined) popup.open(items, barTop() - 2, { upward: true });
     else popup.open(items, rowBottom(Math.max(0, rows.findIndex(r => r.layer.id === id))));
   }
   /** Makes `ids` the selection, here and in Photoshop. */
@@ -3126,7 +3153,7 @@ export function createLayerTreeView(tree: LayerTree, status: Status, tools?: Lay
       { label: "清除图层样式", enabled: sel.some(l => l.effects), run: () => void run("clearStyle", ids()) },
       "-",
       { label: hidden ? "显示图层样式" : "隐藏图层样式", enabled: sel.some(l => l.effects), run: () => void run("toggleEffects", ids(), hidden ? "on" : "off") },
-    ], bar.offsetTop - 2, { upward: true, from: fxBtn });
+    ], barTop() - 2, { upward: true, from: fxBtn });
   });
   // like Photoshop's button: a layer mask first; on a layer that has one, a vector mask
   const maskBtn = tool("mask", "添加图层蒙版（有选区时只显示选区；Alt+单击：隐藏）；已有图层蒙版时添加矢量蒙版", e => {
@@ -3137,9 +3164,14 @@ export function createLayerTreeView(tree: LayerTree, status: Status, tools?: Lay
     void run(l?.mask ? "addVectorMask" : e.altKey ? "addMaskHide" : "addMask", ids());
   });
   const adjBtn = tool("adjust", "新建填充或调整图层", () => {
-    popup.open(ADJUSTMENTS.map(([key, label]) => ({ label, run: () => void run("adjustment", ids(), key, outsideAi()) })), bar.offsetTop - 2, { upward: true, from: adjBtn, left: 80 });
+    popup.open(ADJUSTMENTS.map(([key, label]) => ({ label, run: () => void run("adjustment", ids(), key, outsideAi()) })), barTop() - 2, { upward: true, from: adjBtn, left: 80 });
   });
-  const groupBtn = tool("folder", "新建组（把图层拖到这里：从图层新建组）", () => void run("newGroup", ids(), undefined, outsideAi()));
+  // 选中多个图层时直接把它们放进新组（从图层新建组）；只选一个或没选时新建空组
+  const groupBtn = tool("folder", "新建组：选中多个图层时把它们放进新组，否则新建空组（也可以把图层拖到这里）", () => {
+    const sel = selectedLayers();
+    if (sel.length > 1 && sel.some(l => l.kind !== "background")) void run("groupLayers", sel.map(l => l.id));
+    else void run("newGroup", ids(), undefined, outsideAi());
+  });
   const newBtn = tool("newLayer", "新建图层（把图层拖到这里：复制图层）", () => void run("newLayer", ids(), undefined, outsideAi()));
   /** new layers next to a selected AI result (a group in Photoshop) go above it, not into it */
   const outsideAi = (): RunOptions => { const top = selectedLayers()[0]; return top && isVariantLayer(top) ? { above: top.id } : {}; };
@@ -3176,7 +3208,7 @@ export function createLayerTreeView(tree: LayerTree, status: Status, tools?: Lay
       { label: shortcutsOn ? "快捷键：已开启" : "快捷键：已关闭", hint: "鼠标在面板上时 Ctrl+J / G / E / [ ] 等",
         run: () => { shortcutsOn = !shortcutsOn; localStorage.setItem(SHORTCUT_KEY, shortcutsOn ? "on" : "off"); status(shortcutsOn ? "图层面板快捷键已开启" : "图层面板快捷键已关闭", "info"); } },
     ];
-    popup.open(items, bar.offsetTop - 2, { upward: true, from: menuBtn });
+    popup.open(items, barTop() - 2, { upward: true, from: menuBtn, left: offsetIn(menuBtn, el)?.x ?? 4 });
   }
 
   // ── keyboard shortcuts, Photoshop's own for the Layers panel. Only while the pointer is over

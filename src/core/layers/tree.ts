@@ -138,6 +138,14 @@ export function planLayerDeletion(
     }
     else targets.push(id);
   }
+  // A document keeps at least one layer: Photoshop refuses to delete the last top-level one (a
+  // group holding everything included), so say why instead of a bare "删除当前不可用".
+  const tops = layers.filter(l => l.parentId === null).map(l => l.id);
+  if (tops.length && tops.every(id => targets.includes(id))) {
+    const keep = tops[tops.length - 1], l = byId.get(keep)!;
+    targets.splice(targets.indexOf(keep), 1);
+    skipped.push({ id: keep, name: l.name ?? `#${keep}`, reason: "文档至少要保留一个图层（可以先在它外面新建一个图层）" });
+  }
   return { targets, skipped };
 }
 

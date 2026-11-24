@@ -153,7 +153,9 @@ test("删除画板：嵌套锁定组提前跳过，其他图层仍可删除，�
   assert.equal(canDropToDelete(board, [50]), false);
   assert.equal(canDropToDelete(board, [50, 60]), true);
   const unlocked = info.map(l => l.id === 52 ? { ...l, locked: false } : l);
-  assert.deepEqual(planLayerDeletion(unlocked, [50, 60]).targets, [50, 60]);
+  assert.deepEqual(planLayerDeletion(unlocked, [50]).targets, [50]);
+  // both top-level layers: the document keeps its last one
+  assert.deepEqual(planLayerDeletion(unlocked, [50, 60]).targets, [50]);
   // Ordinary groups retain the established behavior when a child is locked.
   assert.deepEqual(planLayerDeletion(info.map(l => l.id === 50 ? { ...l, artboard: false } : l), [50]).targets, [50]);
 });
@@ -602,4 +604,21 @@ test("thumbnail retries back off instead of giving up", async () => {
   const c = new ThumbCache();
   c.put(-5, null); c.invalidate([-5]);
   assert.deepEqual(c.next([-5], 4), [-5]);
+});
+
+test("planLayerDeletion keeps the document's last top-level layer (a group holding everything)", () => {
+  const layers = [
+    { id: 35, parentId: null, name: "组 1" },
+    { id: 36, parentId: 35, name: "图层 1" },
+    { id: 37, parentId: 35, name: "图层 2" },
+  ];
+  const plan = planLayerDeletion(layers, [35]);
+  assert.deepEqual(plan.targets, []);
+  assert.equal(plan.skipped[0].id, 35);
+  assert.match(plan.skipped[0].reason, /至少要保留一个图层/);
+  // with another top-level layer the group goes as before
+  const two = planLayerDeletion([...layers, { id: 40, parentId: null, name: "背景色" }], [35]);
+  assert.deepEqual(two.targets, [35]);
+  // children inside it can still be deleted
+  assert.deepEqual(planLayerDeletion(layers, [36]).targets, [36]);
 });

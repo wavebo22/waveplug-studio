@@ -1638,11 +1638,25 @@ async function runNative(docId: number, action: LayerAction, ids: number[], labe
   }
   if (NATIVE_ACTIONS.has(action)) {
     // what Photoshop's Delete key records: delete the target (selected) layers, as its own history step
+    let refused: string | null = null;
     await whenFree(() => modal("删除图层", async () => {
       requireActiveDoc(docId);
-      const [r] = await play([{ _obj: "delete", _target: [{ _ref: "layer", _enum: "ordinal", _value: "targetEnum" }] }]);
-      if (r?._obj === "error" && r.result !== -128) throw new Error(r.message || "Photoshop 拒绝删除");
+      try {
+        const [r] = await play([{ _obj: "delete", _target: [{ _ref: "layer", _enum: "ordinal", _value: "targetEnum" }] }]);
+        if (r?._obj === "error" && r.result !== -128) refused = String(r.message || "Photoshop 拒绝删除");
+      } catch (e) { refused = String((e as Error)?.message ?? e); }
     }));
+    if (refused) {
+      // 11-23: a group alone was refused here every time ("命令"删除"当前不可用") while the plugin's own
+      // delete by id was never tried. Note what the targets were, then delete them the plugin's way.
+      const doc = docById(docId);
+      const info = [...before.keys()].map(id => {
+        const l = findLayer(doc.layers, id);
+        return { id, kind: l?.kind ?? null, top: !!l && !l.parent, children: l?.layers?.length ?? 0, locked: !!l?.allLocked };
+      });
+      log("warn", "native delete refused: falling back to delete by id", JSON.stringify({ refused, targets: info, topLevel: doc.layers?.length ?? null }));
+      return FALLBACK;
+    }
     const doc = docById(docId), surviving = new Set<number>();
     for (const id of before.keys()) if (findLayer(doc.layers, id)) surviving.add(id);
     const { deleted, skipped } = nativeDeleteOutcome([...before.keys()], surviving, before);
