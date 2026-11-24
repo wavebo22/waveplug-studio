@@ -36,6 +36,8 @@ import type { MenuNode } from "../core/overlay/protocol.ts";
 import { arrangeTarget, neighbourRow } from "../core/layers/tree.ts";
 import { onSmartTarget } from "./smartTarget.ts";
 import { createSlider } from "./slider.ts";
+import { type HeldKeys, type HintInput, type HintZone, NO_KEYS, hintItems, stateParts } from "../core/layers/hints.ts";
+import type { HintBar } from "./hintBar.ts";
 import { createWorkbenchSection } from "./workbench.ts";
 import { attachWorkbenchSurface } from "./workbenchSurface.ts";
 import { setWorkbenchPrefs, workbenchState } from "./workbenchStore.ts";
@@ -148,7 +150,7 @@ interface RowEl { index: number; el: HTMLElement; eye: HTMLElement; twisty: HTML
 
 /** The list fills the height it is given (the whole WavePlug 图层 panel); `tools` adds the 智能对象
  *  tools to the right-click menu. */
-export function createLayerTreeView(tree: LayerTree, status: Status, tools?: LayerTools, overlay?: Overlay, canvasView?: (docId: number) => Promise<CanvasView | null>, exportLayerPng?: PsHost["exportLayerPng"], docVersion?: PsHost["docVersion"], layerDragInfo?: PsHost["layerDragInfo"], illustrator?: { ready(): boolean; push(docId: number, ids: number[]): Promise<number>; pushBoard(docId: number, layers: readonly TreeLayer[], selected: readonly number[]): Promise<{ count: number; name: string; notes: string[] }>; linkOf(docId: number, layerId: number): string | null; ask(kind: "update" | "reveal", link: string): void }) {
+export function createLayerTreeView(tree: LayerTree, status: Status, tools?: LayerTools, overlay?: Overlay, canvasView?: (docId: number) => Promise<CanvasView | null>, exportLayerPng?: PsHost["exportLayerPng"], docVersion?: PsHost["docVersion"], layerDragInfo?: PsHost["layerDragInfo"], illustrator?: { ready(): boolean; push(docId: number, ids: number[]): Promise<number>; pushBoard(docId: number, layers: readonly TreeLayer[], selected: readonly number[]): Promise<{ count: number; name: string; notes: string[] }>; linkOf(docId: number, layerId: number): string | null; ask(kind: "update" | "reveal", link: string): void }, hintBar?: HintBar) {
   let docId: number | null = null, layers: TreeLayer[] = [], users = new Map<string, number>(), canvas = { width: 0, height: 0 };
   /** the layers by id (kept with `layers`): lookups in drawing and dragging, which run for every row */
   let byId = new Map<number, TreeLayer>();
@@ -184,6 +186,8 @@ export function createLayerTreeView(tree: LayerTree, status: Status, tools?: Lay
   /** what of the active layer Photoshop paints on (its pixels unless a mask was clicked); framed in
    *  green on every selected layer */
   let focus: { id: number; part: TargetPart } | null = null;
+  /** 提示栏: the part of the panel under the pointer, the layer there, and the modifier keys held */
+  let hintZone: HintZone = "none", hintLayer: number | null = null, heldKeys: HeldKeys = NO_KEYS;
   /** the part Photoshop last reported as targeted (onTarget), waiting for the read that tells which layer */
   let targetHint: { part: TargetPart; at: number } | null = null;
   const setFocusPart = (id: number, part: TargetPart) => {
@@ -483,6 +487,7 @@ export function createLayerTreeView(tree: LayerTree, status: Status, tools?: Lay
     nativeOn = !nativeOn;
     try { localStorage.setItem(NATIVE_COMMANDS_KEY, nativeOn ? "on" : "off"); } catch { /* not kept */ }
     renderNativeBtn();
+    updateHints();
     log("info", "native commands", nativeOn ? "on" : "off");
     status(nativeOn ? "已切换为原版命令（测试）" : "已切换回插件命令", "info");
   });
@@ -714,7 +719,7 @@ export function createLayerTreeView(tree: LayerTree, status: Status, tools?: Lay
   const pool: RowEl[] = [];
 
   function makeRow(): RowEl {
-    const eye = h("div", { class: "lt-eye", title: "显示 / 隐藏（Alt+单击：只显示这个图层）" });
+    const eye = h("div", { class: "lt-eye", title: "显示 / 隐藏" });
     const twisty = h("div", { class: "lt-twisty" });
     const name = h("span", { class: "lt-name" });
     const body = h("div", { class: "lt-body" });
@@ -1031,11 +1036,7 @@ export function createLayerTreeView(tree: LayerTree, status: Status, tools?: Lay
     // one guide line per level, continuing from row to row like Blender's outliner
     replace(r.body, h("div", { class: "lt-indent" }, ...Array.from({ length: l.depth }, () => h("span", { class: "lt-guide" }))), r.twisty,
       l.clipped ? h("div", { class: "lt-clip", title: "剪贴到下方图层（剪贴蒙版）" }, ic("clip", 13)) : null,
-      zoneOf(h("div", { class: "lt-mark" + (pictured ? " has-thumb" : ""), style: pictured ? "width: " + (thumbW(l) + 2) + "px" : "", title: l.kind === "smartObject"
-          ? "双击缩略图：编辑智能对象内容（PNG 自动转换为可编辑 PSB）；Ctrl+单击：载入选区"
-          : l.artboard
-            ? "双击画板缩略图：设置画板颜色；Ctrl+单击：载入选区"
-            : "双击缩略图无操作；双击图层空白区域：打开图层样式；Ctrl+单击：载入选区（+Shift 添加，+Alt 减去）" }, mark), l.id, "thumb"),
+      zoneOf(h("div", { class: "lt-mark" + (pictured ? " has-thumb" : ""), style: pictured ? "width: " + (thumbW(l) + 2) + "px" : "", title: l.kind === "smartObject" ? "智能对象缩略图" : l.artboard ? "画板缩略图" : "图层缩略图" }, mark), l.id, "thumb"),
       // as in Photoshop: picture ⛓ layer mask ⛓ vector mask, each chain its mask's link
       l.mask ? maskChain(l, false) : null,
       l.mask ? maskCell(l, maskThumb) : null,
@@ -1059,7 +1060,7 @@ export function createLayerTreeView(tree: LayerTree, status: Status, tools?: Lay
 
   /** The layer mask's thumbnail: click selects the mask for painting, Shift+click turns it off / on. */
   function maskCell(l: TreeLayer, url: string | null | undefined): HTMLElement {
-    const cell = h("div", { class: "lt-thumb lt-mask" + (l.maskOn ? "" : " off") + (maskView?.id === l.id && !maskView.filter ? " viewing" : "") + (framed(l) === "mask" ? " lt-target" : ""), style: `width: ${thumbW(l)}px`, title: (l.maskOn ? "图层蒙版：单击选中蒙版来编辑，Shift+单击停用，Ctrl+单击载入选区，Alt+单击只看蒙版（Alt+Shift：红色叠加），再按一次恢复" : "图层蒙版已停用：Shift+单击启用，Ctrl+单击载入选区") + "\n拖到其他图层：移动蒙版；Alt+拖动：复制；拖到左侧红区或垃圾桶：删除" },
+    const cell = h("div", { class: "lt-thumb lt-mask" + (l.maskOn ? "" : " off") + (maskView?.id === l.id && !maskView.filter ? " viewing" : "") + (framed(l) === "mask" ? " lt-target" : ""), style: `width: ${thumbW(l)}px`, title: l.maskOn ? "图层蒙版" : "图层蒙版（已停用）" },
       url ? thumbImg(url) : null);
     cell.addEventListener("mousedown", e => {
       e.stopPropagation();
@@ -1083,7 +1084,7 @@ export function createLayerTreeView(tree: LayerTree, status: Status, tools?: Lay
   /** The 智能滤镜 mask (white: Photoshop's default shows all): click to paint on it, like Photoshop */
   function filterMaskCell(l: TreeLayer): HTMLElement {
     const cell = h("div", { class: "lt-thumb lt-filter-mask" + (l.filterMask ? "" : " none") + (framed(l) === "filterMask" ? " lt-target" : "") + (maskView?.id === l.id && maskView.filter ? " viewing" : ""),
-      title: l.filterMask ? "智能滤镜蒙版：单击选中来编辑（单击图层缩略图回到图层），Ctrl+单击载入选区（+Shift 添加，+Alt 减去），Alt+单击只看蒙版（Alt+Shift：红色叠加），再按一次恢复\n拖到其他含智能滤镜且无滤镜蒙版的智能对象：移动；Alt+拖动：复制；拖到红区或垃圾桶：删除" : "没有智能滤镜蒙版" });
+      title: l.filterMask ? "智能滤镜蒙版" : "没有智能滤镜蒙版" });
     if (!l.filterMask) return cell;
     // the same clicks as the layer mask's
     cell.addEventListener("mousedown", e => {
@@ -1114,7 +1115,7 @@ export function createLayerTreeView(tree: LayerTree, status: Status, tools?: Lay
 
   /** The vector mask's thumbnail: click selects it, Shift+click turns it off / on, Ctrl+click loads its path as the selection. */
   function vmaskCell(l: TreeLayer, url: string | null | undefined): HTMLElement {
-    const cell = h("div", { class: "lt-thumb lt-mask lt-vmask" + (l.vmaskOn ? "" : " off") + (framed(l) === "vmask" ? " lt-target" : ""), style: `width: ${thumbW(l)}px`, title: (l.vmaskOn ? "矢量蒙版：单击选中，Shift+单击停用，Ctrl+单击载入选区" : "矢量蒙版已停用：Shift+单击启用，Ctrl+单击载入选区") + "\n拖到其他图层：移动蒙版；Alt+拖动：复制；拖到红区或垃圾桶：删除" },
+    const cell = h("div", { class: "lt-thumb lt-mask lt-vmask" + (l.vmaskOn ? "" : " off") + (framed(l) === "vmask" ? " lt-target" : ""), style: `width: ${thumbW(l)}px`, title: l.vmaskOn ? "矢量蒙版" : "矢量蒙版（已停用）" },
       url ? thumbImg(url) : null);
     cell.addEventListener("mousedown", e => {
       e.stopPropagation();
@@ -1164,7 +1165,7 @@ export function createLayerTreeView(tree: LayerTree, status: Status, tools?: Lay
   function fxCell(l: TreeLayer): HTMLElement {
     const open = openSubs().has(l.id);
     const cell = h("span", { class: "lt-col col-fx lt-fx" + (l.effectsOn ? "" : " off") + (open ? " open" : ""),
-      title: (l.effectsOn ? "图层样式" : "图层样式（已隐藏）") + "：单击" + (open ? "收起" : "展开") + "效果；右键查看图层样式选项；拖到别的图层上移动整个样式（按住 Alt 复制），拖到垃圾桶清除" }, "fx");
+      title: l.effectsOn ? "图层样式" : "图层样式（已隐藏）" }, "fx");
     // dragged like Photoshop's fx icon: onto another layer (move; Alt: copy), the trash (clear)
     cell.addEventListener("mousedown", e => { e.stopPropagation(); startDrag(l.id, e as MouseEvent, { what: { kind: "effects", layerId: l.id }, row: rowOf(l.id) }); });
     cell.addEventListener("click", e => { e.stopPropagation(); if (!suppressClick) toggleSub(l.id); });
@@ -1200,7 +1201,7 @@ export function createLayerTreeView(tree: LayerTree, status: Status, tools?: Lay
       case "filters": {
         // a click opens / closes the 智能滤镜 row, as the fx cell does the effects
         const t = tag(["filters"])!, open = openSubs().has(-l.id);
-        const b = box(t.cls + " lt-subcell" + (open ? " open" : ""), `智能滤镜：单击${open ? "收起" : "展开"}；拖到别的智能对象上移动全部（按住 Alt 复制），拖到垃圾桶清除\n` + t.tip, ic("filters", 14));
+        const b = box(t.cls + " lt-subcell" + (open ? " open" : ""), "智能滤镜\n" + t.tip, ic("filters", 14));
         // dragged like Photoshop's smart filter icon: onto another smart object (move; Alt: copy), the trash (clear)
         b.addEventListener("mousedown", e => { e.stopPropagation(); startDrag(l.id, e as MouseEvent, { what: { kind: "filters", layerId: l.id }, row: rowOf(l.id) }); });
         b.addEventListener("click", e => { e.stopPropagation(); if (!suppressClick) toggleSub(-l.id); });
@@ -1503,6 +1504,7 @@ export function createLayerTreeView(tree: LayerTree, status: Status, tools?: Lay
     replace(empty, docId === null ? "未打开文档" : !layers.length ? "文档里没有图层" : "没有符合筛选的图层");
     renderBar();
     draw();
+    updateHints();
   }
 
   /** Brings the first selected layer into view (opening its groups), after Photoshop changed the selection. */
@@ -2458,6 +2460,7 @@ export function createLayerTreeView(tree: LayerTree, status: Status, tools?: Lay
       }, EDGE_TICK_MS);
     }
     if (!edgeRate() && drag.scroller) { clearInterval(drag.scroller); drag.scroller = null; }
+    updateHints();
     const t1 = now(), p = drag.perf;
     p.moves++; p.total += t1 - t0; p.max = Math.max(p.max, t1 - t0);
     if (p.lastAt) p.gapMax = Math.max(p.gapMax, t0 - p.lastAt);
@@ -2605,6 +2608,7 @@ export function createLayerTreeView(tree: LayerTree, status: Status, tools?: Lay
     list.classList.remove("dragging");
     for (const b of dropTools) b.el.classList.remove("drop-on");
     if (d?.active) { suppressClick = true; setTimeout(() => { suppressClick = false; }, 0); draw(); }
+    updateHints();
     return d;
   }
   overlay?.onDisconnected(() => {
@@ -3097,6 +3101,7 @@ export function createLayerTreeView(tree: LayerTree, status: Status, tools?: Lay
     renaming = id;
     renameRow = row;
     lastDown = null;
+    updateHints();
     renameBox.value = l.name;
     renameBox.className = row.name.className + " lt-rename";
     setShown(renameBox, true);
@@ -3112,6 +3117,7 @@ export function createLayerTreeView(tree: LayerTree, status: Status, tools?: Lay
     const row = renameRow;
     renaming = null;
     renameRow = null;
+    updateHints();
     if (row && renameBox.parentElement === row.body) {
       if (save && name) replace(row.name, h("span", { class: "lt-name-text" }, name));
       renameBox.replaceWith(row.name);
@@ -3206,7 +3212,7 @@ export function createLayerTreeView(tree: LayerTree, status: Status, tools?: Lay
       { label: held.length ? `锁定组内的所有图层（${held.length}）` : "锁定组内的所有图层", hint: groups.size ? undefined : "请先选中图层组", enabled: held.length > 0, run: () => void run("lock", held) },
       "-",
       { label: shortcutsOn ? "快捷键：已开启" : "快捷键：已关闭", hint: "鼠标在面板上时 Ctrl+J / G / E / [ ] 等",
-        run: () => { shortcutsOn = !shortcutsOn; localStorage.setItem(SHORTCUT_KEY, shortcutsOn ? "on" : "off"); status(shortcutsOn ? "图层面板快捷键已开启" : "图层面板快捷键已关闭", "info"); } },
+        run: () => { shortcutsOn = !shortcutsOn; localStorage.setItem(SHORTCUT_KEY, shortcutsOn ? "on" : "off"); updateHints(); status(shortcutsOn ? "图层面板快捷键已开启" : "图层面板快捷键已关闭", "info"); } },
     ];
     popup.open(items, barTop() - 2, { upward: true, from: menuBtn, left: offsetIn(menuBtn, el)?.x ?? 4 });
   }
@@ -3392,6 +3398,79 @@ export function createLayerTreeView(tree: LayerTree, status: Status, tools?: Lay
     // the info line is no longer shown: the title's count carries it as a tooltip
     countEl.title = infoEl.title || text;
   }
+  /** 提示栏's middle: selection, filters, modes */
+  function updateState() {
+    if (!hintBar) return;
+    const sel = selectedLayers();
+    const selection = docId === null ? "" : !sel.length ? "" : sel.length > 1 ? `已选 ${sel.length} 个图层` : layerInfo(sel[0]).slice(0, 4).join(" · ");
+    const active = filter !== "all" || queryActive(query);
+    const what = [
+      ...[...query.kinds].map(k => KINDS.find(x => x[0] === k)?.[2] ?? k),
+      ...(filter !== "all" ? [FILTERS.find(f => f[0] === filter)?.[1] ?? filter] : []),
+      ...[...query.advanced].map(k => ADVANCED.find(x => x[0] === k)?.[1] ?? k),
+      ...(query.text ? [`“${query.text}”`] : []),
+    ].join("、");
+    hintBar.state(stateParts({
+      docOpen: docId !== null, selection,
+      filter: { active, paused: !filterEnabled, shown: rows.filter(r => !r.filter).length, total: layers.length, what },
+      native: nativeOn, shortcutsOff: !shortcutsOn, helper: !!overlay?.connected,
+    }));
+  }
+  /** 提示栏's first line, from what is under the pointer (or being dragged) and the keys held */
+  function updateHints() {
+    if (!hintBar) return;
+    updateState();
+    const l = hintLayer !== null ? byId.get(hintLayer) : undefined;
+    const sel = selected.size === 1 ? [...selected][0] : null;
+    const input: HintInput = {
+      mode: renaming !== null ? "rename" : drag?.active ? "drag" : "idle",
+      zone: hintZone, kind: l?.kind, artboard: l?.artboard, variant: l ? isVariantLayer(l) : false,
+      target: sel !== null && focus?.id === sel ? focus.part : null,
+      maskView: !!maskView, keys: heldKeys,
+    };
+    if (drag?.active) {
+      const region = drag.lifecycle.region, sub = drag.sub?.kind ?? null;
+      const tool = dropTools.find(b => b.el === drag!.overTool)?.action;
+      const ex = drag.external?.session;
+      input.drag = {
+        region: region === "delete" ? "trash" : region === "tool" ? "tool" : region === "workbench" ? "workbench" : region === "outside" ? "outside" : "list",
+        sub, tool: tool === "groupLayers" || tool === "duplicate" || tool === "delete" ? tool : null, canDelete: drag.canDelete,
+        export: ex ? { done: ex.files.length, total: ex.layers.length, ready: ex.phase === "ready" || ex.phase === "handedOff" } : null,
+      };
+      input.keys = { ...heldKeys, alt: drag.alt };
+    }
+    hintBar.hints(hintItems(input));
+  }
+  /** the part of the panel `t` is in, for the hints (the innermost part wins) */
+  function zoneAt(t: Element | null): { zone: HintZone; id: number | null } {
+    if (!t || !el.contains(t)) return { zone: "none", id: null };
+    const rowEl = t.closest(".lt-row") as HTMLElement | null;
+    const id = rowEl ? pool.find(r => r.el === rowEl)?.id ?? null : null;
+    const zone: HintZone = t.closest(".lt-vmask") ? "vmask" : t.closest(".lt-filter-mask") ? "filterMask" : t.closest(".lt-mask") ? "mask"
+      : t.closest(".k-variant") ? "variant" : t.closest(".lt-mark, .lt-thumb") ? "thumb" : t.closest(".lt-eye") ? "eye"
+      : t.closest(".lt-fx") ? "fx" : t.closest(".col-filters") ? "filters" : t.closest(".lt-chip") ? "chip" : t.closest(".lt-lock") ? "lock"
+      : t.closest(".lt-twisty") ? "twisty" : t.closest(".lt-name-text") ? "name" : rowEl ? "row"
+      : t.closest(".lt-bar") ? "tool" : (t === list || t === inner || t === empty) ? "blank" : "none";
+    return { zone, id };
+  }
+  const keysOf = (e: any): HeldKeys => ({ ctrl: !!(e.ctrlKey || e.metaKey), shift: !!e.shiftKey, alt: !!e.altKey });
+  if (hintBar) {
+    hintBar.onAction(a => { if (a === "clearFilters") { resetFilters(); render(); } });
+    listen(window, "mousemove", e => {
+      const z = drag?.active ? { zone: hintZone, id: hintLayer } : zoneAt(e.target as Element | null);
+      const k = keysOf(e);
+      if (z.zone === hintZone && z.id === hintLayer && k.ctrl === heldKeys.ctrl && k.shift === heldKeys.shift && k.alt === heldKeys.alt && !drag?.active) return;
+      hintZone = z.zone; hintLayer = z.id; heldKeys = k;
+      updateHints();
+    }, true);
+    for (const type of ["keydown", "keyup"]) listen(document, type, e => {
+      const k = keysOf(e);
+      if (k.ctrl === heldKeys.ctrl && k.shift === heldKeys.shift && k.alt === heldKeys.alt) return;
+      heldKeys = k; updateHints();
+    });
+    overlay?.onDisconnected(() => updateHints());
+    overlay?.onConnected(() => updateHints());
+  }
 
   /** The selected layer's properties, short; a variant layer also tells its shown variation's. */
   function layerInfo(l: TreeLayer): string[] {
@@ -3449,7 +3528,6 @@ export function createLayerTreeView(tree: LayerTree, status: Status, tools?: Lay
   }, 400);
 
 
-  list.title = "点击图层选中，点击列表空白处取消全选；Ctrl / ⌘ 加选，Shift 连选；双击图层空白区域打开图层样式；右键更多操作；拖动改顺序（拖到图层组中间放进组里）";
   el.append(
     h("div", { class: "card-head lt-top-head" }, h("span", { class: "label" }, "图层"), countEl, peersBtn, h("span", { class: "grow" }), thumbButton),
     findRow,

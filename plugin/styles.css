@@ -633,6 +633,31 @@ button, .ub { font: inherit; color: inherit; background: none; border: 0; paddin
 .lp-status.error { color: var(--c-err); }
 .lp-status.ok { color: var(--c-ok); }
 .lp-status.busy { color: var(--c-text); opacity: .9; }
+/* 提示栏 (Blender-style status bar): line 1 the hints for the pointer (keys as small boxes, the ones
+   held now lit), line 2 the panel's state and, at the right, the last result (click: the last ten) */
+.hb { position: relative; flex: none; margin-top: 4px; padding-top: 3px; border-top: 1px solid var(--c-line-soft); font-size: 11px; color: var(--c-text-2); }
+.hb-hints { display: flex; flex-wrap: wrap; overflow: hidden; height: 36px; align-content: flex-start; align-items: center; row-gap: 2px; white-space: nowrap; }
+.hb-item { display: flex; align-items: center; flex: none; height: 17px; margin-right: 10px; }
+.hb-key { flex: none; height: 14px; line-height: 14px; padding: 0 4px; margin-right: 3px; border: 1px solid var(--c-line); border-radius: var(--r); color: var(--c-text); font-size: 11px; }
+.hb-label { flex: none; }
+.hb-item.on .hb-key { border-color: var(--c-accent); color: var(--c-accent-hi); }
+.hb-item.on .hb-label { color: var(--c-text-hi); }
+.hb-line { display: flex; align-items: center; height: 18px; min-width: 0; }
+.hb-state { display: flex; flex: 1 1 auto; min-width: 0; overflow: hidden; white-space: nowrap; }
+.hb-part { flex: none; margin-right: 8px; }
+.hb-part.filter { color: var(--c-accent-hi); }
+.hb-part.mode { color: var(--c-info); }
+.hb-part.warn { color: var(--c-warn); }
+.hb-part.act { cursor: pointer; text-decoration: underline; }
+.hb-msg { flex: 0 1 auto; min-width: 0; max-width: 60%; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; padding: 0; margin: 0 0 0 6px; height: 18px; background: none; border: none; color: var(--c-text-2); font-size: 11px; text-align: right; }
+.hb-msg.ok { color: var(--c-ok); }
+.hb-msg.error { color: var(--c-err); }
+.hb-msg.busy { color: var(--c-text); }
+.hb-history { position: absolute; right: 0; bottom: 100%; z-index: 40; max-width: 100%; min-width: 180px; max-height: 220px; overflow-y: auto; padding: var(--sp-2); background: var(--c-pop); border: 1px solid var(--c-line-strong); border-radius: var(--r-l); }
+.hb-history-row { display: flex; gap: 6px; padding: 2px 4px; color: var(--c-text); }
+.hb-history-row.error { color: var(--c-err); }
+.hb-history-row.ok { color: var(--c-ok); }
+.hb-time { flex: none; color: var(--c-text-3); }
 /* 拖拽文件置入: shown over the panel while files from the file manager hover it; never takes the pointer */
 /* two zones: 上半 嵌入为智能对象 (deep teal), 下半 链接 (deep blue); the one under the pointer is lit, with the
    big icon, the words under it; UXP gives no Alt during a drag, so position picks the mode */

@@ -7,18 +7,14 @@ import { askIllustrator, linkOfLayer, pushBoardToIllustrator, pushToIllustrator 
 import { h, icon, replace } from "./dom.ts";
 import { fileBaseName, fileDropResultText, fileDropZoneAt, fileDropZones, webDrop, webDropResultText, pathsFromDropText, planFileDrop } from "../core/layers/fileDrop.ts";
 import { log } from "../app/log.ts";
+import { createHintBar, type HintBar } from "./hintBar.ts";
+import { NO_KEYS, hintItems } from "../core/layers/hints.ts";
 
 export function mountLayersPanel(root: HTMLElement, svc: Services, isShown: () => boolean) {
-  const statusEl = h("div", { class: "lp-status small" });
-  let clear: ReturnType<typeof setTimeout> | null = null;
-  const status = (text: string, kind: "info" | "ok" | "error" | "busy" = "info") => {
-    replace(statusEl, text);
-    statusEl.className = "lp-status small " + kind;
-    if (clear) clearTimeout(clear);
-    // A large artboard delete may keep Photoshop modal for tens of seconds. Do not clear the
-    // pending message after 3s while Photoshop is still working.
-    clear = kind === "busy" ? null : setTimeout(() => replace(statusEl), kind === "error" ? 8000 : 3000);
-  };
+  // 提示栏 (Blender-style status bar): hints for the pointer, the panel's state, the last results.
+  // A busy message (a long artboard delete …) stays until its result; errors stay until the next one.
+  const hintBar = createHintBar();
+  const status = (text: string, kind: "info" | "ok" | "error" | "busy" = "info") => hintBar.message(text, kind);
   const view = createLayerTreeView(svc.layers, status, svc.tools, svc.overlay, svc.host.canvasView ? id => svc.host.canvasView!(id) : undefined,
     (docId, layerId, sessionId, order) => svc.host.exportLayerPng(docId, layerId, sessionId, order),
     docId => svc.host.docVersion(docId),
@@ -30,11 +26,11 @@ export function mountLayersPanel(root: HTMLElement, svc: Services, isShown: () =
       pushBoard: (docId, layers, selected) => svc.overlay?.illustrator ? pushBoardToIllustrator(svc.overlay, svc.host, svc.bridgePs!, docId, layers, selected) : Promise.reject(new Error("Illustrator 的 WaveLayer 面板没有连接")),
       linkOf: (docId, layerId) => linkOfLayer(docId, layerId),
       ask: (kind, link) => { if (svc.overlay) askIllustrator(svc.overlay, kind, link); },
-    } : undefined);
+    } : undefined, hintBar);
   const dropEl = h("div", { class: "lp-drop" });
-  const panel = h("div", { class: "lp" }, view.el, statusEl, dropEl);
+  const panel = h("div", { class: "lp" }, view.el, hintBar.el, dropEl);
   replace(root, panel);
-  mountFileDrop(panel, dropEl, svc, status, () => void view.refresh());
+  mountFileDrop(panel, dropEl, svc, status, () => void view.refresh(), hintBar);
   // hover help is the host's own tooltip from `title` (1.2: the panel's drawn .tip box showed a second copy)
   svc.layers.onChange(() => { if (isShown()) void view.refresh(); });
   return { show: () => void view.refresh() };
@@ -49,7 +45,7 @@ export function mountLayersPanel(root: HTMLElement, svc: Services, isShown: () =
  *  not fill as browsers do: without preventDefault on dragover there is no drop), the events are
  *  heard on the panel and on the document (in case UXP doesn't bubble them), and each drag is logged
  *  (`file drag` / `file drop`) with what the event carried. */
-function mountFileDrop(panel: HTMLElement, dropEl: HTMLElement, svc: Services, status: (text: string, kind?: "info" | "ok" | "error" | "busy") => void, refresh: () => void) {
+function mountFileDrop(panel: HTMLElement, dropEl: HTMLElement, svc: Services, status: (text: string, kind?: "info" | "ok" | "error" | "busy") => void, refresh: () => void, hintBar: HintBar) {
   const place = svc.host.placeDroppedFiles?.bind(svc.host);
   if (!place) return;
   let hide: ReturnType<typeof setTimeout> | null = null, busy = false, loggedAt = 0;
@@ -71,6 +67,7 @@ function mountFileDrop(panel: HTMLElement, dropEl: HTMLElement, svc: Services, s
     if (key === shown) return;
     shown = key;
     // from a browser: no files, one zone (images are downloaded and embedded, words become text)
+    hintBar.hints(hintItems({ mode: "fileDrag", fileDrag: { count: hoverCount, fromWeb }, keys: NO_KEYS }));
     const zones = fromWeb ? [{ mode: "embedded" as const, title: "置入网页内容", sub: "图片下载后嵌入为智能对象；文字新建文字图层" }] : fileDropZones(hoverCount);
     const lit = fromWeb ? "embedded" : zone;
     replace(dropEl, ...zones.map(z =>
