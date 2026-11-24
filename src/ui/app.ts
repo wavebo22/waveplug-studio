@@ -1832,7 +1832,15 @@ export function mountApp(root: HTMLElement, svc: Services) {
     else if (CHANGES[0] && seen !== CHANGES[0].hash) { try { localStorage.setItem(SEEN_KEY, CHANGES[0].hash); } catch { /* storage off */ } }
   }
   renderAll();
-  svc.host.onChange(() => { void refresh(); void syncHangGuard(); if (toolsMode()) void toolsView.refresh(); });
+  // 卡死保护 only needs the list of open documents: at most every 5 s, not on every change
+  let hangSyncedAt = 0, hangTimer: ReturnType<typeof setTimeout> | null = null;
+  svc.host.onChange(() => {
+    void refresh();
+    const since = Date.now() - hangSyncedAt;
+    if (since > 5000) { hangSyncedAt = Date.now(); void syncHangGuard(); }
+    else if (!hangTimer) hangTimer = setTimeout(() => { hangTimer = null; hangSyncedAt = Date.now(); void syncHangGuard(); }, 5000 - since);
+    if (toolsMode()) void toolsView.refresh();
+  });
   const managedColdStart = svc.host.kind === "uxp"
     && settings.helperAutoStart !== false
     && settings.comfyAutoStartWithPhotoshop !== false;

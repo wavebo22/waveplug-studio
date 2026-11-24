@@ -43,13 +43,13 @@ test("WaveLayer selection modals notify the generation panel; mask reads do not 
     // The WaveLayer panel selects layers via an internal UXP modal, which does not
     // necessarily generate Photoshop's native "select" notification.
     await modal("WavePlug 选择图层", async () => { doc.activeLayers = [group]; });
-    await sleep(185);
+    await sleep(650);
     assert.equal(refreshed, 1);
 
     // A group-info refresh uses read-only modals: they must not recursively refresh.
     await modal("WavePlug 读取填充范围", async () => {});
     await modal("WavePlug 缩略图", async () => {});
-    await sleep(185);
+    await sleep(650);
     assert.equal(refreshed, 1);
 
     // A finished job should select the group that WaveLayer represents as the AI layer.
@@ -60,18 +60,18 @@ test("WaveLayer selection modals notify the generation panel; mask reads do not 
     };
     await host.selectFillGroup(target);
     assert.equal(doc.activeLayers[0].id, group.id);
-    await sleep(185);
+    await sleep(650);
     assert.equal(refreshed, 2);
 
     // Deleting/switching a variation in WaveLayer also updates the generator panel.
     await modal("WavePlug 切换变体", async () => {});
-    await sleep(185);
+    await sleep(650);
     assert.equal(refreshed, 3);
 
     // Do not regress the native Photoshop Layers-panel notifications.
     assert.ok(listener);
     (listener as () => void)();
-    await sleep(185);
+    await sleep(650);
     assert.equal(refreshed, 4);
 
     // Do not hijack a different document if the user switched away during generation.
@@ -83,7 +83,7 @@ test("WaveLayer selection modals notify the generation panel; mask reads do not 
     // Development reload must not leave our extra modal listener behind.
     host.dispose();
     await modal("WavePlug 选择图层", async () => {});
-    await sleep(185);
+    await sleep(650);
     assert.equal(refreshed, 4);
   } finally {
     host.dispose();

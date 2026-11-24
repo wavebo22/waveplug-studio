@@ -470,7 +470,7 @@ export function createLayerTreeView(tree: LayerTree, status: Status, tools?: Lay
   let pointerMovedAt = 0;
   const frameAt = (id: number) => {
     if (!frameOn || !canvasView || !overlay?.connected || drag || docId === null || id === frameId) return;
-    if (scroller.scrolling() || Date.now() - pointerMovedAt > 120) return;
+    if (listMoving() || Date.now() - pointerMovedAt > 120) return;
     frameId = id;
     if (frameTimer) clearTimeout(frameTimer);
     frameTimer = setTimeout(() => { frameTimer = null; if (frameId === id) void drawFrame(id); }, FRAME_DELAY);
@@ -803,13 +803,55 @@ export function createLayerTreeView(tree: LayerTree, status: Status, tools?: Lay
   let firstRow = 0;
   /** wheel / scrollbar: at most one redraw a frame, and the list counts as scrolling until it settles
    *  (core/layers/scroll.ts): no thumbnails read, no hover frame meanwhile */
+  // 平滑滚动: the list glides to the row the scroller asks for — `rowOffset` px of the first row
+  // are scrolled past (the rows are moved up by that much; `offsetRow` is the first row it is for:
+  // anything else that sets firstRow starts again from a whole row). Rows are refilled only when the
+  // first row changes; the frames in between only move them.
+  let rowOffset = 0, offsetRow = -1;
+  let glide: { target: number; timer: ReturnType<typeof setTimeout> } | null = null;
+  const GLIDE_MS = 16, GLIDE_EASE = 0.32;
+  const rowPos = () => firstRow + (offsetRow === firstRow && rows[firstRow] ? rowOffset / heightOf(rows[firstRow]) : 0);
+  function stopGlide(snap = false) {
+    if (glide) { clearTimeout(glide.timer); glide = null; }
+    if (snap && rowOffset) { rowOffset = 0; draw(); }
+  }
+  function glideStep() {
+    if (!glide) return;
+    // someone else moved the list meanwhile (scrollTo, a filter …): stop where it is
+    if (offsetRow !== firstRow && rowOffset) { glide = null; return; }
+    const pos = rowPos(), diff = glide.target - pos;
+    const next = Math.abs(diff) < 0.02 ? glide.target : pos + Math.sign(diff) * Math.max(Math.abs(diff) * GLIDE_EASE, 0.02);
+    const before = firstRow;
+    firstRow = Math.max(0, Math.min(Math.floor(next + 1e-6), maxFirst()));
+    rowOffset = firstRow >= maxFirst() || !rows[firstRow] ? 0 : Math.round((next - firstRow) * heightOf(rows[firstRow]));
+    offsetRow = firstRow;
+    if (firstRow !== before) draw(); else placeRows();
+    if (next === glide.target) { glide = null; return; }
+    glide.timer = setTimeout(glideStep, GLIDE_MS);
+  }
+  function glideTo(row: number) {
+    if (glide) { glide.target = row; return; }
+    glide = { target: row, timer: setTimeout(glideStep, 0) };
+  }
+  /** moves the rows up by rowOffset (and the scrollbar with them) */
+  function placeRows() {
+    const off = offsetRow === firstRow ? rowOffset : 0;
+    inner.style.top = off ? -off + "px" : "";
+    if (isShown(sbar) && rows.length) {
+      const H = list.clientHeight || 1, th = sthumb.offsetHeight || 24, room = H - th;
+      sthumb.style.top = Math.round(room * Math.min(1, rowPos() / Math.max(1, maxFirst()))) + "px";
+    }
+  }
   const scroller = createScroller({
     clock: { now: () => Date.now(), later: (fn, ms) => setTimeout(fn, ms), cancel: h => clearTimeout(h as ReturnType<typeof setTimeout>) },
-    current: () => firstRow,
+    // while gliding, more wheel notches add to where it is going
+    current: () => glide ? glide.target : firstRow,
     clamp: r => Math.max(0, Math.min(r, maxFirst())),
-    apply: r => { firstRow = r; draw(); },
+    apply: r => glideTo(r),
     settled: () => queueThumbs(0),
   });
+  /** the list is moving (wheel, scrollbar, its glide): nothing that asks Photoshop meanwhile */
+  const listMoving = () => scroller.scrolling() || glide !== null;
   const inner = h("div", { class: "lt-inner" });
   const sthumb = h("div", { class: "lt-sthumb" });
   const sbar = h("div", { class: "lt-sbar" }, sthumb);
@@ -1401,7 +1443,8 @@ export function createLayerTreeView(tree: LayerTree, status: Status, tools?: Lay
   /** Fills the rows that fit, from `firstRow`, and sets the scrollbar. */
   function draw() {
     firstRow = Math.max(0, Math.min(firstRow, maxFirst()));
-    const first = firstRow, count = fits() + 1;
+    if (offsetRow !== firstRow) { rowOffset = 0; offsetRow = firstRow; }
+    const first = firstRow, count = fits() + 2;
     while (pool.length < count) pool.push(makeRow());
 
     // The editor belongs to one specific pooled row. If scrolling, filtering or tree changes
@@ -1436,6 +1479,7 @@ export function createLayerTreeView(tree: LayerTree, status: Status, tools?: Lay
       sthumb.style.top = Math.round(room * first / Math.max(1, maxFirst())) + "px";
       sthumb.classList.toggle("a", !sthumb.classList.contains("a"));
     }
+    placeRows();
     queueThumbs();
   }
 
@@ -1477,6 +1521,8 @@ export function createLayerTreeView(tree: LayerTree, status: Status, tools?: Lay
   /** Scrolls by `n` rows at once (negative: up): the drag's edge scroll, which goes on tracking
    *  from the new rows straight away. Wheel and scrollbar go through `scroller`. */
   function scrollRows(n: number) {
+    stopGlide();
+    rowOffset = 0;
     const before = firstRow;
     firstRow = Math.max(0, Math.min(firstRow + n, maxFirst()));
     if (firstRow !== before) draw();
@@ -1507,7 +1553,7 @@ export function createLayerTreeView(tree: LayerTree, status: Status, tools?: Lay
   async function fetchThumbs() {
     // nothing to do while the list isn't on screen (another page, a hidden panel) or a drag runs
     if (fetching || docId === null || drag?.active || !list.clientHeight) return;
-    if (scroller.scrolling()) { queueThumbs(); return; }
+    if (listMoving()) { queueThumbs(); return; }
     const now = Date.now();
     // a variant layer: its shown variation, all of them while they are listed
     const variants = (l: TreeLayer) => !thumbsOn || !isVariantLayer(l) ? [] : openSubs().has(l.id) ? l.ai!.ids : l.ai!.shown !== null ? [l.ai!.shown] : [];
@@ -2171,6 +2217,8 @@ export function createLayerTreeView(tree: LayerTree, status: Status, tools?: Lay
   const showDragGhost = false;
   function startDrag(id: number, e: MouseEvent, sub?: { what: SubDrag; row: number }) {
     if (e.button !== 0 || docId === null || deleting || orderPreview) return;
+    // the drag measures rows from whole-row positions: a list mid-glide settles on its row first
+    stopGlide(true);
     ghostContent = "";
     ghostThumbUrl = null;
     ghostPanel = null;

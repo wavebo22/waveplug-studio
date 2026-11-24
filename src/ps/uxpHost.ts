@@ -55,8 +55,15 @@ export function onModalDone(cb: (name: string) => void): () => void {
 export async function modal<T>(name: string, fn: (ctx: any) => Promise<T>, opts: { interactive?: boolean } = {}): Promise<T> {
   // every Photoshop command the plugin runs, for the report (not the constant thumbnail / selection ones)
   if (!/缩略图|选择图层/.test(name)) crumb("PS：" + name.replace(/^WavePlug\s*/, ""));
-  try { return await ps().core.executeAsModal(fn, { commandName: name, ...opts }); }
-  finally { for (const cb of modalDone) { try { cb(name); } catch (e) { log("warn", "modal done", e); } } }
+  // how long it waited for Photoshop and how long it held it: the panels stall while one runs
+  const t0 = Date.now();
+  let started = 0;
+  try { return await ps().core.executeAsModal((ctx: any) => { started = Date.now(); return fn(ctx); }, { commandName: name, ...opts }); }
+  finally {
+    const end = Date.now();
+    if (end - t0 > 250) log("info", "modal slow", name, JSON.stringify({ waitMs: (started || end) - t0, runMs: started ? end - started : 0 }));
+    for (const cb of modalDone) { try { cb(name); } catch (e) { log("warn", "modal done", e); } }
+  }
 }
 
 /** Runs `fn` as one undo step named `name` in document `docId`. */
@@ -942,8 +949,16 @@ export class UxpHost implements PsHost {
   private modalListeners: (() => void)[] = [];
 
   onChange(cb: () => void): void {
-    let timer: ReturnType<typeof setTimeout> | null = null;
-    const fire = () => { if (timer) clearTimeout(timer); timer = setTimeout(cb, 150); };
+    let timer: ReturnType<typeof setTimeout> | null = null, lastAt = 0;
+    // The main panel re-reads Photoshop on every change. While changes keep coming (rows clicked
+    // one after another in WaveLayer) it waits for a pause: one read after the last click, not one
+    // per click competing with WaveLayer's own (11-24: reads waited up to 6.8 s for Photoshop).
+    const fire = () => {
+      const now = Date.now(), busy = now - lastAt < 1000;
+      lastAt = now;
+      if (timer) clearTimeout(timer);
+      timer = setTimeout(cb, busy ? 600 : 150);
+    };
     // Photoshop does NOT deliver native action notifications for every batchPlay operation
     // initiated by this plugin. WaveLayer uses such a modal command to select its rows.
     // Only selection-affecting commands below fire; do not listen to mask/thumbnail read
