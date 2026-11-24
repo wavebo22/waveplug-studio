@@ -764,7 +764,7 @@ button, .ub { font: inherit; color: inherit; background: none; border: 0; paddin
 .lt-fx-master { border: 0; padding: 0; background: none; border-radius: var(--r-s); cursor: pointer; line-height: 1; }
 .lt-fx-master:hover { color: var(--c-accent-hi); outline: 1px solid var(--c-accent-hi); }
 .lt-fx-master.off { color: var(--c-text-3); }
-.lt-effects-row .lt-guide { visibility: hidden; }
+
 .lt-rename { flex: 1 1 0; width: 0; min-width: 40px; height: var(--h-s); box-sizing: border-box; margin: 0; background: var(--c-field); color: var(--c-text); border: 1px solid var(--c-accent); border-radius: var(--r); font: inherit; padding: 0 var(--sp-3); outline: none; }
 .lt-bar { flex: none; display: flex; justify-content: flex-end; align-items: center; margin-left: auto; }
 .lt-foot { position: relative; z-index: 9; flex: none; display: flex; flex-wrap: wrap; align-items: center; margin-top: 6px; padding-top: 4px; border-top: 1px solid var(--c-line-soft); }
@@ -847,8 +847,16 @@ button, .ub { font: inherit; color: inherit; background: none; border: 0; paddin
 .lt-toggle.off::after { content: ""; position: absolute; width: 12px; height: 2px; background: var(--c-warn); transform: rotate(-45deg); }
 .lt-toggle { position: relative; }
 .lt-indent { display: flex; flex: none; height: 100%; }
-.lt-guide { width: 7px; margin-left: 6px; height: 100%; flex: none; border-left: 1px solid var(--c-line-strong); }
-.lt-row.on .lt-guide { border-left-color: var(--c-text-3); }
+/* 图层树的连接线 (core/layers/guides.ts): one 18px box per level (INDENT); │ the line goes on, ├ a
+   child with more below, └ the last child (the line ends there); .hot: the selected layer's group */
+.lt-guide { position: relative; width: 18px; height: 100%; flex: none; }
+.lt-gv { position: absolute; left: 8px; top: 0; bottom: -1px; border-left: 1px solid var(--c-text-3); }
+.lt-guide.elbow .lt-gv { bottom: 50%; }
+.lt-gh { position: absolute; left: 8px; top: 50%; width: 9px; border-top: 1px solid var(--c-text-3); }
+.lt-guide.hot .lt-gv, .lt-guide.hot .lt-gh, .lt-gstub.hot { border-color: var(--c-accent-hi); }
+/* an open group: its line starts under its arrow */
+.lt-twisty { position: relative; }
+.lt-gstub { position: absolute; left: 8px; top: 75%; bottom: -1px; border-left: 1px solid var(--c-text-3); }
 /* status cells as icons */
 .lt-tag { display: flex; align-items: center; height: 20px; padding: 0 3px; }
 .lt-count { margin-left: 2px; font-size: var(--fs-s); font-weight: var(--fw-bold); }

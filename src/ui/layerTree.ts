@@ -38,6 +38,7 @@ import { onSmartTarget } from "./smartTarget.ts";
 import { createSlider } from "./slider.ts";
 import { type HeldKeys, type HintInput, type HintZone, NO_KEYS, hintItems, stateParts } from "../core/layers/hints.ts";
 import type { HintBar } from "./hintBar.ts";
+import { type GuideMark, guideKey, treeGuides } from "../core/layers/guides.ts";
 import { createWorkbenchSection } from "./workbench.ts";
 import { attachWorkbenchSurface } from "./workbenchSurface.ts";
 import { setWorkbenchPrefs, workbenchState } from "./workbenchStore.ts";
@@ -58,7 +59,8 @@ let thumbSize = thumbnailMetrics(thumbPercent);
 let ROW = thumbSize.row, SHORT = thumbSize.short;
 const isShort = (r: Row) => isCompactRow(r);
 const heightOf = (r: Row) => isShort(r) ? SHORT : ROW;
-const INDENT = 14;
+/** px per level of the tree (one box of connecting lines, .lt-guide) */
+const INDENT = 18;
 /** px from the row's left edge to where the indent starts: colour stripe, eye, padding */
 const LEAD = 4 + 22 + 2;
 /** icon and name of each kind of layer (in place of a thumbnail, or as a badge on it) */
@@ -163,6 +165,10 @@ export function createLayerTreeView(tree: LayerTree, status: Status, tools?: Lay
   // ignore host reads of the old tree; the completed Photoshop modal event will reconcile it.
   let orderPreview = false;
   let selected = new Set<number>(), rows: Row[] = [], filter: Filter = "all", anchor: number | null = null;
+  /** the tree's connecting lines, one list per row of `rows` */
+  let guides: GuideMark[][] = [];
+  /** groups holding a selected layer (their line is lit) */
+  let selParents = new Set<number>();
   /** collapsed groups per document; groups start collapsed */
   const expandedByDoc = new Map<number, Set<number>>();
   const expanded = () => { if (docId === null) return new Set<number>(); let s = expandedByDoc.get(docId); if (!s) expandedByDoc.set(docId, s = new Set()); return s; };
@@ -840,8 +846,9 @@ export function createLayerTreeView(tree: LayerTree, status: Status, tools?: Lay
       fx ? l.effectList.map(e => e.name + +e.enabled).join() : l.filters.map(x => x.name + +x.enabled).join(), thumbPercent].join("|");
     r.index = index;
     setShown(r.el, true);
-    if (key === r.key) return;
-    r.key = key; r.id = l.id; r.sub = f;
+    const gk = key + "#" + guideKey(guides[index]);
+    if (gk === r.key) return;
+    r.key = gk; r.id = l.id; r.sub = f;
     r.el.className = "lt-row lt-filter-row" + (fx ? " lt-effects-row" : "") + (sel ? " on" : "") + (f.enabled ? "" : " off") + (moving ? " moving" : "") + (r.el === hoverEl ? " hover" : "");
     (r.el.firstChild as HTMLElement).className = "lt-stripe";
     replace(r.eye, !fx && f.enabled && !more ? ic("eye", "m") : null);
@@ -863,7 +870,7 @@ export function createLayerTreeView(tree: LayerTree, status: Status, tools?: Lay
         if (!suppressClick) void run("toggleEffects", [l.id], allOn ? "off" : "on");
       });
     }
-    replace(r.body, h("div", { class: "lt-indent" }, ...Array.from({ length: l.depth + 1 }, () => h("span", { class: "lt-guide" }))),
+    replace(r.body, guideEl(index),
       fx ? h("div", { class: "lt-mark" }, fxMaster)
         : h("div", { class: "lt-mark has-thumb" }, more ? null : filterMaskCell(l)),
       fx ? effectChips(l, places, r, held) : filterChips(l, places, r, held));
@@ -967,12 +974,13 @@ export function createLayerTreeView(tree: LayerTree, status: Status, tools?: Lay
     const key = ["v", l.id, f.line, places.join(), ai.ids.join(), ai.shown, l.depth, sel, thumbsOn, ...places.map(i => thumbs().version(ai.ids[i]))].join("|");
     r.index = index;
     setShown(r.el, true);
-    if (key === r.key) return;
-    r.key = key; r.id = l.id; r.sub = f;
+    const gk = key + "#" + guideKey(guides[index]);
+    if (gk === r.key) return;
+    r.key = gk; r.id = l.id; r.sub = f;
     r.el.className = "lt-row lt-filter-row lt-variant-row" + (sel ? " on" : "") + (r.el === hoverEl ? " hover" : "");
     (r.el.firstChild as HTMLElement).className = "lt-stripe";
     replace(r.eye); r.eye.className = "lt-eye none"; r.eye.title = ""; r.eye.style.backgroundColor = "";
-    replace(r.body, h("div", { class: "lt-indent" }, ...Array.from({ length: l.depth + 1 }, () => h("span", { class: "lt-guide" }))),
+    replace(r.body, guideEl(index),
       h("div", { class: "lt-chips" }, ...places.map(i => variantChip(l, i))));
     r.el.title = `${l.name} 的变体：单击换成那一个，× 删除`;
   }
@@ -997,6 +1005,13 @@ export function createLayerTreeView(tree: LayerTree, status: Status, tools?: Lay
     return chip;
   }
 
+  /** the tree's connecting lines for row `index` (core/layers/guides.ts), one box per level of indent */
+  function guideEl(index: number): HTMLElement {
+    return h("div", { class: "lt-indent" }, ...(guides[index] ?? []).map(m =>
+      h("span", { class: "lt-guide " + m.kind + (m.hot ? " hot" : "") },
+        m.kind === "blank" ? null : h("i", { class: "lt-gv" }),
+        m.kind === "tee" || m.kind === "elbow" ? h("i", { class: "lt-gh" }) : null)));
+  }
   function fill(r: RowEl, row: Row, index: number) {
     if (row.filter?.kind === "variants") { fillVariants(r, row, index); return; }
     if (row.filter) { fillFilter(r, row, index); return; }
@@ -1011,11 +1026,12 @@ export function createLayerTreeView(tree: LayerTree, status: Status, tools?: Lay
     const maskThumb = l.mask && thumbsOn ? thumbs().get(maskKey(l.id)) : undefined;
     const vmaskThumb = l.vmask && thumbsOn ? thumbs().get(vmaskKey(l.id)) : undefined;
     const key = [l.id, l.name, l.visible, l.locked, l.lockAll, l.lockPosition, l.lockPixels, l.lockTransparency, groupLocked.has(l.id), l.links.length, peers.has(l.id), sharedColor(l), l.mask, l.maskOn, l.clipped, l.clipBase, l.effects, l.effectsOn, l.depth, l.children, l.ai?.variations, l.smart?.contentId, l.smart?.linked, l.smart?.file, l.filters.length, l.filtersOn, l.effectList.map(e => +e.enabled).join(""), groupColor.get(l.id),
-      users.get(l.smart?.contentId ?? "") ?? 0, sel, open, row.context, moving, thumbs().version(l.id), thumbs().version(maskKey(l.id)), thumbs().version(vmaskKey(l.id)), l.vmask, l.vmaskOn, l.maskLinked, l.vmaskLinked, l.color, customOf(l.id), maskView?.id === l.id, hasPicture(l), framed(l), thumbW(l), openSubs().has(-l.id), openSubs().has(l.id), shown, shown !== null ? thumbs().version(shown) : 0, l.ai?.shown].join("|");
+      users.get(l.smart?.contentId ?? "") ?? 0, sel, open, row.context, moving, thumbs().version(l.id), thumbs().version(maskKey(l.id)), thumbs().version(vmaskKey(l.id)), l.vmask, l.vmaskOn, l.maskLinked, l.vmaskLinked, l.color, customOf(l.id), maskView?.id === l.id, hasPicture(l), framed(l), thumbW(l), openSubs().has(-l.id), openSubs().has(l.id), shown, shown !== null ? thumbs().version(shown) : 0, l.ai?.shown, rows[index + 1]?.layer.parentId === l.id, selParents.has(l.id)].join("|");
     r.index = index;
     setShown(r.el, true);
-    if (key === r.key) return;
-    r.key = key; r.id = l.id; r.sub = null;
+    const gk = key + "#" + guideKey(guides[index]);
+    if (gk === r.key) return;
+    r.key = gk; r.id = l.id; r.sub = null;
     // a closed group shows the colour of the selected content's copies inside it
     const inside = l.kind === "group" && !open ? groupColor.get(l.id) : undefined;
     const color = sharedColor(l) ?? inside, peer = peers.has(l.id);
@@ -1030,7 +1046,10 @@ export function createLayerTreeView(tree: LayerTree, status: Status, tools?: Lay
     // a variant layer opens its variations from the ✦ on its picture, not a twisty
     // effects and smart filters open from their status icons (fx / 智能滤镜), not a twisty
     const folds = !vl && l.kind === "group" && l.children > 0;
-    replace(r.twisty, folds ? ic(open ? "chevron" : "chevronRight", "s") : null);
+    // an open group with its layers under it: its line starts under the arrow (guides.ts carries it on)
+    const kidsShown = folds && open && rows[index + 1]?.layer.parentId === l.id;
+    const kidsHot = kidsShown && selParents.has(l.id);
+    replace(r.twisty, folds ? ic(open ? "chevron" : "chevronRight", "s") : null, kidsShown ? h("i", { class: "lt-gstub" + (kidsHot ? " hot" : "") }) : null);
     r.twisty.title = !folds ? "" : open ? "折叠" : "展开";
     replace(r.name, h("span", { class: "lt-name-text" }, l.name));
     r.name.className = "lt-name" + (l.clipBase ? " clip-base" : "");
@@ -1043,7 +1062,7 @@ export function createLayerTreeView(tree: LayerTree, status: Status, tools?: Lay
       : kindIcon(l, open);
 
     // one guide line per level, continuing from row to row like Blender's outliner
-    replace(r.body, h("div", { class: "lt-indent" }, ...Array.from({ length: l.depth }, () => h("span", { class: "lt-guide" }))), r.twisty,
+    replace(r.body, guideEl(index), r.twisty,
       l.clipped ? h("div", { class: "lt-clip", title: "剪贴到下方图层（剪贴蒙版）" }, ic("clip", "s")) : null,
       zoneOf(h("div", { class: "lt-mark" + (pictured ? " has-thumb" : ""), style: pictured ? "width: " + (thumbW(l) + 2) + "px" : "", title: l.kind === "smartObject" ? "智能对象缩略图" : l.artboard ? "画板缩略图" : "图层缩略图" }, mark), l.id, "thumb"),
       // as in Photoshop: picture ⛓ layer mask ⛓ vector mask, each chain its mask's link
@@ -1472,6 +1491,8 @@ export function createLayerTreeView(tree: LayerTree, status: Status, tools?: Lay
     const effectiveFilter = filterEnabled ? filter : "all";
     const effectiveQuery = filterEnabled ? query : undefined;
     rows = layoutEffects(visibleRows(layers, collapsed, effectiveFilter, users, openSubs(), effectiveQuery));
+    selParents = new Set(layers.filter(l => selected.has(l.id) && l.parentId !== null).map(l => l.parentId!));
+    guides = treeGuides(rows.map(r => ({ id: r.layer.id, depth: r.layer.depth, parentId: r.layer.parentId, sub: !!r.filter })), selected);
     groupLocked = lockedByGroup(layers);
     KINDS.forEach(([k], i) => kindBtns[i].classList.toggle("on", query.kinds.has(k)));
     ADVANCED.forEach(([k], i) => advancedBtns[i].classList.toggle("on", query.advanced.has(k)));
