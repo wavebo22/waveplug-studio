@@ -1086,10 +1086,17 @@ export function createLayerTreeView(tree: LayerTree, status: Status, tools?: Lay
       ic(t.cls === "link" ? "external" : "smart", "xs")), l.id, "status");
   }
 
+  /** 停用的蒙版: Photoshop's red cross from corner to corner over the (dimmed) thumbnail. A real element:
+   *  the old ::after with gradients was never drawn by UXP, so on and off looked the same. */
+  function maskOffMark(): HTMLElement {
+    const x = icon("maskOff", 20);
+    x.setAttribute("preserveAspectRatio", "none");
+    return h("span", { class: "lt-mask-x" }, x);
+  }
   /** The layer mask's thumbnail: click selects the mask for painting, Shift+click turns it off / on. */
   function maskCell(l: TreeLayer, url: string | null | undefined): HTMLElement {
-    const cell = h("div", { class: "lt-thumb lt-mask" + (l.maskOn ? "" : " off") + (maskView?.id === l.id && !maskView.filter ? " viewing" : "") + (framed(l) === "mask" ? " lt-target" : ""), style: `width: ${thumbW(l)}px`, title: l.maskOn ? "图层蒙版" : "图层蒙版（已停用）" },
-      url ? thumbImg(url) : null);
+    const cell = h("div", { class: "lt-thumb lt-mask" + (l.maskOn ? "" : " off") + (maskView?.id === l.id && !maskView.filter ? " viewing" : "") + (framed(l) === "mask" ? " lt-target" : ""), style: `width: ${thumbW(l)}px`, title: l.maskOn ? "图层蒙版（已启用）" : "图层蒙版（已停用）" },
+      url ? thumbImg(url) : null, l.maskOn ? null : maskOffMark());
     cell.addEventListener("mousedown", e => {
       e.stopPropagation();
       const m = e as MouseEvent;
@@ -1143,8 +1150,8 @@ export function createLayerTreeView(tree: LayerTree, status: Status, tools?: Lay
 
   /** The vector mask's thumbnail: click selects it, Shift+click turns it off / on, Ctrl+click loads its path as the selection. */
   function vmaskCell(l: TreeLayer, url: string | null | undefined): HTMLElement {
-    const cell = h("div", { class: "lt-thumb lt-mask lt-vmask" + (l.vmaskOn ? "" : " off") + (framed(l) === "vmask" ? " lt-target" : ""), style: `width: ${thumbW(l)}px`, title: l.vmaskOn ? "矢量蒙版" : "矢量蒙版（已停用）" },
-      url ? thumbImg(url) : null);
+    const cell = h("div", { class: "lt-thumb lt-mask lt-vmask" + (l.vmaskOn ? "" : " off") + (framed(l) === "vmask" ? " lt-target" : ""), style: `width: ${thumbW(l)}px`, title: l.vmaskOn ? "矢量蒙版（已启用）" : "矢量蒙版（已停用）" },
+      url ? thumbImg(url) : null, l.vmaskOn ? null : maskOffMark());
     cell.addEventListener("mousedown", e => {
       e.stopPropagation();
       const m = e as MouseEvent;
@@ -3509,6 +3516,7 @@ export function createLayerTreeView(tree: LayerTree, status: Status, tools?: Lay
     const input: HintInput = {
       mode: renaming !== null ? "rename" : drag?.active ? "drag" : "idle",
       zone: hintZone, kind: l?.kind, artboard: l?.artboard, variant: l ? isVariantLayer(l) : false,
+      maskOn: hintZone === "vmask" ? l?.vmaskOn : l?.maskOn,
       target: sel !== null && focus?.id === sel ? focus.part : null,
       maskView: !!maskView, keys: heldKeys,
     };

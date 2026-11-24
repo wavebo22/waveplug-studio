@@ -746,8 +746,12 @@ button, .ub { font: inherit; color: inherit; background: none; border: 0; paddin
 .lt.fill { position: relative; }
 .lt.fill:focus { outline: none; }
 .lt-mask { margin-right: 6px; flex: none; background: var(--c-text-hi); }
-.lt-mask.off::after { content: ""; position: absolute; left: 0; top: 0; right: 0; bottom: 0;
-  background: linear-gradient(45deg, transparent 46%, var(--c-err) 46%, var(--c-err) 54%, transparent 54%), linear-gradient(-45deg, transparent 46%, var(--c-err) 46%, var(--c-err) 54%, transparent 54%); }
+/* 停用的蒙版: dimmed, a red cross corner to corner and a red frame (as Photoshop) — on and off differ at a glance */
+.lt-mask { position: relative; }
+.lt-mask.off { border-color: var(--c-err); }
+.lt-mask.off .lt-pic { opacity: .4; }
+.lt-mask-x { position: absolute; left: 0; top: 0; right: 0; bottom: 0; display: flex; color: var(--c-err); pointer-events: none; }
+.lt-mask-x .icon { width: 100%; height: 100%; }
 .lt-mask:hover, .lt-fx:hover { outline: 1px solid var(--c-accent-hi); }
 /* the picture or mask Photoshop paints on, on every selected layer: a green frame (the 2 px border every thumbnail has, so nothing moves) */
 .lt-thumb.lt-target { border-color: var(--c-accent-hi); }

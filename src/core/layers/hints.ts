@@ -21,6 +21,8 @@ export interface HintInput {
   variant?: boolean;
   /** what Photoshop paints on for the selected layer: its pixels or one of its masks */
   target?: "layer" | "mask" | "vmask" | "filterMask" | null;
+  /** the mask under the pointer is on (false: 已停用) */
+  maskOn?: boolean;
   /** a mask is shown alone / in red (Alt+click) */
   maskView?: boolean;
   /** a layer (or a mask, effect …) being dragged */
@@ -107,10 +109,12 @@ function idleItems(h: HintInput): HintItem[] {
     ? [it(["键盘"], `快捷键作用在${h.target === "mask" ? "图层蒙版" : h.target === "vmask" ? "矢量蒙版" : "智能滤镜蒙版"}上（单击图层缩略图回到图层）`)] : [];
   switch (z) {
     case "mask": case "filterMask":
-      return [it(["左键"], "编辑蒙版"), ...(z === "mask" ? [it(["Shift", "左键"], "停用 / 启用")] : []), it(["Alt", "左键"], h.maskView ? "恢复显示" : "只看蒙版"),
+      return [...(z === "mask" && h.maskOn === false ? [it(["已停用"], "PS 不使用这个蒙版")] : []),
+        it(["左键"], "编辑蒙版"), ...(z === "mask" ? [it(["Shift", "左键"], h.maskOn === false ? "启用蒙版" : "停用蒙版")] : []), it(["Alt", "左键"], h.maskView ? "恢复显示" : "只看蒙版"),
         it(["Alt", "Shift", "左键"], "红色叠加"), it(["Ctrl", "左键"], "载入选区"), it(["拖动"], "移到其他图层（Alt 复制）")];
     case "vmask":
-      return [it(["左键"], "选中矢量蒙版"), it(["Shift", "左键"], "停用 / 启用"), it(["Ctrl", "左键"], "载入选区"), it(["拖动"], "移到其他图层（Alt 复制）")];
+      return [...(h.maskOn === false ? [it(["已停用"], "PS 不使用这个矢量蒙版")] : []),
+        it(["左键"], "选中矢量蒙版"), it(["Shift", "左键"], h.maskOn === false ? "启用矢量蒙版" : "停用矢量蒙版"), it(["Ctrl", "左键"], "载入选区"), it(["拖动"], "移到其他图层（Alt 复制）")];
     case "thumb": {
       const dbl = h.kind === "smartObject" ? [it(["双击"], "编辑智能对象内容")] : h.artboard ? [it(["双击"], "画板颜色")] : [];
       return [it(["左键"], "编辑图层像素"), ...dbl, it(["Ctrl", "左键"], "载入选区"), it(["Ctrl", "Shift", "左键"], "添加到选区"),

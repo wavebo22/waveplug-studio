@@ -75,6 +75,8 @@ const PATHS: Record<string, string> = {
   folder: "M3 6h5l2 2h7v8H3z",
   refresh: "M16 10a6 6 0 1 1-1.8-4.3M16 4v3h-3",
   menu: "M4 6h12M4 10h12M4 14h12",
+  /** a disabled mask's cross, corner to corner (stretched over the thumbnail) */
+  maskOff: "M1 1L19 19M19 1L1 19",
   paste: "M7 3h6v3H7zM5 5H4v12h12V5h-1M7 10h6M7 13h4",
   wbPlace: "M3 4h14v4M3 13v4h14v-4M10 2v11M7 10l3 3 3-3",
   wbExport: "M3 10v7h14v-7M10 15V3M6 7l4-4 4 4",

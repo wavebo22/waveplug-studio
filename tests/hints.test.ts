@@ -51,3 +51,13 @@ test("messages: a busy line is replaced by its result; errors stay", () => {
   assert.equal(messageLife("error"), null);
   assert.equal(messageLife("ok"), 4000);
 });
+
+test("hints: a disabled mask says so and offers to turn it back on", () => {
+  const off = hintItems({ mode: "idle", zone: "mask", maskOn: false, keys: NO_KEYS });
+  assert.equal(off[0].keys[0], "已停用");
+  assert.ok(off.some(i => i.label === "启用蒙版"));
+  const on = hintItems({ mode: "idle", zone: "mask", maskOn: true, keys: NO_KEYS });
+  assert.ok(on.some(i => i.label === "停用蒙版"));
+  assert.ok(!on.some(i => i.keys[0] === "已停用"));
+  assert.ok(hintItems({ mode: "idle", zone: "vmask", maskOn: false, keys: NO_KEYS }).some(i => i.label === "启用矢量蒙版"));
+});
