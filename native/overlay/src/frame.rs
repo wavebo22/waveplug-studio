@@ -56,11 +56,23 @@ impl Tint {
     }
 }
 
-/// The tint window's place (left, top, right, bottom: `rect` cut to `clip`, screen px) and its
-/// pixels, premultiplied BGRA top-down: `color` (r, g, b) at `strength` × the shape's coverage,
-/// nearest sample. None when nothing of it is on the canvas.
+/// How the hovered layer is drawn: its outline (`line` px, opaque) and, inside, a grid of thin lines
+/// every `grid` px (screen px, so it doesn't swim when the canvas scrolls) over a faint fill.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Look {
+    pub color: (u8, u8, u8),
+    pub line: i32,
+    pub grid: i32,
+    /// opacity of the grid lines and of the fill between them, 0..1
+    pub grid_alpha: f32,
+    pub fill_alpha: f32,
+}
+
+/// The highlight window's place (left, top, right, bottom: `rect` cut to `clip`, screen px) and its
+/// pixels, premultiplied BGRA top-down: the shape's outline and a grid fill inside it (`look`),
+/// nearest sample of the shape. None when nothing of it is on the canvas.
 #[cfg_attr(not(windows), allow(dead_code))]
-fn tint_pixels(t: &Tint, color: (u8, u8, u8), strength: f32) -> Option<((i32, i32, i32, i32), Vec<u32>)> {
+fn tint_pixels(t: &Tint, look: Look) -> Option<((i32, i32, i32, i32), Vec<u32>)> {
     let r = (t.rect.left.round() as i32, t.rect.top.round() as i32, t.rect.right.round() as i32, t.rect.bottom.round() as i32);
     let win = match t.clip {
         Some(c) => (r.0.max(c.left.round() as i32), r.1.max(c.top.round() as i32), r.2.min(c.right.round() as i32), r.3.min(c.bottom.round() as i32)),
@@ -74,21 +86,53 @@ fn tint_pixels(t: &Tint, color: (u8, u8, u8), strength: f32) -> Option<((i32, i3
     // the shape's column / row for each column / row of the window (worked out once)
     let cols: Vec<usize> = (0..w).map(|x| ((((win.0 + x - r.0) as f64 + 0.5) / rw * t.width as f64) as usize).min(t.width as usize - 1)).collect();
     let rows: Vec<usize> = (0..h).map(|y| ((((win.1 + y - r.1) as f64 + 0.5) / rh * t.height as f64) as usize).min(t.height as usize - 1)).collect();
-    // premultiplied colour for each coverage value
-    let k = strength.clamp(0.0, 1.0);
-    let lut: Vec<u32> = (0..256u32)
-        .map(|c| {
-            let a = (c as f32 * k).round() as u32;
-            let pm = |v: u8| (v as u32 * a + 127) / 255;
-            (a << 24) | (pm(color.0) << 16) | (pm(color.1) << 8) | pm(color.2)
-        })
-        .collect();
-    let mut px = vec![0u32; (w * h) as usize];
+    let (wu, hu) = (w as usize, h as usize);
+    let mut inside = vec![false; wu * hu];
     for (y, &sy) in rows.iter().enumerate() {
         let src = &t.alpha[sy * t.width as usize..(sy + 1) * t.width as usize];
-        let dst = &mut px[y * w as usize..(y + 1) * w as usize];
-        for (d, &sx) in dst.iter_mut().zip(cols.iter()) {
-            *d = lut[src[sx] as usize];
+        for (x, &sx) in cols.iter().enumerate() {
+            inside[y * wu + x] = src[sx] >= 96;
+        }
+    }
+    // beyond the window: outside the shape where the window ends at the shape's own rect, the shape
+    // going on where the canvas cut it (no outline along the canvas edge)
+    let (cut_l, cut_t, cut_r, cut_b) = (win.0 > r.0, win.1 > r.1, win.2 < r.2, win.3 < r.3);
+    let at = |x: i32, y: i32| -> bool {
+        if x < 0 {
+            return cut_l && inside[y.clamp(0, h - 1) as usize * wu];
+        }
+        if x >= w {
+            return cut_r && inside[y.clamp(0, h - 1) as usize * wu + wu - 1];
+        }
+        if y < 0 {
+            return cut_t && inside[x as usize];
+        }
+        if y >= h {
+            return cut_b && inside[(hu - 1) * wu + x as usize];
+        }
+        inside[y as usize * wu + x as usize]
+    };
+    let pm = |a: f32| {
+        let a = (a.clamp(0.0, 1.0) * 255.0).round() as u32;
+        let c = |v: u8| (v as u32 * a + 127) / 255;
+        (a << 24) | (c(look.color.0) << 16) | (c(look.color.1) << 8) | c(look.color.2)
+    };
+    let (edge, grid_px, fill_px) = (pm(1.0), pm(look.grid_alpha), pm(look.fill_alpha));
+    let (d, g) = (look.line.max(1), look.grid.max(2));
+    let mut px = vec![0u32; wu * hu];
+    for y in 0..h {
+        for x in 0..w {
+            if !inside[y as usize * wu + x as usize] {
+                continue;
+            }
+            let rim = !at(x - d, y) || !at(x + d, y) || !at(x, y - d) || !at(x, y + d);
+            px[y as usize * wu + x as usize] = if rim {
+                edge
+            } else if (win.0 + x).rem_euclid(g) == 0 || (win.1 + y).rem_euclid(g) == 0 {
+                grid_px
+            } else {
+                fill_px
+            };
         }
     }
     Some((win, px))
@@ -143,7 +187,7 @@ mod imp {
         SetLayeredWindowAttributes, SetWindowPos, ShowWindow, UpdateLayeredWindow, MSG, WNDCLASSW,
     };
 
-    use super::{layout, tint_pixels, Tint};
+    use super::{layout, tint_pixels, Look, Tint};
     use crate::log;
     use crate::protocol::ScreenRect;
 
@@ -162,9 +206,8 @@ mod imp {
     const AC_SRC_OVER: u8 = 0;
     const AC_SRC_ALPHA: u8 = 1;
     const DIB_RGB_COLORS: u32 = 0;
-    /// the tint: the frame's blue at this share of the shape's coverage
+    /// the highlight: the frame's blue — a solid outline, a grid every 8 logical px, a faint fill
     const TINT_RGB: (u8, u8, u8) = (0x1E, 0x8C, 0xFF);
-    const TINT_STRENGTH: f32 = 0.28;
     const MA_NOACTIVATE: LRESULT = 3;
     const HTTRANSPARENT: LRESULT = -1;
     const SW_HIDE: i32 = 0;
@@ -243,7 +286,9 @@ mod imp {
             ShowWindow(h, SW_HIDE);
             return;
         };
-        let Some((win, px)) = tint_pixels(&t, TINT_RGB, TINT_STRENGTH) else {
+        let k = thickness_at(((t.rect.left + t.rect.right) / 2.0) as i32, ((t.rect.top + t.rect.bottom) / 2.0) as i32);
+        let look = Look { color: TINT_RGB, line: k, grid: 8 * k, grid_alpha: 0.5, fill_alpha: 0.10 };
+        let Some((win, px)) = tint_pixels(&t, look) else {
             ShowWindow(h, SW_HIDE);
             return;
         };
@@ -286,9 +331,10 @@ mod imp {
         ReleaseDC(null_mut(), screen);
         // under the frame, over Photoshop
         SetWindowPos(h, HWND_TOPMOST, 0, 0, 0, 0, SWP_NOACTIVATE | SWP_SHOWWINDOW | SWP_NOOWNERZORDER | SWP_NOMOVE | SWP_NOSIZE);
+        // the outline takes the rectangle's place (it comes back with the next row's frame)
         let f = HWND_SELF.load(Ordering::SeqCst) as HWND;
         if !f.is_null() {
-            SetWindowPos(f, HWND_TOPMOST, 0, 0, 0, 0, SWP_NOACTIVATE | SWP_NOOWNERZORDER | SWP_NOMOVE | SWP_NOSIZE);
+            ShowWindow(f, SW_HIDE);
         }
     }
 
@@ -435,23 +481,33 @@ mod tests {
         ScreenRect { left, top, right, bottom }
     }
 
+    const LOOK: Look = Look { color: (0x1E, 0x8C, 0xFF), line: 1, grid: 4, grid_alpha: 0.5, fill_alpha: 0.1 };
+
     #[test]
-    fn tint_follows_the_shape_and_the_canvas() {
+    fn outline_and_grid_inside_the_shape() {
         // a 2 × 1 shape: left half covered, right half empty, over a 20 × 10 rect
         let t = Tint { rect: r(100.0, 100.0, 120.0, 110.0), clip: None, width: 2, height: 1, alpha: vec![255, 0] };
-        let (win, px) = tint_pixels(&t, (0x1E, 0x8C, 0xFF), 0.5).unwrap();
+        let (win, px) = tint_pixels(&t, LOOK).unwrap();
         assert_eq!(win, (100, 100, 120, 110));
-        assert_eq!(px.len(), 200);
-        assert_eq!(px[0] >> 24, 128); // covered: half strength
-        assert_eq!(px[19], 0); // empty: nothing
+        let a = |x: usize, y: usize| px[y * 20 + x] >> 24;
+        assert_eq!(a(0, 5), 255); // the shape's left edge: outline
+        assert_eq!(a(9, 5), 255); // its right edge, where the empty half begins
+        assert_eq!(a(15, 5), 0); // the empty half: nothing
+        assert_eq!(a(3, 3), 26); // inside, between grid lines: the faint fill
+        assert_eq!(a(4, 3), 128); // on a grid line (screen x 104)
         // premultiplied: no channel above alpha
-        assert!(((px[0] >> 16) & 255) <= 128 && (px[0] & 255) <= 128);
-        // cut to the canvas
-        let cut = Tint { clip: Some(r(110.0, 0.0, 500.0, 500.0)), ..t.clone() };
-        let (win, px) = tint_pixels(&cut, (0, 0, 0), 1.0).unwrap();
+        assert!(((px[0] >> 16) & 255) <= 255 && (px[23] & 255) <= a(3, 1));
+    }
+
+    #[test]
+    fn no_outline_along_the_canvas_edge() {
+        // a fully covered shape cut by the canvas on the left: no outline where it is cut
+        let t = Tint { rect: r(100.0, 100.0, 120.0, 110.0), clip: Some(r(110.0, 0.0, 500.0, 500.0)), width: 1, height: 1, alpha: vec![255] };
+        let (win, px) = tint_pixels(&t, LOOK).unwrap();
         assert_eq!(win, (110, 100, 120, 110));
-        assert!(px.iter().all(|&p| p == 0));
-        assert!(tint_pixels(&Tint { clip: Some(r(500.0, 500.0, 600.0, 600.0)), ..t }, (0, 0, 0), 1.0).is_none());
+        assert_ne!(px[5 * 10] >> 24, 255); // the window's left edge (cut): not outline
+        assert_eq!(px[5 * 10 + 9] >> 24, 255); // the shape's own right edge: outline
+        assert!(tint_pixels(&Tint { clip: Some(r(500.0, 500.0, 600.0, 600.0)), ..t }, LOOK).is_none());
     }
 
     #[test]

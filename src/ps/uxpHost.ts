@@ -79,6 +79,8 @@ function info(d: any): DocInfo {
   return { id: d.id, name: d.title ?? d.name, width: Math.round(d.width), height: Math.round(d.height), mode: String(d.mode), bits: Number(String(d.bitsPerChannel).replace(/\D/g, "")) || 8 };
 }
 
+/** when "canvas view display scale unavailable" was last logged */
+let viewWarnedAt = 0;
 export function findLayer(layers: any[], id: number): any | null {
   for (const l of layers) {
     if (l.id === id) return l;
@@ -295,7 +297,8 @@ export class UxpHost implements PsHost {
           && cy >= d.globalBounds.top && cy < d.globalBounds.bottom);
         const scale = Number(display?.scaleFactor);
         if (!Number.isFinite(scale) || scale <= 0) {
-          log("warn", "canvas view display scale unavailable", JSON.stringify({ cx, cy, displays }));
+          // the view off every screen (Photoshop minimised …): said once a minute, not on every read
+          if (Date.now() - viewWarnedAt > 60_000) { viewWarnedAt = Date.now(); log("warn", "canvas view display scale unavailable", JSON.stringify({ cx, cy, displays: displays.length })); }
           return null;
         }
         centerScale = scale;

@@ -1,6 +1,6 @@
 [package]
 name = "waveplug-overlay"
-version = "0.20.0"
+version = "0.20.1"
 edition = "2021"
 description = "WavePlug 外附介面：在 Photoshop 面板之外显示插件界面（目前是外置生成面板）"
 

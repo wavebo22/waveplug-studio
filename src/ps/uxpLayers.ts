@@ -481,14 +481,18 @@ export class UxpLayerTree implements LayerTree {
       { _obj: "get", _target: [{ _property: "hasBackgroundLayer" }, docRef(d.id)] },
       { _obj: "get", _target: [{ _property: "targetLayersIDs" }, docRef(d.id)] },
     ]);
+    const t1 = Date.now();
     const raw = await readRaw(d.id, !!bg?.hasBackgroundLayer);
+    const t2 = Date.now();
     const layers = buildTree(raw);
     // (a one-off whole-layer `get` of a smart object used to be logged here: it took ~20 s and
     // stalled Photoshop. Never `get` a whole layer descriptor on a path that runs by itself.)
     let selected: number[] = (target?.targetLayersIDs ?? []).map((x: any) => Number(x._id));
     if (!target?.targetLayersIDs) selected = (d.activeLayers ?? []).map((l: any) => l.id);
     const ms = Date.now() - t0;
-    if (ms > 300) log("info", "layer tree read", layers.length, "layers", ms, "ms");
+    // where a slow read waited: the first query (Photoshop still busy redrawing after the last
+    // command), the layer list, or building the tree here (11-24: 1–4 s reads were all waiting)
+    if (ms > 300) log("info", "layer tree read", layers.length, "layers", ms, "ms", JSON.stringify({ first: t1 - t0, list: t2 - t1, build: Date.now() - t2 }));
     return { docId: d.id, docKey: docKeyOf(d), layers, selected, width: Math.round(d.width), height: Math.round(d.height) };
   }
 
@@ -509,7 +513,10 @@ export class UxpLayerTree implements LayerTree {
   async select(_docId: number, ids: number[]) {
     requireActiveDoc(_docId);
     if (ids.length) {
+      const t0 = Date.now();
       await modal(SELECT, async () => { requireActiveDoc(_docId); await selectLayers(ids); });
+      const ms = Date.now() - t0;
+      if (ms > 200) log("info", "layer select slow", JSON.stringify({ ids: ids.slice(0, 4), n: ids.length, ms }));
       return;
     }
     const doc = docById(_docId);

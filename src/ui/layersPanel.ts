@@ -35,15 +35,17 @@ export function mountLayersPanel(root: HTMLElement, svc: Services, isShown: () =
   svc.layers.onChange(() => { if (isShown()) void view.refresh(); });
   // the helper draws the hints along the bottom of the canvas: tell it where the canvas is (one
   // property read every 2 s while the panel is shown), and take them off when the panel is hidden
-  let viewReading = false;
+  // (read when the document changes and then every 10 s: each read is four Photoshop queries)
+  let viewReading = false, viewDoc: number | null = null, viewAt = 0;
   setInterval(() => {
     const shown = isShown();
     hintBar.active(shown);
     const doc = view.docId();
     if (!shown || viewReading || doc === null || !svc.overlay?.statusBarReady || !svc.host.canvasView) return;
-    viewReading = true;
+    if (doc === viewDoc && Date.now() - viewAt < 10_000) return;
+    viewReading = true; viewDoc = doc; viewAt = Date.now();
     svc.host.canvasView(doc).then(v => hintBar.view(v?.view ?? null), () => undefined).finally(() => { viewReading = false; });
-  }, 2000);
+  }, 1000);
   return { show: () => void view.refresh() };
 }
 

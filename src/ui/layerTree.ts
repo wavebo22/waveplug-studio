@@ -371,9 +371,15 @@ export function createLayerTreeView(tree: LayerTree, status: Status, tools?: Lay
     frameSent = k;
     overlay?.hoverFrame(f);
   };
-  // 悬停高亮: once the pointer has rested on a row a moment longer, the layer's shape (read once
-  // per layer and document version, at most TINT_SIZE px, one read at a time) is tinted on the canvas
-  const TINT_DELAY = 160, TINT_CACHE = 48;
+  // 悬停高亮 (外轮廓 + 格子填色): once the pointer has rested on a row a while, the layer's shape
+  // (read once per layer and document version, at most TINT_SIZE px, one read at a time) is drawn on
+  // the canvas. A read holds Photoshop in a modal moment: it waits TINT_DELAY, longer in a document
+  // where one took more than TINT_SLOW_MS; a shape already read shows at once. Groups (Photoshop
+  // reads no pixels of a group) and layers it can't read show their bounds as the shape.
+  const TINT_DELAY = 350, TINT_SLOW_DELAY = 900, TINT_SLOW_MS = 200, TINT_CACHE = 48;
+  /** documents where a shape read was slow: when, so that their reads wait longer for a while */
+  const slowDocs = new Map<number, number>();
+  const RECT_ALPHA = "/w=="; // one covered pixel: the shape is the whole rect
   type Shape = { bounds: Rect; width: number; height: number; alpha: string } | null;
   const shapes = new Map<string, Shape>();
   let tintTimer: ReturnType<typeof setTimeout> | null = null, tintReading = false, tintSent = "";
@@ -384,6 +390,8 @@ export function createLayerTreeView(tree: LayerTree, status: Status, tools?: Lay
   const tintAt = (id: number, d: number, v: CanvasView) => {
     if (tintTimer) clearTimeout(tintTimer);
     if (!overlay?.tintReady || !tree.shape) return;
+    const cached = shapes.has(`${d}:${id}:${docVersion?.(d) ?? ""}`);
+    const slow = Date.now() - (slowDocs.get(d) ?? 0) < 60_000;
     tintTimer = setTimeout(async () => {
       tintTimer = null;
       if (frameId !== id || docId !== d || drag) return;
@@ -391,14 +399,21 @@ export function createLayerTreeView(tree: LayerTree, status: Status, tools?: Lay
       if (!l || l.artboard || l.kind === "adjustment") return; // an artboard or adjustment covers everything: the frame says it
       const key = `${d}:${id}:${docVersion?.(d) ?? ""}`;
       let shape = shapes.get(key);
+      const whole = layerFrame(l);
+      if (shape === undefined && l.kind === "group") shape = whole && { bounds: whole, width: 1, height: 1, alpha: RECT_ALPHA };
       if (shape === undefined) {
         if (tintReading) return; // the read in flight finishes first; the next rest asks again
         tintReading = true;
+        const t0 = Date.now();
         try {
           const s = await tree.shape!(d, id, TINT_SIZE);
           shape = s ? { bounds: s.bounds, width: s.width, height: s.height, alpha: bytesToBase64(s.alpha) } : null;
-        } catch (e) { log("info", "hover tint shape", id, e); shape = null; }
-        finally { tintReading = false; }
+        } catch (e) {
+          log("info", "hover tint shape", id, l.kind, e);
+          shape = whole && { bounds: whole, width: 1, height: 1, alpha: RECT_ALPHA };
+        } finally { tintReading = false; }
+        const ms = Date.now() - t0;
+        if (ms > TINT_SLOW_MS) { slowDocs.set(d, Date.now()); log("info", "hover tint slow read", JSON.stringify({ id, kind: l.kind, ms, w: l.width, h: l.height })); }
         shapes.set(key, shape);
         while (shapes.size > TINT_CACHE) shapes.delete(shapes.keys().next().value!);
       }
@@ -407,7 +422,7 @@ export function createLayerTreeView(tree: LayerTree, status: Status, tools?: Lay
       if (sent === tintSent) return;
       tintSent = sent;
       overlay.hoverTint({ rect, clip: v.view, width: shape.width, height: shape.height, alpha: shape.alpha });
-    }, TINT_DELAY);
+    }, cached ? 0 : slow ? TINT_SLOW_DELAY : TINT_DELAY);
   };
   /** takes the frame away at once (nothing waits for a read in flight) */
   const hideFrame = () => {
@@ -531,7 +546,7 @@ export function createLayerTreeView(tree: LayerTree, status: Status, tools?: Lay
   const updateLinksBtn = h("button", { class: "lt-top-icon", title: "更新所有链接图层：链接的文件在外面改过后，读入新内容" }, ic("refresh", "m"));
   updateLinksBtn.addEventListener("click", () => { if (docId !== null) void run("updateAllModified", ids()); });
   setShown(updateLinksBtn, false);
-  const frameBtn = h("button", { class: "lt-head-btn", title: "悬停边框：鼠标停在一行上，画布上用细蓝框标出这个图层的范围，稍停一下再把图层本身淡淡地涂上蓝色（被其他图层挡住的部分也会显示）；不改变选中的图层。需要外置 helper 在运行" }, "悬停边框");
+  const frameBtn = h("button", { class: "lt-head-btn", title: "悬停边框：鼠标停在一行上，画布上先用细蓝框标出这个图层的范围，稍停一下改为沿图层形状的外轮廓加格子填色（被其他图层挡住的部分也会显示）；不改变选中的图层。需要外置 helper 在运行" }, "悬停边框");
   const renderFrameBtn = () => frameBtn.classList.toggle("off", !frameOn);
   frameBtn.addEventListener("click", () => {
     frameOn = !frameOn;
