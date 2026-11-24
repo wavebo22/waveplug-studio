@@ -3,6 +3,7 @@
 
 import { log } from "../app/log.ts";
 import { type Bounds, frameThumb, thumbArea } from "../core/layers/thumbs.ts";
+import { shapeAlpha } from "../core/overlay/hoverFrame.ts";
 import { openSmartContents } from "../core/layers/smartOpen.ts";
 import type { ToolResult } from "../core/layers/smart.ts";
 import { type LayerAction, type MoveStep, type RawLayer, buildTree, ALIGNS, DISTRIBUTES, nextLayerAfterDelete, planLayerDeletion, effectsOf, EFFECTS, rawProblem } from "../core/layers/tree.ts";
@@ -698,6 +699,30 @@ export class UxpLayerTree implements LayerTree {
       log("info", "layer drag copy finished", JSON.stringify({ docId, count: ids.length, ids, skipped }));
       return { done: ids.length, skipped, ids };
     }));
+  }
+
+  /** 悬停高亮: the layer's own pixels, scaled down to `size`, as coverage; read like a thumbnail
+   *  (the same quiet modal, no history) and only when the pointer rests on a row. */
+  async shape(docId: number, layerId: number, size: number) {
+    const imaging = ps().imaging;
+    return modal(THUMBS, async () => {
+      const opts: Record<string, unknown> = { documentID: docId, layerID: layerId, componentSize: 8, colorSpace: "RGB", colorProfile: "sRGB IEC61966-2.1" };
+      const doc = docById(docId), l = findLayer(doc.layers, layerId);
+      const b = l?.boundsNoEffects ?? l?.bounds;
+      const w = Number(b?.right) - Number(b?.left), h = Number(b?.bottom) - Number(b?.top);
+      if (!(w > 0 && h > 0)) return null;
+      if (Math.max(w, h) > size) opts.targetSize = w >= h ? { width: size } : { height: size };
+      const r = await imaging.getPixels(opts);
+      try {
+        const d = r?.imageData, sb = r?.sourceBounds;
+        if (!d || !sb) return null;
+        const k = Number.isFinite(Number(r.level)) ? 2 ** Number(r.level) : 1;
+        const bounds = { left: Number(sb.left) * k, top: Number(sb.top) * k, right: Number(sb.right) * k, bottom: Number(sb.bottom) * k };
+        if (![bounds.left, bounds.top, bounds.right, bounds.bottom].every(Number.isFinite) || bounds.right <= bounds.left || bounds.bottom <= bounds.top) return null;
+        const alpha = shapeAlpha(new Uint8Array(await d.getData({ chunky: true })), d.width, d.height, d.components);
+        return alpha ? { bounds, width: d.width, height: d.height, alpha } : null;
+      } finally { r?.imageData?.dispose?.(); }
+    });
   }
 
   async thumbnails(docId: number, layers: { id: number; mask?: boolean | "vector"; bounds?: Bounds }[], canvas: { width: number; height: number }, size: number): Promise<(string | null | undefined)[]> {

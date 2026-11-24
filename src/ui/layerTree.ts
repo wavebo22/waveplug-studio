@@ -25,7 +25,8 @@ import type { CanvasView } from "../core/overlay/protocol.ts";
 import { vectorFragment } from "../core/overlay/svgFragment.ts";
 import type { Rect } from "../core/image/region.ts";
 import { type ExternalDragSession, MAX_EXTERNAL_LAYERS, beginExternalExport, capExternalLayers, externalDragKey, externalDragResultText, layersToExport, createExternalDragSession, endExternalDrag, externalDragCandidates, externalDragOver, externalDragSessionId, finishExternalExport, helperCopiedExternalFiles, helperFinishedExternalDrag, recordExportedFile, shouldPrepareExternalDrag } from "../core/overlay/externalDrag.ts";
-import { frameKey, frameOnScreen, layerFrame } from "../core/overlay/hoverFrame.ts";
+import { TINT_SIZE, bytesToBase64, frameKey, frameOnScreen, layerFrame } from "../core/overlay/hoverFrame.ts";
+import { docToScreen } from "../core/overlay/protocol.ts";
 import { NATIVE_COMMANDS_KEY } from "../core/layers/nativeCommands.ts";
 import { every, h, icon, isShown, listen, replace, setShown } from "./dom.ts";
 import { type PopItem, createPopup } from "./popupMenu.ts";
@@ -360,7 +361,9 @@ export function createLayerTreeView(tree: LayerTree, status: Status, tools?: Lay
   // The bounds come from the list's own read; the canvas view is one property read, reused while the
   // pointer stays on the list. Only the newest hovered row counts, so a fast sweep queues nothing.
   let frameId: number | null = null, frameTimer: ReturnType<typeof setTimeout> | null = null, frameSent = "";
-  let frameView: { docId: number; view: CanvasView; at: number } | null = null;
+  /** the canvas view last read (null: the read failed, minimised …), kept FRAME_VIEW_MS either way:
+   *  a failed read retried on every row of a quick sweep kept Photoshop busy */
+  let frameView: { docId: number; view: CanvasView | null; at: number } | null = null;
   let viewReading: { docId: number; job: Promise<CanvasView | null> } | null = null;
   const sendFrame = (f: ReturnType<typeof frameOnScreen>) => {
     const k = frameKey(f);
@@ -368,10 +371,49 @@ export function createLayerTreeView(tree: LayerTree, status: Status, tools?: Lay
     frameSent = k;
     overlay?.hoverFrame(f);
   };
+  // 悬停高亮: once the pointer has rested on a row a moment longer, the layer's shape (read once
+  // per layer and document version, at most TINT_SIZE px, one read at a time) is tinted on the canvas
+  const TINT_DELAY = 160, TINT_CACHE = 48;
+  type Shape = { bounds: Rect; width: number; height: number; alpha: string } | null;
+  const shapes = new Map<string, Shape>();
+  let tintTimer: ReturnType<typeof setTimeout> | null = null, tintReading = false, tintSent = "";
+  const clearTint = () => {
+    if (tintTimer) { clearTimeout(tintTimer); tintTimer = null; }
+    if (tintSent) { tintSent = ""; overlay?.hoverTint(null); }
+  };
+  const tintAt = (id: number, d: number, v: CanvasView) => {
+    if (tintTimer) clearTimeout(tintTimer);
+    if (!overlay?.tintReady || !tree.shape) return;
+    tintTimer = setTimeout(async () => {
+      tintTimer = null;
+      if (frameId !== id || docId !== d || drag) return;
+      const l = byId.get(id);
+      if (!l || l.artboard || l.kind === "adjustment") return; // an artboard or adjustment covers everything: the frame says it
+      const key = `${d}:${id}:${docVersion?.(d) ?? ""}`;
+      let shape = shapes.get(key);
+      if (shape === undefined) {
+        if (tintReading) return; // the read in flight finishes first; the next rest asks again
+        tintReading = true;
+        try {
+          const s = await tree.shape!(d, id, TINT_SIZE);
+          shape = s ? { bounds: s.bounds, width: s.width, height: s.height, alpha: bytesToBase64(s.alpha) } : null;
+        } catch (e) { log("info", "hover tint shape", id, e); shape = null; }
+        finally { tintReading = false; }
+        shapes.set(key, shape);
+        while (shapes.size > TINT_CACHE) shapes.delete(shapes.keys().next().value!);
+      }
+      if (!shape || frameId !== id || docId !== d || drag) return;
+      const rect = docToScreen(shape.bounds, v), sent = key + frameKey({ rect, clip: v.view });
+      if (sent === tintSent) return;
+      tintSent = sent;
+      overlay.hoverTint({ rect, clip: v.view, width: shape.width, height: shape.height, alpha: shape.alpha });
+    }, TINT_DELAY);
+  };
   /** takes the frame away at once (nothing waits for a read in flight) */
   const hideFrame = () => {
     if (frameTimer) { clearTimeout(frameTimer); frameTimer = null; }
     frameId = null;
+    clearTint();
     sendFrame(null);
   };
   const viewOf = async (d: number): Promise<CanvasView | null> => {
@@ -382,7 +424,7 @@ export function createLayerTreeView(tree: LayerTree, status: Status, tools?: Lay
       void job.finally(() => { if (viewReading?.job === job) viewReading = null; });
     }
     const v = await viewReading.job;
-    if (v) frameView = { docId: d, view: v, at: Date.now() };
+    frameView = { docId: d, view: v, at: Date.now() };
     return v;
   };
   const drawFrame = async (id: number) => {
@@ -391,7 +433,11 @@ export function createLayerTreeView(tree: LayerTree, status: Status, tools?: Lay
     const v = await viewOf(d);
     // the pointer moved on (or a drag began) while the view was read: that row draws its own
     if (frameId !== id || docId !== d || drag) return;
-    sendFrame(v ? frameOnScreen(area, v) : null);
+    const f = v ? frameOnScreen(area, v) : null;
+    // the frame moved to another layer: its tint goes with it (the helper drops it too)
+    if (frameKey(f) !== frameSent) tintSent = "";
+    sendFrame(f);
+    if (f && v) tintAt(id, d, v); else clearTint();
   };
   const frameAt = (id: number) => {
     if (!frameOn || !canvasView || !overlay?.connected || drag || docId === null || id === frameId) return;
@@ -485,7 +531,7 @@ export function createLayerTreeView(tree: LayerTree, status: Status, tools?: Lay
   const updateLinksBtn = h("button", { class: "lt-top-icon", title: "更新所有链接图层：链接的文件在外面改过后，读入新内容" }, ic("refresh", "m"));
   updateLinksBtn.addEventListener("click", () => { if (docId !== null) void run("updateAllModified", ids()); });
   setShown(updateLinksBtn, false);
-  const frameBtn = h("button", { class: "lt-head-btn", title: "悬停边框：鼠标停在一行上，画布上用细蓝框标出这个图层的范围；不改变选中的图层。需要外置 helper 在运行" }, "悬停边框");
+  const frameBtn = h("button", { class: "lt-head-btn", title: "悬停边框：鼠标停在一行上，画布上用细蓝框标出这个图层的范围，稍停一下再把图层本身淡淡地涂上蓝色（被其他图层挡住的部分也会显示）；不改变选中的图层。需要外置 helper 在运行" }, "悬停边框");
   const renderFrameBtn = () => frameBtn.classList.toggle("off", !frameOn);
   frameBtn.addEventListener("click", () => {
     frameOn = !frameOn;
@@ -2399,7 +2445,7 @@ export function createLayerTreeView(tree: LayerTree, status: Status, tools?: Lay
   function showTrash(d: NonNullable<typeof drag>) {
     if (!overlay) return;
     const action = trashAction(d.sub ? 0 : d.ids.length, d.sub?.kind as DeleteDragPart | undefined);
-    const known = frameView?.docId === d.sourceDocId && Date.now() - frameView.at < 60_000 ? frameView.view.view : null;
+    const known = frameView?.docId === d.sourceDocId && Date.now() - frameView.at < 60_000 ? frameView.view?.view ?? null : null;
     d.trash = overlay.showDragTrash(known, d.canDelete, action);
     if (d.trash && !known && canvasView) {
       void viewOf(d.sourceDocId).then(v => { if (v && drag === d) overlay.showDragTrash(v.view, d.canDelete, action); });

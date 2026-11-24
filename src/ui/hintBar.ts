@@ -43,7 +43,7 @@ export function createHintBar(overlay?: Overlay): HintBar {
         : overlay.statusBar(null));
       // the panel's own lines only while the helper can't draw the bar
       setShown(el, !native);
-    }, 30);
+    }, 80); // a quick sweep over the rows sends the bar at most ~12 times a second
   };
   overlay?.onConnected(sync);
   overlay?.onDisconnected(() => setShown(el, true));

@@ -8,7 +8,7 @@
 
 import { onDispose } from "../ui/dom.ts";
 import { log, setLogContext } from "./log.ts";
-import { EXPECTED_HELPER_VERSION, OVERLAY_URL, type ComfyManagerStatus, type ExternalDragEvent, type ExternalDragFile, HANG_SECONDS, type HangDoc, type MenuNode, type OverlayCommand, MENU_HELPER_VERSION, OPEN_APP_HELPER_VERSION, type ScreenRect, TRASH_HELPER_VERSION, WEBDROP_HELPER_VERSION, KEYS_HELPER_VERSION, STATUSBAR_HELPER_VERSION, type StatusBarHint, type StatusBarPart, type WebDropEvent, helperOutdated, parseOverlayEvent } from "../core/overlay/protocol.ts";
+import { EXPECTED_HELPER_VERSION, OVERLAY_URL, type ComfyManagerStatus, type ExternalDragEvent, type ExternalDragFile, HANG_SECONDS, type HangDoc, type MenuNode, type OverlayCommand, MENU_HELPER_VERSION, OPEN_APP_HELPER_VERSION, type ScreenRect, TRASH_HELPER_VERSION, WEBDROP_HELPER_VERSION, KEYS_HELPER_VERSION, STATUSBAR_HELPER_VERSION, TINT_HELPER_VERSION, type StatusBarHint, type StatusBarPart, type WebDropEvent, helperOutdated, parseOverlayEvent } from "../core/overlay/protocol.ts";
 import { type Hub, createHub } from "../core/overlay/hub.ts";
 
 const RETRY_MS = 3000;
@@ -34,6 +34,10 @@ export interface Overlay {
   onTrashDrop(cb: () => void): () => void;
   /** 悬停边框: frame `rect` (screen px) cut to `clip` on the canvas; null takes it away. */
   hoverFrame(frame: { rect: ScreenRect; clip: ScreenRect } | null): void;
+  /** 悬停高亮: the hovered layer's shape tinted on the canvas; false when the helper is too old */
+  hoverTint(tint: { rect: ScreenRect; clip: ScreenRect; width: number; height: number; alpha: string } | null): boolean;
+  /** the helper can tint (connected, ≥ TINT_HELPER_VERSION) */
+  readonly tintReady: boolean;
   /** Cross-app drag (把图层拖出 Photoshop): PNGs are being written / are written / the session is
    *  over without the helper. Return false when the message could not be sent. */
   prepareExternalDrag(sessionId: string, docId: number, totalCount: number, keys: string[]): boolean;
@@ -351,6 +355,12 @@ export function connectOverlay(opts: { launch?: () => Promise<string | null>; au
     hoverFrame(frame) {
       send(frame ? { type: "hover-frame", rect: frame.rect, clip: frame.clip } : { type: "hover-frame", rect: null });
     },
+    hoverTint(t) {
+      if (!connected || helperVersion === null || helperOutdated(helperVersion, TINT_HELPER_VERSION)) return false;
+      send(t ? { type: "hover-tint", ...t } : { type: "hover-tint", rect: null });
+      return true;
+    },
+    get tintReady() { return connected && helperVersion !== null && !helperOutdated(helperVersion, TINT_HELPER_VERSION); },
     prepareExternalDrag(sessionId, docId, totalCount, keys) {
       if (!connected) return false;
       return sendChecked({ type: "external-drag-prepare", sessionId, docId, totalCount, keys });

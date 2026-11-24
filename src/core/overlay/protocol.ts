@@ -81,6 +81,9 @@ export type OverlayCommand =
   /** 状态栏 (helper ≥ STATUSBAR_HELPER_VERSION): the WaveLayer panel's hints, state and last result
    *  on the bar along the canvas' bottom edge (the 性能监视 meters sit at its right) */
   | { type: "status-bar"; on: boolean; hints: StatusBarHint[]; state: StatusBarPart[]; message: StatusBarPart | null; view?: ScreenRect }
+  /** 悬停高亮 (helper ≥ TINT_HELPER_VERSION): the hovered layer's shape (`width` × `height` coverage,
+   *  base64) stretched over `rect` and tinted; no rect: take it away */
+  | { type: "hover-tint"; rect: ScreenRect | null; clip?: ScreenRect; width?: number; height?: number; alpha?: string }
   /** 按键 (helper ≥ KEYS_HELPER_VERSION): report Ctrl / Shift / Alt while on (renew within 3 s) */
   | { type: "watch-keys"; on: boolean }
   /** The settings for what the helper does (APP_SETTING_KEYS), for the WavePlug app window's
@@ -232,6 +235,8 @@ export function appSettingsOf(settings: Record<string, unknown>): Record<string,
 export const WEBDROP_HELPER_VERSION = "0.16.0";
 /** watch-keys / keys and external-drag-wanted need at least this helper */
 export const KEYS_HELPER_VERSION = "0.18.0";
+/** hover-tint (the hovered layer's shape tinted on the canvas) needs at least this helper */
+export const TINT_HELPER_VERSION = "0.20.0";
 /** status-bar (the hints drawn along the canvas' bottom edge) needs at least this helper */
 export const STATUSBAR_HELPER_VERSION = "0.19.0";
 export interface StatusBarHint { keys: string[]; label: string; on: boolean }

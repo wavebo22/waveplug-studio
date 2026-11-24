@@ -1,6 +1,14 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { frameKey, frameOnScreen, layerFrame } from "../src/core/overlay/hoverFrame.ts";
+import { bytesToBase64, frameKey, frameOnScreen, layerFrame, shapeAlpha } from "../src/core/overlay/hoverFrame.ts";
+
+test("悬停高亮: a layer's coverage is its alpha; without alpha all of it", () => {
+  assert.deepEqual([...shapeAlpha(new Uint8Array([1, 2, 3, 200, 4, 5, 6, 0]), 2, 1, 4)!], [200, 0]);
+  assert.deepEqual([...shapeAlpha(new Uint8Array([9, 9, 9, 8, 8, 8]), 2, 1, 3)!], [255, 255]);
+  assert.equal(shapeAlpha(new Uint8Array(3), 2, 1, 4), null);
+  assert.equal(bytesToBase64(new Uint8Array([255, 0])), "/wA=");
+  assert.equal(bytesToBase64(new Uint8Array(70000)).length, Math.ceil(70000 / 3) * 4);
+});
 
 // 11-04 实测的视图：1080×1759 文档在 100% 下居中
 const view = { view: { left: 1008, top: 139, right: 3037, bottom: 2087 }, center: { x: 540.25, y: 879 }, zoom: 1 };

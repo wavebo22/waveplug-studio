@@ -179,6 +179,10 @@ fn on_command(c: Command) {
         crate::frame::set(rect, clip);
         return;
     }
+    if let Command::HoverTint { rect, clip, width, height, alpha } = c {
+        crate::frame::set_tint(rect.and_then(|r| crate::frame::Tint::decode(r, clip, width, height, &alpha)));
+        return;
+    }
     #[cfg(windows)]
     match &c {
         Command::Show { panel, view } if panel != variants::ID && panel != shelf::ID => {
@@ -484,6 +488,7 @@ impl Host {
             match c {
                 Command::ManageComfy { .. } => {} // handled on the server thread, never enters the UI queue
                 Command::HoverFrame { .. } => {} // frame.rs, on its own thread
+                Command::HoverTint { .. } => {}  // frame.rs, on its own thread
                 Command::MenuOpen { .. } | Command::MenuClose { .. } => {} // menu.rs, on its own thread
                 Command::RestartHelper => {}     // life.rs, on its own thread
                 Command::Monitor { .. } => {}    // monitor.rs, on its own thread

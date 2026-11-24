@@ -10,16 +10,89 @@
 // window under it, across processes), no-activate, a tool window (not on the taskbar or in
 // Alt+Tab). Showing and hiding go through SetWindowPos / ShowWindow with SWP_NOACTIVATE /
 // SW_HIDE, which don't touch the foreground window. Callers (the server thread) only post a
-// message, so a busy window never holds up the plugin's connection.
+// message, so a busy window never holds up the plugin's connection; requests that come faster
+// than the window takes them (a quick sweep down the list) are folded into one: only the latest
+// is applied, and one that changes nothing changes nothing.
+//
+// 悬停高亮: once the pointer rests on a row the plugin also sends the layer's own shape (its
+// coverage, at most 256 px a side), and a second window — per-pixel alpha (UpdateLayeredWindow),
+// equally click-through — tints that shape lightly in the frame's blue over the canvas. It lies on
+// top of everything, so the parts of the layer other layers cover show too.
 
 use crate::protocol::ScreenRect;
 
 #[cfg(windows)]
-pub use imp::set;
+pub use imp::{set, set_tint};
 
-/// Shows the frame around `rect` (screen px) cut to `clip`; `None` hides it.
+/// Shows the frame around `rect` (screen px) cut to `clip`; `None` hides it (and the tint).
 #[cfg(not(windows))]
 pub fn set(_rect: Option<ScreenRect>, _clip: Option<ScreenRect>) {}
+
+/// Tints the hovered layer's shape; `None` takes the tint away.
+#[cfg(not(windows))]
+pub fn set_tint(_tint: Option<Tint>) {}
+
+/// The hovered layer's shape: `alpha` is `width` × `height` coverage (0–255) stretched over `rect`.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Tint {
+    pub rect: ScreenRect,
+    pub clip: Option<ScreenRect>,
+    pub width: u32,
+    pub height: u32,
+    pub alpha: Vec<u8>,
+}
+
+/// the largest shape taken (a side), as the plugin reads it
+const TINT_MAX: u32 = 512;
+
+impl Tint {
+    /// From the plugin's message; None when it doesn't add up (sizes, base64, an empty rect).
+    pub fn decode(rect: ScreenRect, clip: Option<ScreenRect>, width: u32, height: u32, alpha: &str) -> Option<Tint> {
+        if width == 0 || height == 0 || width > TINT_MAX || height > TINT_MAX || rect.right <= rect.left || rect.bottom <= rect.top {
+            return None;
+        }
+        let bytes = data_encoding::BASE64.decode(alpha.as_bytes()).ok()?;
+        (bytes.len() == (width * height) as usize).then(|| Tint { rect, clip, width, height, alpha: bytes })
+    }
+}
+
+/// The tint window's place (left, top, right, bottom: `rect` cut to `clip`, screen px) and its
+/// pixels, premultiplied BGRA top-down: `color` (r, g, b) at `strength` × the shape's coverage,
+/// nearest sample. None when nothing of it is on the canvas.
+#[cfg_attr(not(windows), allow(dead_code))]
+fn tint_pixels(t: &Tint, color: (u8, u8, u8), strength: f32) -> Option<((i32, i32, i32, i32), Vec<u32>)> {
+    let r = (t.rect.left.round() as i32, t.rect.top.round() as i32, t.rect.right.round() as i32, t.rect.bottom.round() as i32);
+    let win = match t.clip {
+        Some(c) => (r.0.max(c.left.round() as i32), r.1.max(c.top.round() as i32), r.2.min(c.right.round() as i32), r.3.min(c.bottom.round() as i32)),
+        None => r,
+    };
+    let (w, h) = (win.2 - win.0, win.3 - win.1);
+    if w <= 0 || h <= 0 {
+        return None;
+    }
+    let (rw, rh) = ((r.2 - r.0).max(1) as f64, (r.3 - r.1).max(1) as f64);
+    // the shape's column / row for each column / row of the window (worked out once)
+    let cols: Vec<usize> = (0..w).map(|x| ((((win.0 + x - r.0) as f64 + 0.5) / rw * t.width as f64) as usize).min(t.width as usize - 1)).collect();
+    let rows: Vec<usize> = (0..h).map(|y| ((((win.1 + y - r.1) as f64 + 0.5) / rh * t.height as f64) as usize).min(t.height as usize - 1)).collect();
+    // premultiplied colour for each coverage value
+    let k = strength.clamp(0.0, 1.0);
+    let lut: Vec<u32> = (0..256u32)
+        .map(|c| {
+            let a = (c as f32 * k).round() as u32;
+            let pm = |v: u8| (v as u32 * a + 127) / 255;
+            (a << 24) | (pm(color.0) << 16) | (pm(color.1) << 8) | pm(color.2)
+        })
+        .collect();
+    let mut px = vec![0u32; (w * h) as usize];
+    for (y, &sy) in rows.iter().enumerate() {
+        let src = &t.alpha[sy * t.width as usize..(sy + 1) * t.width as usize];
+        let dst = &mut px[y * w as usize..(y + 1) * w as usize];
+        for (d, &sx) in dst.iter_mut().zip(cols.iter()) {
+            *d = lut[src[sx] as usize];
+        }
+    }
+    Some((win, px))
+}
 
 /// Where the window goes and the frame inside it, in screen px: the frame lies just outside
 /// `rect` (`t` px wide) so it never covers the layer's own edge pixels, and the window is that
@@ -53,23 +126,24 @@ fn layout(rect: ScreenRect, clip: Option<ScreenRect>, t: i32) -> Option<((i32, i
 
 #[cfg(windows)]
 mod imp {
-    use std::ptr::null;
-    use std::sync::atomic::{AtomicIsize, Ordering};
+    use std::ptr::{null, null_mut};
+    use std::sync::atomic::{AtomicBool, AtomicIsize, Ordering};
     use std::sync::{Mutex, Once};
     use std::thread;
 
-    use windows_sys::Win32::Foundation::{HWND, LPARAM, LRESULT, POINT, WPARAM};
+    use windows_sys::Win32::Foundation::{HWND, LPARAM, LRESULT, POINT, SIZE, WPARAM};
     use windows_sys::Win32::Graphics::Gdi::{
-        CombineRgn, CreateRectRgn, CreateSolidBrush, DeleteObject, MonitorFromPoint, SetWindowRgn,
+        CombineRgn, CreateCompatibleDC, CreateDIBSection, CreateRectRgn, CreateSolidBrush, DeleteDC, DeleteObject,
+        GetDC, MonitorFromPoint, ReleaseDC, SelectObject, SetWindowRgn, BITMAPINFO, BITMAPINFOHEADER, BLENDFUNCTION,
     };
     use windows_sys::Win32::System::LibraryLoader::GetModuleHandleW;
     use windows_sys::Win32::UI::HiDpi::GetDpiForMonitor;
     use windows_sys::Win32::UI::WindowsAndMessaging::{
         CreateWindowExW, DefWindowProcW, DispatchMessageW, GetMessageW, PostMessageW, RegisterClassW,
-        SetLayeredWindowAttributes, SetWindowPos, ShowWindow, MSG, WNDCLASSW,
+        SetLayeredWindowAttributes, SetWindowPos, ShowWindow, UpdateLayeredWindow, MSG, WNDCLASSW,
     };
 
-    use super::layout;
+    use super::{layout, tint_pixels, Tint};
     use crate::log;
     use crate::protocol::ScreenRect;
 
@@ -83,12 +157,22 @@ mod imp {
     const WM_MOUSEACTIVATE: u32 = 0x0021;
     const WM_NCHITTEST: u32 = 0x0084;
     const WM_APP_FRAME: u32 = 0x8000 + 0x51;
+    const WM_APP_TINT: u32 = 0x8000 + 0x52;
+    const ULW_ALPHA: u32 = 0x0000_0002;
+    const AC_SRC_OVER: u8 = 0;
+    const AC_SRC_ALPHA: u8 = 1;
+    const DIB_RGB_COLORS: u32 = 0;
+    /// the tint: the frame's blue at this share of the shape's coverage
+    const TINT_RGB: (u8, u8, u8) = (0x1E, 0x8C, 0xFF);
+    const TINT_STRENGTH: f32 = 0.28;
     const MA_NOACTIVATE: LRESULT = 3;
     const HTTRANSPARENT: LRESULT = -1;
     const SW_HIDE: i32 = 0;
     const SWP_NOACTIVATE: u32 = 0x0010;
     const SWP_SHOWWINDOW: u32 = 0x0040;
     const SWP_NOOWNERZORDER: u32 = 0x0200;
+    const SWP_NOSIZE: u32 = 0x0001;
+    const SWP_NOMOVE: u32 = 0x0002;
     const HWND_TOPMOST: HWND = -1isize as HWND;
     const MONITOR_DEFAULTTONEAREST: u32 = 2;
     const RGN_DIFF: i32 = 4;
@@ -96,14 +180,37 @@ mod imp {
     const COLOR: u32 = 0x00FF_8C1E; // #1E8CFF
 
     static HWND_SELF: AtomicIsize = AtomicIsize::new(0);
+    static HWND_TINT: AtomicIsize = AtomicIsize::new(0);
     /// the latest request; the window thread takes it, older ones are simply overwritten
     static WANTED: Mutex<Option<(ScreenRect, Option<ScreenRect>)>> = Mutex::new(None);
+    static TINT: Mutex<Option<Tint>> = Mutex::new(None);
+    /// a message is on its way to the window: more requests just update WANTED / TINT
+    static FRAME_POSTED: AtomicBool = AtomicBool::new(false);
+    static TINT_POSTED: AtomicBool = AtomicBool::new(false);
     static START: Once = Once::new();
 
-    /// Shows the frame around `rect` (screen px) cut to `clip`; `None` hides it.
+    fn post(flag: &AtomicBool, msg: u32) {
+        let h = HWND_SELF.load(Ordering::SeqCst) as HWND;
+        if h.is_null() {
+            return; // before the window exists, `run` applies WANTED once it does
+        }
+        if !flag.swap(true, Ordering::SeqCst) {
+            unsafe { PostMessageW(h, msg, 0, 0) };
+        }
+    }
+
+    /// Shows the frame around `rect` (screen px) cut to `clip`; `None` hides it. A frame elsewhere
+    /// takes the tint of the last layer away (the new one's shape follows).
     pub fn set(rect: Option<ScreenRect>, clip: Option<ScreenRect>) {
-        if let Ok(mut w) = WANTED.lock() {
-            *w = rect.map(|r| (r, clip));
+        let same = WANTED.lock().map(|mut w| std::mem::replace(&mut *w, rect.map(|r| (r, clip))) == rect.map(|r| (r, clip))).unwrap_or(false);
+        if same {
+            return;
+        }
+        if let Ok(mut t) = TINT.lock() {
+            if t.is_some() {
+                *t = None;
+                post(&TINT_POSTED, WM_APP_TINT);
+            }
         }
         if rect.is_none() && HWND_SELF.load(Ordering::SeqCst) == 0 {
             return; // never shown: nothing to hide, and no window to make
@@ -111,11 +218,78 @@ mod imp {
         START.call_once(|| {
             thread::spawn(run);
         });
-        let h = HWND_SELF.load(Ordering::SeqCst) as HWND;
-        if !h.is_null() {
-            unsafe { PostMessageW(h, WM_APP_FRAME, 0, 0) };
+        post(&FRAME_POSTED, WM_APP_FRAME);
+    }
+
+    /// Tints the hovered layer's shape (None: no tint).
+    pub fn set_tint(tint: Option<Tint>) {
+        if let Ok(mut t) = TINT.lock() {
+            if *t == tint {
+                return;
+            }
+            *t = tint;
         }
-        // before the window exists, `run` applies WANTED once it does
+        post(&TINT_POSTED, WM_APP_TINT);
+    }
+
+    /// Draws the tint window from TINT (or hides it).
+    unsafe fn apply_tint() {
+        let h = HWND_TINT.load(Ordering::SeqCst) as HWND;
+        if h.is_null() {
+            return;
+        }
+        let tint = TINT.lock().ok().and_then(|t| t.clone());
+        let Some(t) = tint else {
+            ShowWindow(h, SW_HIDE);
+            return;
+        };
+        let Some((win, px)) = tint_pixels(&t, TINT_RGB, TINT_STRENGTH) else {
+            ShowWindow(h, SW_HIDE);
+            return;
+        };
+        let (w, ht) = (win.2 - win.0, win.3 - win.1);
+        let screen = GetDC(null_mut());
+        let mem = CreateCompatibleDC(screen);
+        let mut bmi: BITMAPINFO = std::mem::zeroed();
+        bmi.bmiHeader = BITMAPINFOHEADER {
+            biSize: std::mem::size_of::<BITMAPINFOHEADER>() as u32,
+            biWidth: w,
+            biHeight: -ht, // top-down
+            biPlanes: 1,
+            biBitCount: 32,
+            biCompression: 0,
+            biSizeImage: 0,
+            biXPelsPerMeter: 0,
+            biYPelsPerMeter: 0,
+            biClrUsed: 0,
+            biClrImportant: 0,
+        };
+        let mut bits: *mut std::ffi::c_void = null_mut();
+        let dib = CreateDIBSection(mem, &bmi, DIB_RGB_COLORS, &mut bits, null_mut(), 0);
+        if dib.is_null() || bits.is_null() {
+            log::line(format!("hover tint: no bitmap {w}x{ht}"));
+            DeleteDC(mem);
+            ReleaseDC(null_mut(), screen);
+            return;
+        }
+        std::ptr::copy_nonoverlapping(px.as_ptr(), bits as *mut u32, px.len());
+        drop(px);
+        let old = SelectObject(mem, dib);
+        let blend = BLENDFUNCTION { BlendOp: AC_SRC_OVER, BlendFlags: 0, SourceConstantAlpha: 255, AlphaFormat: AC_SRC_ALPHA };
+        let at = POINT { x: win.0, y: win.1 };
+        let size = SIZE { cx: w, cy: ht };
+        let zero = POINT { x: 0, y: 0 };
+        UpdateLayeredWindow(h, screen, &at, &size, mem, &zero, 0, &blend, ULW_ALPHA);
+        SelectObject(mem, old);
+        DeleteObject(dib);
+        DeleteDC(mem);
+        ReleaseDC(null_mut(), screen);
+        // under the frame, over Photoshop
+        SetWindowPos(h, HWND_TOPMOST, 0, 0, 0, 0, SWP_NOACTIVATE | SWP_SHOWWINDOW | SWP_NOOWNERZORDER | SWP_NOMOVE | SWP_NOSIZE);
+        let f = HWND_SELF.load(Ordering::SeqCst) as HWND;
+        if !f.is_null() {
+            SetWindowPos(f, HWND_TOPMOST, 0, 0, 0, 0, SWP_NOACTIVATE | SWP_NOOWNERZORDER | SWP_NOMOVE | SWP_NOSIZE);
+        }
     }
 
     fn wide(s: &str) -> Vec<u16> {
@@ -130,6 +304,7 @@ mod imp {
     }
 
     unsafe fn apply(h: HWND) {
+        FRAME_POSTED.store(false, Ordering::SeqCst);
         let wanted = WANTED.lock().ok().and_then(|w| *w);
         let Some((rect, clip)) = wanted else {
             ShowWindow(h, SW_HIDE);
@@ -166,6 +341,11 @@ mod imp {
         match msg {
             WM_APP_FRAME => {
                 apply(h);
+                0
+            }
+            WM_APP_TINT => {
+                TINT_POSTED.store(false, Ordering::SeqCst);
+                apply_tint();
                 0
             }
             WM_MOUSEACTIVATE => MA_NOACTIVATE,
@@ -212,6 +392,30 @@ mod imp {
             }
             // fully opaque; layered is what makes WS_EX_TRANSPARENT pass clicks to other processes
             SetLayeredWindowAttributes(h, 0, 255, LWA_ALPHA);
+            // the tint: per-pixel alpha (UpdateLayeredWindow), click-through like the frame
+            let tclass = wide("WavePlugHoverTint");
+            let twc = WNDCLASSW { lpszClassName: tclass.as_ptr(), hbrBackground: std::ptr::null_mut(), ..wc };
+            RegisterClassW(&twc);
+            let ttitle = wide("WavePlug 悬停高亮");
+            let t = CreateWindowExW(
+                WS_EX_LAYERED | WS_EX_TRANSPARENT | WS_EX_NOACTIVATE | WS_EX_TOOLWINDOW | WS_EX_TOPMOST,
+                tclass.as_ptr(),
+                ttitle.as_ptr(),
+                WS_POPUP,
+                0,
+                0,
+                1,
+                1,
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+                inst,
+                null(),
+            );
+            if t.is_null() {
+                log::line("hover tint: window not created");
+            } else {
+                HWND_TINT.store(t as isize, Ordering::SeqCst);
+            }
             HWND_SELF.store(h as isize, Ordering::SeqCst);
             log::line("hover frame: window ready");
             apply(h);
@@ -229,6 +433,33 @@ mod tests {
 
     fn r(left: f64, top: f64, right: f64, bottom: f64) -> ScreenRect {
         ScreenRect { left, top, right, bottom }
+    }
+
+    #[test]
+    fn tint_follows_the_shape_and_the_canvas() {
+        // a 2 × 1 shape: left half covered, right half empty, over a 20 × 10 rect
+        let t = Tint { rect: r(100.0, 100.0, 120.0, 110.0), clip: None, width: 2, height: 1, alpha: vec![255, 0] };
+        let (win, px) = tint_pixels(&t, (0x1E, 0x8C, 0xFF), 0.5).unwrap();
+        assert_eq!(win, (100, 100, 120, 110));
+        assert_eq!(px.len(), 200);
+        assert_eq!(px[0] >> 24, 128); // covered: half strength
+        assert_eq!(px[19], 0); // empty: nothing
+        // premultiplied: no channel above alpha
+        assert!(((px[0] >> 16) & 255) <= 128 && (px[0] & 255) <= 128);
+        // cut to the canvas
+        let cut = Tint { clip: Some(r(110.0, 0.0, 500.0, 500.0)), ..t.clone() };
+        let (win, px) = tint_pixels(&cut, (0, 0, 0), 1.0).unwrap();
+        assert_eq!(win, (110, 100, 120, 110));
+        assert!(px.iter().all(|&p| p == 0));
+        assert!(tint_pixels(&Tint { clip: Some(r(500.0, 500.0, 600.0, 600.0)), ..t }, (0, 0, 0), 1.0).is_none());
+    }
+
+    #[test]
+    fn tint_decode_checks_sizes() {
+        assert!(Tint::decode(r(0.0, 0.0, 10.0, 10.0), None, 2, 1, "/wA=").is_some());
+        assert!(Tint::decode(r(0.0, 0.0, 10.0, 10.0), None, 3, 1, "/wA=").is_none());
+        assert!(Tint::decode(r(0.0, 0.0, 0.0, 10.0), None, 2, 1, "/wA=").is_none());
+        assert!(Tint::decode(r(0.0, 0.0, 10.0, 10.0), None, 2, 1, "not base64!").is_none());
     }
 
     #[test]

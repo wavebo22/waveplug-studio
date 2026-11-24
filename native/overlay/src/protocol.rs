@@ -122,6 +122,21 @@ pub enum Command {
         #[serde(default)]
         clip: Option<ScreenRect>,
     },
+    /// 悬停高亮 (frame.rs): the hovered layer's own shape, tinted over the canvas (parts covered by
+    /// other layers included). `alpha`: `width` × `height` coverage bytes (base64), stretched over
+    /// `rect` (screen px) and cut to `clip`; no `rect`: take the tint away.
+    HoverTint {
+        #[serde(default)]
+        rect: Option<ScreenRect>,
+        #[serde(default)]
+        clip: Option<ScreenRect>,
+        #[serde(default)]
+        width: u32,
+        #[serde(default)]
+        height: u32,
+        #[serde(default)]
+        alpha: String,
+    },
     /// 性能监视 (monitor.rs): the small click-through box in the canvas's bottom-right corner with
     /// CPU / memory / GPU / Photoshop / ComfyUI numbers. `comfy`: ComfyUI's address for its row.
     Monitor {
@@ -559,6 +574,10 @@ mod tests {
             other => panic!("{other:?}"),
         }
         assert!(matches!(parse(r#"{"type":"restart-helper"}"#), Some(Command::RestartHelper)));
+        match parse(r#"{"type":"hover-tint","rect":{"left":0,"top":0,"right":20,"bottom":10},"width":2,"height":1,"alpha":"/wA="}"#) {
+            Some(Command::HoverTint { rect: Some(_), width: 2, height: 1, alpha, .. }) => assert_eq!(alpha, "/wA="),
+            other => panic!("{other:?}"),
+        }
         assert!(matches!(
             parse(r#"{"type":"manage-comfy","path":"","base":"http://127.0.0.1:8188","restart":true}"#),
             Some(Command::ManageComfy { restart: true, .. })

@@ -253,6 +253,9 @@ export interface LayerTree {
   /** Small pictures of the layers, each the whole `canvas` at most `size` px each way (like Photoshop's
    *  own): null for a layer without one, undefined when Photoshop couldn't read it just now; `mask`:
    *  the layer mask. One modal call. */
+  /** 悬停高亮: the layer's shape — its coverage at most `size` px a side and where that lies in the
+   *  document (px). null: nothing to show (empty, a layer that can't be read). */
+  shape?(docId: number, layerId: number, size: number): Promise<{ bounds: { left: number; top: number; right: number; bottom: number }; width: number; height: number; alpha: Uint8Array } | null>;
   thumbnails(docId: number, layers: { id: number; mask?: boolean | "vector"; bounds?: { left: number; top: number; right: number; bottom: number } }[], canvas: { width: number; height: number }, size: number): Promise<(string | null | undefined)[]>;
   /** Called when layers may have been painted on / transformed: the edited ids, or "all" after an undo. */
   onEdited(cb: (ids: number[] | "all") => void): void;

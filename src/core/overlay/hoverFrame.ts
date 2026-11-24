@@ -1,7 +1,8 @@
 // 悬停边框: resting the pointer on a WaveLayer row frames that layer on Photoshop's canvas.
 // The frame is the layer's bounds (no pixels are read, nothing is selected in Photoshop), drawn by
-// the overlay helper as a click-through window (native/overlay/src/frame.rs). This file works out
-// the rectangles; layerTree.ts decides when.
+// the overlay helper as a click-through window (native/overlay/src/frame.rs). Resting a moment
+// longer tints the layer's own shape (悬停高亮: its pixels read once, scaled down to TINT_SIZE, and
+// cached per document version). This file works out the rectangles; layerTree.ts decides when.
 
 import type { Rect } from "../image/region.ts";
 import { type CanvasView, type ScreenRect, docToScreen } from "./protocol.ts";
@@ -27,3 +28,23 @@ export function frameOnScreen(r: Rect, v: CanvasView): { rect: ScreenRect; clip:
 /** Identifies a frame message, so the same one isn't sent twice. */
 export const frameKey = (f: { rect: ScreenRect; clip: ScreenRect } | null): string =>
   f ? [f.rect.left, f.rect.top, f.rect.right, f.rect.bottom, f.clip.left, f.clip.top, f.clip.right, f.clip.bottom].join(",") : "";
+
+/** 悬停高亮: the longest side of the layer shape read for the tint (Photoshop scales it down) */
+export const TINT_SIZE = 256;
+
+/** The coverage (0–255 per pixel) of read layer pixels: their alpha, or all covered without one. */
+export function shapeAlpha(data: Uint8Array, width: number, height: number, channels: number): Uint8Array | null {
+  const n = width * height;
+  if (!(width >= 1 && height >= 1 && channels >= 1 && channels <= 4) || data.length < n * channels) return null;
+  const out = new Uint8Array(n);
+  if (channels === 4 || channels === 2) for (let i = 0; i < n; i++) out[i] = data[i * channels + channels - 1];
+  else out.fill(255);
+  return out;
+}
+
+/** Base64 of `bytes` (btoa takes a string of char codes; built in pieces to stay off the stack limit). */
+export function bytesToBase64(bytes: Uint8Array): string {
+  let s = "";
+  for (let i = 0; i < bytes.length; i += 0x8000) s += String.fromCharCode(...bytes.subarray(i, i + 0x8000));
+  return btoa(s);
+}
