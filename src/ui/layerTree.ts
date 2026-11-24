@@ -37,6 +37,7 @@ import type { MenuNode } from "../core/overlay/protocol.ts";
 import { arrangeTarget, neighbourRow } from "../core/layers/tree.ts";
 import { onSmartTarget } from "./smartTarget.ts";
 import { createSlider } from "./slider.ts";
+import { createScroller } from "../core/layers/scroll.ts";
 import { type HeldKeys, type HintInput, type HintZone, NO_KEYS, hintItems, stateParts } from "../core/layers/hints.ts";
 import type { HintBar } from "./hintBar.ts";
 import { type GuideMark, guideKey, treeGuides } from "../core/layers/guides.ts";
@@ -98,6 +99,8 @@ const kindIcon = (l: TreeLayer, open: boolean) => h("span", { class: "lt-kind k-
 const thumbPx = () => thumbSize.thumb * 2;
 /** thumbnails read per Photoshop call */
 const THUMB_BATCH = 6;
+/** ms between two thumbnail batches (Photoshop answers the user in between) */
+const THUMB_GAP = 80;
 /** layers whose pixels make a useful thumbnail (groups, text and adjustments get their mark, like Photoshop) */
 let thumbsOn = thumbPercent > 0;
 /** 悬停边框 (on unless turned off): resting on a row frames its layer on the canvas, drawn by the overlay helper */
@@ -462,8 +465,12 @@ export function createLayerTreeView(tree: LayerTree, status: Status, tools?: Lay
     sendFrame(f);
     if (f && v) tintAt(id, d, v); else clearTint();
   };
+  /** when the pointer last really moved over the list (a row sliding under a still pointer, as the
+   *  list scrolls, fires mouseover too: that is no hover) */
+  let pointerMovedAt = 0;
   const frameAt = (id: number) => {
     if (!frameOn || !canvasView || !overlay?.connected || drag || docId === null || id === frameId) return;
+    if (scroller.scrolling() || Date.now() - pointerMovedAt > 120) return;
     frameId = id;
     if (frameTimer) clearTimeout(frameTimer);
     frameTimer = setTimeout(() => { frameTimer = null; if (frameId === id) void drawFrame(id); }, FRAME_DELAY);
@@ -794,12 +801,28 @@ export function createLayerTreeView(tree: LayerTree, status: Status, tools?: Lay
   // scrolling (wheel, our own scrollbar) changes which layers those rows show, whole rows at a time,
   // and a row whose content changes is repainted. `firstRow` is the first row shown.
   let firstRow = 0;
+  /** wheel / scrollbar: at most one redraw a frame, and the list counts as scrolling until it settles
+   *  (core/layers/scroll.ts): no thumbnails read, no hover frame meanwhile */
+  const scroller = createScroller({
+    clock: { now: () => Date.now(), later: (fn, ms) => setTimeout(fn, ms), cancel: h => clearTimeout(h as ReturnType<typeof setTimeout>) },
+    current: () => firstRow,
+    clamp: r => Math.max(0, Math.min(r, maxFirst())),
+    apply: r => { firstRow = r; draw(); },
+    settled: () => queueThumbs(0),
+  });
   const inner = h("div", { class: "lt-inner" });
   const sthumb = h("div", { class: "lt-sthumb" });
   const sbar = h("div", { class: "lt-sbar" }, sthumb);
   const empty = h("div", { class: "lt-empty muted" });
   list.append(inner, empty, sbar);
   list.addEventListener("mouseleave", () => { hideFrame(); frameView = null; hoverEl?.classList.remove("hover"); hoverEl = null; });
+  // a real pointer move over the list: the row under it may be framed (frameAt)
+  list.addEventListener("mousemove", e => {
+    pointerMovedAt = Date.now();
+    // after a scroll, the row under a pointer that starts moving again is framed at once
+    const row = (e.target as HTMLElement | null)?.closest?.(".lt-row");
+    if (row && frameId === null) { const r = pool.find(p => p.el === row); if (r && !r.sub) frameAt(r.id); }
+  });
   const pool: RowEl[] = [];
 
   function makeRow(): RowEl {
@@ -1451,12 +1474,14 @@ export function createLayerTreeView(tree: LayerTree, status: Status, tools?: Lay
     });
   }
 
-  /** Scrolls by `n` rows (negative: up). */
+  /** Scrolls by `n` rows at once (negative: up): the drag's edge scroll, which goes on tracking
+   *  from the new rows straight away. Wheel and scrollbar go through `scroller`. */
   function scrollRows(n: number) {
     const before = firstRow;
     firstRow = Math.max(0, Math.min(firstRow + n, maxFirst()));
     if (firstRow !== before) draw();
   }
+
 
 
 
@@ -1469,7 +1494,9 @@ export function createLayerTreeView(tree: LayerTree, status: Status, tools?: Lay
   let inView: TreeLayer[] = [], thumbTimer: ReturnType<typeof setTimeout> | null = null, retryTimer: ReturnType<typeof setTimeout> | null = null, fetching = false;
   function queueThumbs(delay = 150) {
     if (thumbTimer) clearTimeout(thumbTimer);
-    thumbTimer = setTimeout(() => { thumbTimer = null; void fetchThumbs(); }, delay);
+    // never while the list is scrolling: the scroller's `settled` asks again
+    const wait = Math.max(delay, scroller.settlesIn() + 60);
+    thumbTimer = setTimeout(() => { thumbTimer = null; void fetchThumbs(); }, wait);
   }
   /** wakes the queue when the next failed thumbnail is due again */
   function scheduleRetry() {
@@ -1480,6 +1507,7 @@ export function createLayerTreeView(tree: LayerTree, status: Status, tools?: Lay
   async function fetchThumbs() {
     // nothing to do while the list isn't on screen (another page, a hidden panel) or a drag runs
     if (fetching || docId === null || drag?.active || !list.clientHeight) return;
+    if (scroller.scrolling()) { queueThumbs(); return; }
     const now = Date.now();
     // a variant layer: its shown variation, all of them while they are listed
     const variants = (l: TreeLayer) => !thumbsOn || !isVariantLayer(l) ? [] : openSubs().has(l.id) ? l.ai!.ids : l.ai!.shown !== null ? [l.ai!.shown] : [];
@@ -1517,7 +1545,8 @@ export function createLayerTreeView(tree: LayerTree, status: Status, tools?: Lay
       return;
     }
     fetching = false;
-    queueThumbs(0);
+    // the next batch after a breath: each batch holds Photoshop in a modal moment
+    queueThumbs(THUMB_GAP);
   }
   // a mask or the pixels targeted in Photoshop's own panel: on the (first) selected layer
   // The event names the part only. A click on another layer's mask in Photoshop selects that layer in
@@ -1540,22 +1569,23 @@ export function createLayerTreeView(tree: LayerTree, status: Status, tools?: Lay
     const w = e as WheelEvent;
     if (!w.deltaY) return;
     e.preventDefault();
-    scrollRows((w.deltaY > 0 ? 1 : -1) * Math.max(1, Math.min(10, Math.round(Math.abs(w.deltaY) / 40)) || 3));
+    if (!scroller.scrolling()) hideFrame(); // the rows are about to move under the pointer
+    scroller.by((w.deltaY > 0 ? 1 : -1) * Math.max(1, Math.min(10, Math.round(Math.abs(w.deltaY) / 40)) || 3));
   });
   let thumbDrag: { y0: number; f0: number } | null = null;
-  sthumb.addEventListener("mousedown", e => { e.stopPropagation(); thumbDrag = { y0: (e as MouseEvent).clientY, f0: firstRow }; });
+  sthumb.addEventListener("mousedown", e => { e.stopPropagation(); hideFrame(); thumbDrag = { y0: (e as MouseEvent).clientY, f0: firstRow }; });
   sbar.addEventListener("mousedown", e => {
     // a press beside the thumb pages up / down
     if (e.target !== sbar) return;
     e.stopPropagation();
     const m = e as MouseEvent;
-    scrollRows((typeof m.offsetY === "number" && m.offsetY < sthumb.offsetTop ? -1 : 1) * fits());
+    hideFrame();
+    scroller.by((typeof m.offsetY === "number" && m.offsetY < sthumb.offsetTop ? -1 : 1) * fits());
   });
   listen(document, "mousemove", e => {
     if (!thumbDrag) return;
     const H = list.clientHeight || 1, th = sthumb.offsetHeight, room = Math.max(1, H - th);
-    const n = thumbDrag.f0 + Math.round(((e as MouseEvent).clientY - thumbDrag.y0) / room * maxFirst());
-    scrollRows(n - firstRow);
+    scroller.to(thumbDrag.f0 + Math.round(((e as MouseEvent).clientY - thumbDrag.y0) / room * maxFirst()));
   });
   listen(document, "mouseup", () => { thumbDrag = null; });
 
