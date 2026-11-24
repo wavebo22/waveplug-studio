@@ -274,10 +274,14 @@ export function createLayerTreeView(tree: LayerTree, status: Status, tools?: Lay
     // so brush, mask, transform and other native shortcuts continue to work.
     if (focus && selected.has(focus.id)) return;
     if (why === "loadSelection" || why === "toggleMask" || why === "toggleVectorMask") return;
-    // Photoshop may reclaim UXP keyboard focus *after* the modal promise resolves. A synchronous
-    // blur/focus is therefore racy. Retry on the next turns, but only while the pointer remains
-    // over this panel and the user has not started typing or dragging.
-    const delays = why === "delete" || why === "select" ? [0, 80, 220] : [0];
+    // 11-24: each click asked for the keyboard three times (0 / 80 / 220 ms) and again after every
+    // thumbnail read. Photoshop's own Layers panel doesn't, and clicking quickly through rows there
+    // didn't stall while it did here: each request makes Photoshop move the keyboard and refresh
+    // its menus and panels. Now: only when the panel's shortcuts are on (nothing else here needs the
+    // keyboard), once, a moment after the command (Photoshop may take the focus back after its
+    // modal promise resolves), and never after a background read.
+    if (why === "thumbnails" || !shortcutsOn) return;
+    const delays = [120];
     for (const delay of delays) setTimeout(() => {
       if (!el.isConnected) return;
       const active = document.activeElement;
@@ -290,12 +294,16 @@ export function createLayerTreeView(tree: LayerTree, status: Status, tools?: Lay
         if (active && active !== el) (active as HTMLElement).blur();
         el.focus();
       } catch { /* host without focus on sections */ }
-      log("info", "layer panel focus restore", why, delay,
-        JSON.stringify({ focused: document.activeElement === el, active: document.activeElement?.tagName ?? "none", panelActive, pointerIn }));
+      // evidence, not a running record (it was 46 000 lines): the first few of a session
+      if (focusRestoreLogged < 30) {
+        focusRestoreLogged++;
+        log("info", "layer panel focus restore", why, delay,
+          JSON.stringify({ focused: document.activeElement === el, active: document.activeElement?.tagName ?? "none", panelActive, pointerIn }));
+      }
     }, delay);
   };
   // when the panel gains / loses the keyboard (evidence for the above)
-  let focusLogged = 0;
+  let focusLogged = 0, focusRestoreLogged = 0;
   for (const type of ["focus", "blur"]) listen(window, type, () => { if (focusLogged < 40) { focusLogged++; log("info", "layer panel window", type); } });
   listen(document, "mousedown", e => {
     const t = e.target as HTMLElement | null;
