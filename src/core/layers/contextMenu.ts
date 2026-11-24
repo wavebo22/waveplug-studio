@@ -104,6 +104,7 @@ export function contextMenu(input: ContextMenuInput): { title: string; items: Me
     sep,
     ...(q ? q.actions.map(a => ({ id: "act:" + a.action, label: a.label, enabled: a.enabled })) : []),
     sep,
+    when("updateModified"),
     act("smartViaCopy"), act("embedLinked"), act("convertToLinked"),
     // only for a linked smart object (Photoshop's own item is grayed for an embedded one): 替换内容 does that
     when("relink"), when("linkToFile"),

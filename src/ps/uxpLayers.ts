@@ -1543,7 +1543,7 @@ const ACTION_NAMES: Partial<Record<LayerAction, string>> = {
   toggleMaskLink: "链接/取消链接蒙版", moveEffect: "移动图层效果", moveEffects: "移动图层样式", deleteEffect: "删除图层效果", moveFilters: "移动智能滤镜", deleteFilter: "删除智能滤镜", deleteFilters: "清除智能滤镜",
   targetLayer: "选择图层", targetFilterMask: "选择智能滤镜蒙版", deleteFilterMask: "删除智能滤镜蒙版", viewMask: "查看蒙版", editFilter: "编辑智能滤镜", showVariant: "切换变体", deleteVariant: "删除变体", setProps: "图层属性", setLock: "锁定/解锁图层", adjustment: "新建调整图层",
   mergeDown: "向下合并", mergeVisible: "合并可见图层", flatten: "拼合图像", rasterizeStyle: "栅格化图层样式", smartViaCopy: "通过拷贝新建智能对象",
-  embedLinked: "嵌入链接的智能对象", convertToLinked: "转换为链接对象", relink: "重新链接到文件", linkToFile: "链接到已有文件", align: "对齐图层", distribute: "分布图层",
+  embedLinked: "嵌入链接的智能对象", convertToLinked: "转换为链接对象", relink: "重新链接到文件", linkToFile: "链接到已有文件", updateModified: "更新修改的内容", updateAllModified: "更新所有修改的内容", align: "对齐图层", distribute: "分布图层",
   artboardFromLayers: "来自图层的画板", newLayerDialog: "新建图层", quickExport: "快速导出为 PNG", copyCSS: "复制 CSS", copySVG: "复制 SVG",
 };
 
@@ -1675,6 +1675,9 @@ const MENU_COMMANDS: Partial<Record<LayerAction, { titles: string[]; near?: stri
   copySVG: { titles: ["复制SVG", "CopySVG"] },
   convertToLinked: { titles: ["转换为链接对象", "ConverttoLinked"] },
   relink: { titles: ["重新链接到文件", "RelinktoFile"] },
+  // 图层 › 智能对象 › 更新修改的内容 / 更新所有修改的内容 (the linked files changed outside)
+  updateModified: { titles: ["更新修改的内容", "UpdateModifiedContent"] },
+  updateAllModified: { titles: ["更新所有修改的内容", "UpdateAllModifiedContent"] },
 };
 /** Every menu command's title → ids, read once (menu ids differ between Photoshop versions). */
 let menuTitles: Promise<Map<string, number[]>> | null = null;

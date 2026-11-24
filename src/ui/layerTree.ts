@@ -83,8 +83,13 @@ const saveJson = (k: string, v: unknown) => { try { localStorage.setItem(k, JSON
 const customColors: Record<string, Record<string, string>> = loadJson(CUSTOM_KEY, {});
 let recentColors: string[] = loadJson(RECENT_KEY, []);
 const AUTO_FRAMES = ["#4f9cf0", "#f0a04b", "#a77ff0", "#5cc26b", "#e5534b", "#e3cf4a", "#6be0e8", "#ec86d6"];
-const ic = (name: string, px = 14) => icon(PS_ICON[name] ?? name, Math.round(px * 1.15));
-const kindIcon = (l: TreeLayer, open: boolean) => h("span", { class: "lt-kind k-" + l.kind, title: KIND_ICON[l.kind][1] }, ic(l.kind === "group" && open && l.children ? "folderOpen" : KIND_ICON[l.kind][0], 15));
+/** 图标规范 (docs/UI_DESIGN_SYSTEM.md): two sizes, `m` 16 px for buttons, the toolbar, the eye and a
+ *  row's kind icon, `s` 12 px for what sits in a line of text (status cells, menus, chevrons); `xs`
+ *  10 px only for the badges drawn over a thumbnail's corner. */
+const IC = { xs: 10, s: 12, m: 16 } as const;
+type IcSize = keyof typeof IC;
+const ic = (name: string, size: IcSize = "m") => icon(PS_ICON[name] ?? name, IC[size]);
+const kindIcon = (l: TreeLayer, open: boolean) => h("span", { class: "lt-kind k-" + l.kind, title: KIND_ICON[l.kind][1] }, ic(l.kind === "group" && open && l.children ? "folderOpen" : KIND_ICON[l.kind][0], "m"));
 
 /** thumbnail px read: twice the box, for sharpness (max 108). */
 const thumbPx = () => thumbSize.thumb * 2;
@@ -414,7 +419,7 @@ export function createLayerTreeView(tree: LayerTree, status: Status, tools?: Lay
   });
   // Thumbnail-size settings live behind one icon; 0% means no thumbnails.
   // Group/sub-row height and all icons remain unchanged at any percentage.
-  const thumbButton = h("button", { class: "lt-top-icon", title: "缩略图大小（0–150%），0% 隐藏缩略图" }, ic("image", 15));
+  const thumbButton = h("button", { class: "lt-top-icon", title: "缩略图大小（0–150%），0% 隐藏缩略图" }, ic("image", "m"));
   const thumbValue = h("input", { class: "lt-thumb-value", type: "text", value: thumbPercent + "%", title: "缩略图大小百分比；Enter 应用，Esc 取消" }) as HTMLInputElement;
   const thumbSlider = createSlider({
     title: "缩略图大小（0% 隐藏，100% 为原中档，150% 为原大档）", min: 0, max: 150,
@@ -470,6 +475,10 @@ export function createLayerTreeView(tree: LayerTree, status: Status, tools?: Lay
     setShown(thumbPopup, open);
     if (open) { thumbValue.value = thumbPercent + "%"; thumbSlider.value = thumbPercent; }
   });
+  // 更新链接图层: only while the document has linked smart objects (their files may have changed outside)
+  const updateLinksBtn = h("button", { class: "lt-top-icon", title: "更新所有链接图层：链接的文件在外面改过后，读入新内容" }, ic("refresh", "m"));
+  updateLinksBtn.addEventListener("click", () => { if (docId !== null) void run("updateAllModified", ids()); });
+  setShown(updateLinksBtn, false);
   const frameBtn = h("button", { class: "lt-head-btn", title: "悬停边框：鼠标停在一行上，画布上用细蓝框标出这个图层的范围；不改变选中的图层。需要外置 helper 在运行" }, "悬停边框");
   const renderFrameBtn = () => frameBtn.classList.toggle("off", !frameOn);
   frameBtn.addEventListener("click", () => {
@@ -509,8 +518,8 @@ export function createLayerTreeView(tree: LayerTree, status: Status, tools?: Lay
   const allEffectsOpen = () => { const ids = effectIds(), o = openSubs(); return ids.length > 0 && ids.every(id => o.has(id)); };
   function renderExpandControls(groupsDisabled: boolean) {
     const g = allGroupsOpen(), fx = allEffectsOpen();
-    replace(groupsToggle.caret, icon(g ? "chevron" : "chevronRight", 10));
-    replace(effectsToggle.caret, icon(fx ? "chevron" : "chevronRight", 10));
+    replace(groupsToggle.caret, icon(g ? "chevron" : "chevronRight", IC.s));
+    replace(effectsToggle.caret, icon(fx ? "chevron" : "chevronRight", IC.s));
     groupsToggle.btn.title = groupsDisabled && docId !== null ? "筛选时组全部展开，不能折叠" : g ? "折叠所有图层组" : "展开所有图层组";
     effectsToggle.btn.title = fx ? "折叠所有图层效果" : "展开所有图层效果";
     (groupsToggle.btn as any).disabled = groupsDisabled || !groupIds().length;
@@ -555,7 +564,7 @@ export function createLayerTreeView(tree: LayerTree, status: Status, tools?: Lay
   ];
   const kindBtns = KINDS.map(([k, ico, tip]) => {
     const b = h("button", { class: "lt-filter-option", title: "只看" + tip + "（可多选，再点取消）" },
-      ic(ico, 14), h("span", {}, tip));
+      ic(ico, "s"), h("span", {}, tip));
     b.addEventListener("click", () => {
       if (query.kinds.has(k)) query.kinds.delete(k); else query.kinds.add(k);
       firstRow = 0; render();
@@ -573,7 +582,7 @@ export function createLayerTreeView(tree: LayerTree, status: Status, tools?: Lay
     h("span", { class: "lt-radio" }), "全部");
   allFilterBtn.addEventListener("click", () => { filter = "all"; firstRow = 0; render(); });
   const filterBtns = FILTERS.map(([f, label, ico]) => {
-    const b = h("button", { class: "lt-quick-option", title: label }, ic(ico, 13), h("span", {}, label));
+    const b = h("button", { class: "lt-quick-option", title: label }, ic(ico, "s"), h("span", {}, label));
     b.addEventListener("click", () => { filter = filter === f ? "all" : f; firstRow = 0; render(); });
     return b;
   });
@@ -603,7 +612,7 @@ export function createLayerTreeView(tree: LayerTree, status: Status, tools?: Lay
     h("div", { class: "lt-advanced-grid" }, ...advancedBtns));
   setShown(advancedBox, false);
   const advancedButton = h("button", { class: "lt-filter-more", title: "高级筛选：图层属性、蒙版和效果" },
-    ic("sliders", 14), "高级筛选", ic("chevron", 11));
+    ic("sliders", "s"), "高级筛选", ic("chevron", "s"));
   advancedButton.addEventListener("click", () => {
     setShown(advancedBox, !isShown(advancedBox));
     advancedButton.classList.toggle("on", isShown(advancedBox));
@@ -623,13 +632,13 @@ export function createLayerTreeView(tree: LayerTree, status: Status, tools?: Lay
     h("div", { class: "lt-quick-grid" }, allFilterBtn, ...filterBtns),
     advancedButton, advancedBox);
   setShown(filterPopup, false);
-  const funnelButton = h("button", { class: "lt-top-icon lt-funnel", title: "图层类型 / 快捷筛选 / 高级筛选" }, ic("psFilters", 16));
+  const funnelButton = h("button", { class: "lt-top-icon lt-funnel", title: "图层类型 / 快捷筛选 / 高级筛选" }, ic("psFilters", "m"));
   funnelButton.addEventListener("click", () => {
     setShown(thumbPopup, false);
     setShown(filterPopup, !isShown(filterPopup));
   });
   // Photoshop's upright filter switch: knob up and lit while filtering is on
-  const filterSwitch = h("button", { class: "lt-filter-switch on", title: "筛选开关：暂停 / 恢复筛选，不清空条件" }, ic("psToggleOn", 14));
+  const filterSwitch = h("button", { class: "lt-filter-switch on", title: "筛选开关：暂停 / 恢复筛选，不清空条件" }, ic("psToggleOn", "m"));
   filterSwitch.addEventListener("click", () => { filterEnabled = !filterEnabled; firstRow = 0; render(); });
   // search | expand / collapse … funnel, switch at the far right; on a narrow panel (.lt-narrow) the
   // expand / collapse buttons drop to a line of their own under the search box
@@ -835,7 +844,7 @@ export function createLayerTreeView(tree: LayerTree, status: Status, tools?: Lay
     r.key = key; r.id = l.id; r.sub = f;
     r.el.className = "lt-row lt-filter-row" + (fx ? " lt-effects-row" : "") + (sel ? " on" : "") + (f.enabled ? "" : " off") + (moving ? " moving" : "") + (r.el === hoverEl ? " hover" : "");
     (r.el.firstChild as HTMLElement).className = "lt-stripe";
-    replace(r.eye, !fx && f.enabled && !more ? ic("eye", 14) : null);
+    replace(r.eye, !fx && f.enabled && !more ? ic("eye", "m") : null);
     r.eye.className = "lt-eye" + (more || fx ? " none" : f.enabled ? "" : " hidden");
     r.eye.style.backgroundColor = "";
     r.eye.title = more || fx ? "" : (f.enabled ? "隐藏全部智能滤镜" : "显示全部智能滤镜");
@@ -973,7 +982,7 @@ export function createLayerTreeView(tree: LayerTree, status: Status, tools?: Lay
     const name = layers.find(x => x.id === id)?.name ?? "";
     const num = /^v(\d+)/.exec(name)?.[1] ?? String(i + 1);
     // × shows on the chip under the mouse (its room is always kept, so nothing moves)
-    const del = h("span", { class: "lt-vdel", title: `删除 v${num}（可撤销）` }, ic("close", 9));
+    const del = h("span", { class: "lt-vdel", title: `删除 v${num}（可撤销）` }, ic("close", "xs"));
     del.addEventListener("mousedown", e => e.stopPropagation());
     del.addEventListener("click", e => { e.stopPropagation(); void run("deleteVariant", [l.id], String(id)); });
     const chip = h("span", { class: "lt-vchip" + (on ? " on" : ""), title: name + (on ? "（当前显示）" : "\n单击：换成这个变体") },
@@ -1015,27 +1024,27 @@ export function createLayerTreeView(tree: LayerTree, status: Status, tools?: Lay
     const tint = sel ? "" : sharedColor(l) !== undefined || peer ? " peer" : inside !== undefined ? " peer inside" : "";
     r.el.className = "lt-row" + (l.kind === "group" && !vl ? " group" : "") + (sel ? " on" : "") + (row.context ? " context" : "") + (l.visible ? "" : " off") + (moving ? " moving" : "") + tint + (r.el === hoverEl ? " hover" : "");
     (r.el.firstChild as HTMLElement).className = "lt-stripe";
-    replace(r.eye, l.visible ? ic("eye", 14) : null);
+    replace(r.eye, l.visible ? ic("eye", "m") : null);
     r.eye.className = "lt-eye" + (l.visible ? "" : " hidden");
     r.eye.style.backgroundColor = labelTint(l, customOf(l.id));
     // a variant layer opens its variations from the ✦ on its picture, not a twisty
     // effects and smart filters open from their status icons (fx / 智能滤镜), not a twisty
     const folds = !vl && l.kind === "group" && l.children > 0;
-    replace(r.twisty, folds ? (open ? "▾" : "▸") : "");
+    replace(r.twisty, folds ? ic(open ? "chevron" : "chevronRight", "s") : null);
     r.twisty.title = !folds ? "" : open ? "折叠" : "展开";
     replace(r.name, h("span", { class: "lt-name-text" }, l.name));
     r.name.className = "lt-name" + (l.clipBase ? " clip-base" : "");
     const pictured = hasPicture(l) || shown !== null;
     const mark = pictured
       ? h("div", { class: "lt-thumb" + (framed(l) === "layer" ? " lt-target" : ""), style: `width: ${thumbW(l)}px` }, thumb ? thumbImg(thumb) : null,
-        l.kind === "shape" || l.kind === "fill" ? h("span", { class: "lt-badge k-" + l.kind, title: KIND_ICON[l.kind][1] }, ic(KIND_ICON[l.kind][0], 10))
-          : vl ? zoneOf(h("span", { class: "lt-badge k-variant", title: `变体图层 · ${l.ai!.variations} 个变体\n双击：打开变体栏` }, ic("spark", 10)), l.id, "variant")
+        l.kind === "shape" || l.kind === "fill" ? h("span", { class: "lt-badge k-" + l.kind, title: KIND_ICON[l.kind][1] }, ic(KIND_ICON[l.kind][0], "xs"))
+          : vl ? zoneOf(h("span", { class: "lt-badge k-variant", title: `变体图层 · ${l.ai!.variations} 个变体\n双击：打开变体栏` }, ic("spark", "xs")), l.id, "variant")
           : smartBadge(l, color))
       : kindIcon(l, open);
 
     // one guide line per level, continuing from row to row like Blender's outliner
     replace(r.body, h("div", { class: "lt-indent" }, ...Array.from({ length: l.depth }, () => h("span", { class: "lt-guide" }))), r.twisty,
-      l.clipped ? h("div", { class: "lt-clip", title: "剪贴到下方图层（剪贴蒙版）" }, ic("clip", 13)) : null,
+      l.clipped ? h("div", { class: "lt-clip", title: "剪贴到下方图层（剪贴蒙版）" }, ic("clip", "s")) : null,
       zoneOf(h("div", { class: "lt-mark" + (pictured ? " has-thumb" : ""), style: pictured ? "width: " + (thumbW(l) + 2) + "px" : "", title: l.kind === "smartObject" ? "智能对象缩略图" : l.artboard ? "画板缩略图" : "图层缩略图" }, mark), l.id, "thumb"),
       // as in Photoshop: picture ⛓ layer mask ⛓ vector mask, each chain its mask's link
       l.mask ? maskChain(l, false) : null,
@@ -1055,7 +1064,7 @@ export function createLayerTreeView(tree: LayerTree, status: Status, tools?: Lay
     if (!t) return null;
     const what = t.cls === "link" ? "外部链接" : t.cls === "shared" ? "共用内容（同色＝同一份内容）" : "内容独立";
     return zoneOf(h("span", { class: "lt-badge k-smart " + t.cls + (t.cls === "shared" && color !== undefined ? " c" + color : ""), title: `智能对象 · ${what}\n${t.tip}\n双击：编辑内容（PNG 自动转可编辑 PSB）` },
-      ic(t.cls === "link" ? "external" : "smart", 10)), l.id, "status");
+      ic(t.cls === "link" ? "external" : "smart", "xs")), l.id, "status");
   }
 
   /** The layer mask's thumbnail: click selects the mask for painting, Shift+click turns it off / on. */
@@ -1107,7 +1116,7 @@ export function createLayerTreeView(tree: LayerTree, status: Status, tools?: Lay
   /** The chain between the picture and the mask: the mask moves with the layer; click to unlink / link. */
   function maskChain(l: TreeLayer, vector: boolean): HTMLElement {
     const on = vector ? l.vmaskLinked : l.maskLinked;
-    const cell = h("div", { class: "lt-mlink" + (on ? "" : " off"), title: on ? "蒙版和图层链接在一起（一起移动）：单击取消链接" : "蒙版没有和图层链接：单击链接" }, on ? ic("chainV", 11) : null);
+    const cell = h("div", { class: "lt-mlink" + (on ? "" : " off"), title: on ? "蒙版和图层链接在一起（一起移动）：单击取消链接" : "蒙版没有和图层链接：单击链接" }, on ? ic("chainV", "s") : null);
     cell.addEventListener("mousedown", e => e.stopPropagation());
     cell.addEventListener("click", e => { e.stopPropagation(); void run("toggleMaskLink", [l.id], JSON.stringify({ vector, on: !on })); });
     return cell;
@@ -1197,18 +1206,18 @@ export function createLayerTreeView(tree: LayerTree, status: Status, tools?: Lay
     if (!cellUsed(l, c)) return h("span", { class: `lt-col col-${c}` });
     const tag = (cls: string[]) => layerTags(l, users).find(t => cls.includes(t.cls.split(" ")[0]));
     switch (c) {
-      case "content": { const t = tag(["edit", "content"])!; return box(t.cls + " " + t.icon, "智能对象内容 · " + t.text + "\n" + t.tip, ic(t.icon, 14)); }
+      case "content": { const t = tag(["edit", "content"])!; return box(t.cls + " " + t.icon, "智能对象内容 · " + t.text + "\n" + t.tip, ic(t.icon, "s")); }
       case "filters": {
         // a click opens / closes the 智能滤镜 row, as the fx cell does the effects
         const t = tag(["filters"])!, open = openSubs().has(-l.id);
-        const b = box(t.cls + " lt-subcell" + (open ? " open" : ""), "智能滤镜\n" + t.tip, ic("filters", 14));
+        const b = box(t.cls + " lt-subcell" + (open ? " open" : ""), "智能滤镜\n" + t.tip, ic("filters", "s"));
         // dragged like Photoshop's smart filter icon: onto another smart object (move; Alt: copy), the trash (clear)
         b.addEventListener("mousedown", e => { e.stopPropagation(); startDrag(l.id, e as MouseEvent, { what: { kind: "filters", layerId: l.id }, row: rowOf(l.id) }); });
         b.addEventListener("click", e => { e.stopPropagation(); if (!suppressClick) toggleSub(-l.id); });
         return b;
       }
       case "fx": return fxCell(l);
-      case "chain": return box("lt-chain" + (peer ? " peer" : ""), peer ? "和选中的图层链接在一起" : `和 ${l.links.length} 个图层链接（一起移动、变换）`, ic("link", 13));
+      case "chain": return box("lt-chain" + (peer ? " peer" : ""), peer ? "和选中的图层链接在一起" : `和 ${l.links.length} 个图层链接（一起移动、变换）`, ic("link", "s"));
       case "lock": {
         const background = l.kind === "background";
         const parts = [l.lockTransparency && "透明像素", l.lockPixels && "图像像素", l.lockPosition && "位置"].filter(Boolean).join("、");
@@ -1217,7 +1226,7 @@ export function createLayerTreeView(tree: LayerTree, status: Status, tools?: Lay
           : l.lockAll
             ? (l.kind === "group" ? "图层组已锁定全部（组内图层一起锁定；双击此锁图标：解锁）" : "锁定全部（双击此锁图标：解除该图层的全部锁定）")
             : `锁定${parts}（双击此锁图标：解除该图层的全部锁定）`;
-        return zoneOf(box("lt-lock" + (l.lockAll ? "" : " part"), tip, ic("lock", 13)), l.id, "lock");
+        return zoneOf(box("lt-lock" + (l.lockAll ? "" : " part"), tip, ic("lock", "s")), l.id, "lock");
       }
     }
   }
@@ -1468,7 +1477,7 @@ export function createLayerTreeView(tree: LayerTree, status: Status, tools?: Lay
     ADVANCED.forEach(([k], i) => advancedBtns[i].classList.toggle("on", query.advanced.has(k)));
     allFilterBtn.classList.toggle("on", filter === "all");
     funnelButton.classList.toggle("has", filter !== "all" || queryActive(query));
-    if (filterSwitch.classList.contains("on") !== filterEnabled) replace(filterSwitch, ic(filterEnabled ? "psToggleOn" : "psToggleOff", 14));
+    if (filterSwitch.classList.contains("on") !== filterEnabled) replace(filterSwitch, ic(filterEnabled ? "psToggleOn" : "psToggleOff", "m"));
     filterSwitch.classList.toggle("on", filterEnabled);
     findRow.classList.toggle("paused", !filterEnabled);
     activeContents = new Set(layers.filter(l => selected.has(l.id) && l.smart?.contentId).map(l => l.smart!.contentId!));
@@ -1488,7 +1497,7 @@ export function createLayerTreeView(tree: LayerTree, status: Status, tools?: Lay
     const peerKey = peerList.join(",");
     if (peerKey !== [...peers].join(",")) peerAt = 0;
     peers = new Set(peerList);
-    replace(peersBtn, ic("link", 12), ` 链接 ${peerList.length}`);
+    replace(peersBtn, ic("link", "s"), ` 链接 ${peerList.length}`);
     setShown(peersBtn, peerList.length > 0);
     const counts = filterCounts(layers, users);
     FILTERS.forEach(([f, label, , tip], i) => {
@@ -1498,6 +1507,7 @@ export function createLayerTreeView(tree: LayerTree, status: Status, tools?: Lay
       (filterBtns[i] as any).disabled = docId === null || (!n && filter !== f);
     });
     replace(countEl, docId === null ? "" : `${layers.length} 个` + (selected.size ? ` · 已选 ${selected.size}` : ""));
+    setShown(updateLinksBtn, docId !== null && layers.some(l => !!l.smart?.linked));
     const groupsDisabled = docId === null || (filterEnabled && (filter !== "all" || queryActive(query)));
     renderExpandControls(groupsDisabled);
     setShown(empty, !rows.length);
@@ -1939,7 +1949,7 @@ export function createLayerTreeView(tree: LayerTree, status: Status, tools?: Lay
   // A fixed overlay on the left edge of the visible list: no new column and no layout shift.
   // It receives mouse enter/leave only *during* a draggable, deletable item. Never takes a click
   // from the left-hand eye / movement / editing controls in the resting panel.
-  const leftDelete = h("div", { class: "lt-left-delete", title: "松开鼠标删除（Ctrl+Z 可撤销）" }, ic("trash", 15));
+  const leftDelete = h("div", { class: "lt-left-delete", title: "松开鼠标删除（Ctrl+Z 可撤销）" }, ic("trash", "m"));
   setShown(leftDelete, false);
   list.append(leftDelete);
 
@@ -2175,7 +2185,7 @@ export function createLayerTreeView(tree: LayerTree, status: Status, tools?: Lay
     if (content !== ghostContent || previewUrl !== ghostThumbUrl) {
       const thumb = previewUrl
         ? h("img", { class: "lt-ghost-thumb", src: previewUrl, alt: "", draggable: "false" })
-        : h("span", { class: "lt-ghost-thumb empty" }, ic(s ? "move" : "image", 14));
+        : h("span", { class: "lt-ghost-thumb empty" }, ic(s ? "move" : "image", "m"));
       replace(ghost, thumb, h("span", { class: "lt-ghost-body" },
         h("span", { class: "lt-ghost-what" }, what),
         act ? h("span", { class: "lt-ghost-act" }, act) : null));
@@ -3192,7 +3202,7 @@ export function createLayerTreeView(tree: LayerTree, status: Status, tools?: Lay
 
   // Photoshop's toolbar under the Layers panel
   const tool = (name: string, tip: string, onClick: (e: MouseEvent) => void) => {
-    const b = h("button", { class: "lt-tool", title: tip }, ic(name, 16));
+    const b = h("button", { class: "lt-tool", title: tip }, ic(name, "m"));
     b.addEventListener("click", e => onClick(e as MouseEvent));
     return b;
   };
@@ -3241,7 +3251,7 @@ export function createLayerTreeView(tree: LayerTree, status: Status, tools?: Lay
   // ── the panel menu (☰, as the menu at the top right of Photoshop's Layers panel) ──
   const SHORTCUT_KEY = "wp.layers.shortcuts";
   let shortcutsOn = localStorage.getItem(SHORTCUT_KEY) !== "off";
-  const menuBtn = h("button", { class: "lt-head-btn", title: "图层面板菜单：新建图层、选择、合并、清理、快捷键" }, "☰");
+  const menuBtn = h("button", { class: "lt-head-btn", title: "图层面板菜单：新建图层、选择、合并、清理、快捷键" }, ic("menu", "m"));
   menuBtn.addEventListener("click", () => openPanelMenu());
   function openPanelMenu() {
     if (docId === null) return;
@@ -3250,9 +3260,12 @@ export function createLayerTreeView(tree: LayerTree, status: Status, tools?: Lay
     const groups = new Set(selectedLayers().filter(l => l.kind === "group" && !isVariantLayer(l)).map(l => l.id));
     const held = layers.filter(l => ancestors(layers, l.id).some(a => groups.has(a))
       && !ancestors(layers, l.id).some(a => { const g = byId.get(a); return !!g && isVariantLayer(g); })).map(l => l.id);
+    const linkedCount = layers.filter(l => l.smart?.linked).length;
     const items: PopItem[] = [
       { label: "新建图层…", hint: "名称、颜色、模式", run: () => void run("newLayerDialog", ids()) },
       { label: "选择…", hint: "所有、反选、相似、同色、链接、隐藏、空图层", run: () => setTimeout(() => openSelectMenu(), 0) },
+      "-",
+      { label: "更新所有链接图层", hint: linkedCount ? `外部文件改过后读入新内容（${linkedCount} 个链接）` : "文档里没有链接的智能对象", enabled: linkedCount > 0, run: () => void run("updateAllModified", ids()) },
       "-",
       { label: "合并可见图层", hint: "Shift+Ctrl+E", run: () => void run("mergeVisible", ids()) },
       { label: "拼合图像", run: () => void run("flatten", ids()) },
@@ -3317,7 +3330,7 @@ export function createLayerTreeView(tree: LayerTree, status: Status, tools?: Lay
     const value = h("span", { class: "lt-pct-display", title: tip + "\n单击输入数值" }, "100%");
     const input = h("input", { class: "lt-pct-input", type: "text" }) as HTMLInputElement;
     setShown(input, false);
-    const arrow = h("button", { class: "lt-pct-arrow", title: "打开滑块" }, ic("chevron", 10));
+    const arrow = h("button", { class: "lt-pct-arrow", title: "打开滑块" }, ic("chevron", "s"));
     const control = h("div", { class: "lt-pct-control" }, value, input, arrow);
     const pop = h("div", { class: "lt-pct-pop" });
     setShown(pop, false);
@@ -3403,7 +3416,7 @@ export function createLayerTreeView(tree: LayerTree, status: Status, tools?: Lay
     ["all", "lock", "锁定全部", l => l.lockAll],
   ];
   const lockBtns = LOCKS.map(([key, ico, tip, has]) => {
-    const b = h("button", { class: "lt-lockbtn", title: tip + (key === "all" ? "（作用于选中的图层和图层组）" : "（作用于选中的图层；图层组只能锁定全部）") }, ic(ico, 14));
+    const b = h("button", { class: "lt-lockbtn", title: tip + (key === "all" ? "（作用于选中的图层和图层组）" : "（作用于选中的图层；图层组只能锁定全部）") }, ic(ico, "m"));
     b.addEventListener("click", () => {
       const sel = selectedLayers().filter(x => (x.kind !== "background" || key === "all") && (x.kind !== "group" || key === "all"));
       if (!sel.length) return;
@@ -3579,7 +3592,7 @@ export function createLayerTreeView(tree: LayerTree, status: Status, tools?: Lay
 
 
   el.append(
-    h("div", { class: "card-head lt-top-head" }, h("span", { class: "label" }, "图层"), countEl, peersBtn, h("span", { class: "grow" }), thumbButton),
+    h("div", { class: "card-head lt-top-head" }, h("span", { class: "label" }, "图层"), countEl, peersBtn, h("span", { class: "grow" }), updateLinksBtn, thumbButton),
     findRow,
     props, lockRow,
     list,

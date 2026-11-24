@@ -128,7 +128,7 @@ function idleItems(h: HintInput): HintItem[] {
     case "name": case "row":
       return [it(["左键"], "选中"), it(["Ctrl", "左键"], "加选 / 减选"), it(["Shift", "左键"], "连续选择"),
         it(["双击"], z === "name" ? "重命名" : "图层样式"), it(["右键"], "菜单"), it(["拖动"], "排序（拖出面板：其他软件）"), ...editing];
-    default: return editing;
+    default: return editing.length ? editing : [it(["提示"], "鼠标停在图层、缩略图、蒙版或按钮上，这里显示可以怎么操作")];
   }
 }
 
@@ -148,7 +148,7 @@ export function stateParts(s: {
     out.push({ text: `已筛选 ${s.filter.shown}/${s.filter.total}${s.filter.what ? " · " + s.filter.what : ""}`, kind: "filter", tip: "单击：清除筛选", action: "clearFilters" });
   else if (s.filter.active) out.push({ text: "筛选已暂停", kind: "mode", tip: "单击：清除筛选", action: "clearFilters" });
   if (s.native) out.push({ text: "原版命令", kind: "mode", tip: "删除、编组、合并等用 Photoshop 自己的菜单命令执行" });
-  if (s.shortcutsOff) out.push({ text: "面板快捷键关", kind: "mode", tip: "面板菜单 ☰ 里可以重新打开" });
+  if (s.shortcutsOff) out.push({ text: "面板快捷键关", kind: "mode", tip: "面板菜单（左下角）里可以重新打开" });
   if (s.selection) out.push({ text: s.selection, kind: "info" });
   return out;
 }

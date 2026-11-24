@@ -6,7 +6,7 @@ test("layer rows keep the native eye only, the expand controls and the smart-obj
   const css = readFileSync(new URL("../plugin/styles.css", import.meta.url), "utf8");
   const rows = readFileSync(new URL("../src/ui/layerTree.ts", import.meta.url), "utf8");
   // Layer rows use Photoshop's native visibility eye only; move/edit lock switches are removed.
-  assert.match(rows, /replace\(r\.eye, l\.visible \? ic\("eye", 14\) : null\)/);
+  assert.match(rows, /replace\(r\.eye, l\.visible \? ic\("eye", "m"\) : null\)/);
   assert.doesNotMatch(rows, /replace\(r\.move, lockIcons\.move/);
   assert.doesNotMatch(rows, /replace\(r\.edit, lockIcons\.edit/);
   // 1.2: 组 / 效果 are text toggles (▸ unfold all, ▾ fold all) plus a 全部折叠 button
