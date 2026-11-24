@@ -826,15 +826,6 @@ pub fn place_dialog(title: &str, size: Vec2) -> bool {
     true
 }
 
-/// The completion notice's window while it is up.
-pub fn toast_rect() -> Option<(i32, i32, i32, i32)> {
-    let t = find(TOAST_TITLE);
-    if t.is_null() || unsafe { IsWindowVisible(t) } == 0 {
-        return None;
-    }
-    window_rect(t).map(|r| (r.left, r.top, r.right, r.bottom))
-}
-
 /// Photoshop's main window: the top-level window under the canvas, else the one in front.
 fn photoshop_at(pt: POINT) -> HWND {
     unsafe {
@@ -1506,7 +1497,8 @@ pub fn place_toast(view: Option<ScreenRect>, size: Vec2) -> bool {
         x: area.2 as i32 - 1,
         y: area.3 as i32 - 1,
     }) / 96.0;
-    let (w, h, m) = (size.x as f64 * k, size.y as f64 * k, MARGIN * k);
+    // above the status bar (monitor.rs) along the canvas' bottom edge, when it is up
+    let (w, h, m) = (size.x as f64 * k, size.y as f64 * k, MARGIN * k + crate::monitor::bar_height() as f64);
     unsafe {
         if !owner.is_null() {
             SetWindowLongPtrW(t, GWLP_HWNDPARENT, owner as isize);

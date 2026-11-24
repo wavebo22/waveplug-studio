@@ -128,7 +128,7 @@ function idleItems(h: HintInput): HintItem[] {
     case "name": case "row":
       return [it(["左键"], "选中"), it(["Ctrl", "左键"], "加选 / 减选"), it(["Shift", "左键"], "连续选择"),
         it(["双击"], z === "name" ? "重命名" : "图层样式"), it(["右键"], "菜单"), it(["拖动"], "排序（拖出面板：其他软件）"), ...editing];
-    default: return editing.length ? editing : [it(["提示"], "鼠标停在图层、缩略图、蒙版或按钮上，这里显示可以怎么操作")];
+    default: return editing.length ? editing : [it(["提示"], "鼠标移到 WavePlug 图层面板上，这里显示可用的操作")];
   }
 }
 

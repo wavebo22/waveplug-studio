@@ -60,7 +60,7 @@ export interface Settings {
   /** Whether the plugin starts the overlay helper (外置框架) when Photoshop starts; default true.
    *  The helper always quits with Photoshop. */
   helperAutoStart: boolean;
-  /** 性能监视: the helper's box in the canvas's bottom-right corner (CPU / memory / GPU …); default true */
+  /** 性能监视: meters at the right of the helper's status bar along the canvas bottom (CPU / memory / GPU …); default true */
   perfMonitor?: boolean;
   /** 卡死保护: when Photoshop stops responding, the helper offers to back up its recovery files; default true */
   hangGuard?: boolean;

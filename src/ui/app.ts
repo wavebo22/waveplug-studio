@@ -791,7 +791,7 @@ export function mountApp(root: HTMLElement, svc: Services) {
     });
   }
 
-  /** 性能监视: the helper's box in the canvas's bottom-right corner, as the setting says. */
+  /** 性能监视: the meters at the right of the helper's status bar (canvas bottom), as the setting says. */
   function syncMonitor() {
     overlay?.setMonitor(settings.perfMonitor !== false, settings.comfyUrl);
   }

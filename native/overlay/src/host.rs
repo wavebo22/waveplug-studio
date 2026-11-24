@@ -162,6 +162,13 @@ fn on_command(c: Command) {
             }
             return;
         }
+        Command::StatusBar { on, hints, state, message, view } => {
+            crate::monitor::set_bar(on.then(|| crate::monitor::Bar { hints: hints.clone(), state: state.clone(), message: message.clone() }));
+            if view.is_some() {
+                crate::monitor::set_view(*view);
+            }
+            return;
+        }
         Command::Show { view: Some(view), .. } => crate::monitor::set_view(Some(*view)),
         // the generate panel leaves only when no document is open: no canvas to sit in
         Command::Hide { panel } if panel == "generate" => crate::monitor::set_view(None),
@@ -194,6 +201,7 @@ fn on_disconnect() {
     crate::frame::set(None, None);
     crate::menu::close(None);
     crate::monitor::set(false, None);
+    crate::monitor::set_bar(None);
     crate::monitor::set_view(None);
     #[cfg(windows)]
     {
@@ -482,6 +490,7 @@ impl Host {
                 Command::HangGuard { .. } => {}  // hang.rs, on its own thread
                 Command::WebCatch { .. } => {}   // webdrop.rs, on its own thread
                 Command::WatchKeys { .. } => {}  // keys.rs, on its own thread
+                Command::StatusBar { .. } => {}  // monitor.rs, on its own thread
                 Command::AppSettings { .. } | Command::OpenApp { .. } => {} // app.rs
                 Command::ExternalDragPrepare { .. }
                 | Command::ExternalDragReady { .. }

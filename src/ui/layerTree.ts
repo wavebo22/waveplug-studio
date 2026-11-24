@@ -2947,7 +2947,7 @@ export function createLayerTreeView(tree: LayerTree, status: Status, tools?: Lay
   el.append(ghost);
   el.addEventListener("mouseenter", () => { pointerIn = true; refocus("hover"); });
   // no drag state here: UXP fires leave/enter spuriously mid-drag; locateDrag owns the region
-  el.addEventListener("mouseleave", () => { pointerIn = false; });
+  el.addEventListener("mouseleave", () => { pointerIn = false; if (!drag?.active) { hintZone = "none"; hintLayer = null; updateHints(); } });
   const popup = createPopup(el);
   /** y (px from the panel section's top) just below row `idx` */
   const rowBottom = (idx: number) => list.offsetTop + yOf(idx + 1);
@@ -3620,5 +3620,5 @@ export function createLayerTreeView(tree: LayerTree, status: Status, tools?: Lay
     workbench.el,
     h("div", { class: "lt-foot" }, h("div", { class: "lt-foot-btns" }, menuBtn, frameBtn, nativeBtn, ...(WORKBENCH_ENABLED ? [workbench.toggleButton] : [])), bar));
   render();
-  return { el, refresh, fileDropSpot, clearFileDropSpot };
+  return { el, refresh, fileDropSpot, clearFileDropSpot, docId: () => docId };
 }

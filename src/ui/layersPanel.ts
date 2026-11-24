@@ -13,7 +13,7 @@ import { NO_KEYS, hintItems } from "../core/layers/hints.ts";
 export function mountLayersPanel(root: HTMLElement, svc: Services, isShown: () => boolean) {
   // 提示栏 (Blender-style status bar): hints for the pointer, the panel's state, the last results.
   // A busy message (a long artboard delete …) stays until its result; errors stay until the next one.
-  const hintBar = createHintBar();
+  const hintBar = createHintBar(svc.overlay);
   const status = (text: string, kind: "info" | "ok" | "error" | "busy" = "info") => hintBar.message(text, kind);
   const view = createLayerTreeView(svc.layers, status, svc.tools, svc.overlay, svc.host.canvasView ? id => svc.host.canvasView!(id) : undefined,
     (docId, layerId, sessionId, order) => svc.host.exportLayerPng(docId, layerId, sessionId, order),
@@ -33,6 +33,17 @@ export function mountLayersPanel(root: HTMLElement, svc: Services, isShown: () =
   mountFileDrop(panel, dropEl, svc, status, () => void view.refresh(), hintBar, view);
   // hover help is the host's own tooltip from `title` (1.2: the panel's drawn .tip box showed a second copy)
   svc.layers.onChange(() => { if (isShown()) void view.refresh(); });
+  // the helper draws the hints along the bottom of the canvas: tell it where the canvas is (one
+  // property read every 2 s while the panel is shown), and take them off when the panel is hidden
+  let viewReading = false;
+  setInterval(() => {
+    const shown = isShown();
+    hintBar.active(shown);
+    const doc = view.docId();
+    if (!shown || viewReading || doc === null || !svc.overlay?.statusBarReady || !svc.host.canvasView) return;
+    viewReading = true;
+    svc.host.canvasView(doc).then(v => hintBar.view(v?.view ?? null), () => undefined).finally(() => { viewReading = false; });
+  }, 2000);
   return { show: () => void view.refresh() };
 }
 

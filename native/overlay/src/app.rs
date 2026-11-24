@@ -1133,7 +1133,7 @@ impl AppWindow {
             let (_, ai_on) = crate::server::connected();
             ui.label(small(format!("运行中 · {}（就是本程序）· Illustrator {}", env!("CARGO_PKG_VERSION"), if ai_on { "已连接" } else { "未连接" }), theme::OK));
             toggle(ui, &mut changes, "helperAutoStart", flag("helperAutoStart"), "随 Photoshop 启动外置框架", "Photoshop 打开 WavePlug 面板时自动启动本程序");
-            toggle(ui, &mut changes, "perfMonitor", flag("perfMonitor"), "在画布右下角显示性能监视", "CPU、内存、显卡、Photoshop 内存、暂存盘、ComfyUI 显存；只在 Photoshop 在前台时显示");
+            toggle(ui, &mut changes, "perfMonitor", flag("perfMonitor"), "在画布底部状态栏的右侧显示性能监视", "CPU、内存、显卡、显存，各带一条走势小图；Photoshop 内存或暂存盘快满时才显示提醒；只在 Photoshop 在前台时显示");
         });
         card(ui, "卡死保护", |ui| {
             toggle(ui, &mut changes, "hangGuard", flag("hangGuard"), "Photoshop 卡死时提示并备份恢复文件", "没有响应时弹出提示：等待、备份自动恢复文件或关闭 Photoshop");

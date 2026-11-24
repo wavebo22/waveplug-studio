@@ -8,7 +8,7 @@
 
 import { onDispose } from "../ui/dom.ts";
 import { log, setLogContext } from "./log.ts";
-import { EXPECTED_HELPER_VERSION, OVERLAY_URL, type ComfyManagerStatus, type ExternalDragEvent, type ExternalDragFile, HANG_SECONDS, type HangDoc, type MenuNode, type OverlayCommand, MENU_HELPER_VERSION, OPEN_APP_HELPER_VERSION, type ScreenRect, TRASH_HELPER_VERSION, WEBDROP_HELPER_VERSION, KEYS_HELPER_VERSION, type WebDropEvent, helperOutdated, parseOverlayEvent } from "../core/overlay/protocol.ts";
+import { EXPECTED_HELPER_VERSION, OVERLAY_URL, type ComfyManagerStatus, type ExternalDragEvent, type ExternalDragFile, HANG_SECONDS, type HangDoc, type MenuNode, type OverlayCommand, MENU_HELPER_VERSION, OPEN_APP_HELPER_VERSION, type ScreenRect, TRASH_HELPER_VERSION, WEBDROP_HELPER_VERSION, KEYS_HELPER_VERSION, STATUSBAR_HELPER_VERSION, type StatusBarHint, type StatusBarPart, type WebDropEvent, helperOutdated, parseOverlayEvent } from "../core/overlay/protocol.ts";
 import { type Hub, createHub } from "../core/overlay/hub.ts";
 
 const RETRY_MS = 3000;
@@ -43,7 +43,7 @@ export interface Overlay {
   /** Ask the native helper to reconcile the configured local ComfyUI process (`restart`: stop the
    *  one it started and start it again). */
   manageComfy(options: { path: string; base: string; closeWithPhotoshop: boolean; restartIfNeeded?: boolean; disableBrowser?: boolean; startIfMissing?: boolean; restart?: boolean }): void;
-  /** 性能监视: the helper's box in the canvas's bottom-right corner, on or off; `comfy` is ComfyUI's
+  /** 性能监视: the meters on the helper's status bar (canvas bottom, right), on or off; `comfy` is ComfyUI's
    *  address for its row. Remembered and sent again whenever a helper connects. */
   setMonitor(on: boolean, comfy: string): void;
   /** 牵手 Illustrator: a message for the Illustrator panel (dropped while it isn't connected). */
@@ -90,6 +90,11 @@ export interface Overlay {
   onKeys(cb: (keys: { ctrl: boolean; shift: boolean; alt: boolean }) => void): () => void;
   /** the helper's drag card is over another program and no files were prepared for it */
   onExternalWanted(cb: () => void): () => void;
+  /** 状态栏: what the bar along the canvas' bottom edge shows (null: no panel speaks for it). False
+   *  when the helper isn't connected or is older than STATUSBAR_HELPER_VERSION (show it in the panel). */
+  statusBar(bar: { hints: StatusBarHint[]; state: StatusBarPart[]; message: StatusBarPart | null; view?: ScreenRect } | null): boolean;
+  /** the helper draws the status bar (connected and new enough) */
+  readonly statusBarReady: boolean;
   /** external-drag-cached / -files-copied / -finished from the helper */
   onExternalDrag(cb: (event: ExternalDragEvent) => void): () => void;
   readonly connected: boolean;
@@ -114,6 +119,9 @@ export function connectOverlay(opts: { launch?: () => Promise<string | null>; au
   const peerListeners = new Set<(connected: boolean) => void>();
   let illustrator = false;
   let monitor: { on: boolean; comfy: string } | null = null;
+  /** the status bar's last content, sent again when a helper connects */
+  let bar: OverlayCommand | null = null, barSent = "";
+  const barReady = () => connected && helperVersion !== null && !helperOutdated(helperVersion, STATUSBAR_HELPER_VERSION);
   let hangGuard: OverlayCommand | null = null, hangKey = "";
   let menuSeq = 0;
   const menus = new Map<string, (item: string | null) => void>();
@@ -165,6 +173,7 @@ export function connectOverlay(opts: { launch?: () => Promise<string | null>; au
       log("info", "overlay connected");
       hub.connected();
       if (monitor) send({ type: "monitor", ...monitor });
+      barSent = "";
       if (hangGuard) send(hangGuard);
       if (appSettings) { appSettingsSent = JSON.stringify(appSettings); send({ type: "app-settings", settings: appSettings }); }
       connectionListeners.forEach(cb => { try { cb(); } catch (err) { log("warn", "overlay connect listener", err); } });
@@ -173,6 +182,8 @@ export function connectOverlay(opts: { launch?: () => Promise<string | null>; au
       const m = parseOverlayEvent(String(e.data));
       if (m?.type === "ready") {
         helperVersion = m.version;
+        // the status bar needs to know the helper is new enough: sent once its version is known
+        if (bar && barReady()) { barSent = JSON.stringify(bar); send(bar); }
         setLogContext({ 外置框架: m.version });
         log("info", "overlay ready", m.version);
         if (helperOutdated(m.version)) log("warn", "overlay helper outdated: rebuild native/overlay (build.cmd)", JSON.stringify({ running: m.version, expected: EXPECTED_HELPER_VERSION }));
@@ -312,6 +323,14 @@ export function connectOverlay(opts: { launch?: () => Promise<string | null>; au
       webDropListeners.add(cb);
       return () => webDropListeners.delete(cb);
     },
+    statusBar(b) {
+      bar = b ? { type: "status-bar", on: true, ...b } : { type: "status-bar", on: false, hints: [], state: [], message: null };
+      if (!barReady()) return false;
+      const text = JSON.stringify(bar);
+      if (text !== barSent) { barSent = text; send(bar); }
+      return true;
+    },
+    get statusBarReady() { return barReady(); },
     watchKeys(on) {
       if (!on) { if (connected) send({ type: "watch-keys", on: false }); return true; }
       if (!connected || helperVersion === null || helperOutdated(helperVersion, KEYS_HELPER_VERSION)) return false;

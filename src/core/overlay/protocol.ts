@@ -78,6 +78,9 @@ export type OverlayCommand =
    *  `on: false` takes it away. Answered by web-drop / web-drop-leave. */
   | { type: "web-catch"; on: true; clientX: number; clientY: number; left: number; top: number; width: number; height: number; folder: string }
   | { type: "web-catch"; on: false }
+  /** 状态栏 (helper ≥ STATUSBAR_HELPER_VERSION): the WaveLayer panel's hints, state and last result
+   *  on the bar along the canvas' bottom edge (the 性能监视 meters sit at its right) */
+  | { type: "status-bar"; on: boolean; hints: StatusBarHint[]; state: StatusBarPart[]; message: StatusBarPart | null; view?: ScreenRect }
   /** 按键 (helper ≥ KEYS_HELPER_VERSION): report Ctrl / Shift / Alt while on (renew within 3 s) */
   | { type: "watch-keys"; on: boolean }
   /** The settings for what the helper does (APP_SETTING_KEYS), for the WavePlug app window's
@@ -229,6 +232,10 @@ export function appSettingsOf(settings: Record<string, unknown>): Record<string,
 export const WEBDROP_HELPER_VERSION = "0.16.0";
 /** watch-keys / keys and external-drag-wanted need at least this helper */
 export const KEYS_HELPER_VERSION = "0.18.0";
+/** status-bar (the hints drawn along the canvas' bottom edge) needs at least this helper */
+export const STATUSBAR_HELPER_VERSION = "0.19.0";
+export interface StatusBarHint { keys: string[]; label: string; on: boolean }
+export interface StatusBarPart { text: string; kind: string }
 
 /** `version` is older than EXPECTED_HELPER_VERSION (numeric x.y.z; unparsable counts as older). */
 export function helperOutdated(version: string | null, expected = EXPECTED_HELPER_VERSION): boolean {

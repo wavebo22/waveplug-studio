@@ -1,26 +1,37 @@
-// 性能监视: a small read-only box in the bottom-right corner of Photoshop's canvas with what the
-// machine is doing — CPU, memory, GPU, video memory, Photoshop's own memory, its scratch files
-// (暂存盘) and the video memory ComfyUI holds. The plugin only turns it on or off (`monitor`); the
-// numbers are measured here, since UXP can read none of them.
+// 状态栏: one line along the bottom of Photoshop's canvas, the way Blender's status bar sits under
+// its viewport. Left: the WaveLayer panel's hints — the keys and mouse buttons that work where the
+// pointer is, in small key boxes (the held ones lit). Middle: the panel's state and its last
+// result. Right: 性能监视, simplified to four meters with a little history graph each (CPU, 内存,
+// GPU, 显存); Photoshop's own memory, its scratch disk and ComfyUI's video memory only appear,
+// as a warning, when they run high. The plugin sends the hints (`status-bar`) and turns the meters
+// on or off (`monitor`); the numbers are measured here, since UXP can read none of them.
 //
 // Like the hover frame (frame.rs): its own plain Win32 window on its own thread — no egui, no
-// GPU, drawn with GDI once a second. Layered + transparent + no-activate + tool window, so it
-// never takes the mouse, the wheel, the keyboard or the foreground: everything goes to Photoshop
-// under it. It is shown only while Photoshop (or one of the helper's own windows) is in front and
-// not minimised; nothing is measured while it is away.
+// GPU, drawn with GDI. Layered + transparent + no-activate + tool window, so it never takes the
+// mouse, the wheel, the keyboard or the foreground: everything goes to Photoshop under it. It is
+// shown only while Photoshop (or one of the helper's own windows) is in front and not minimised;
+// nothing is measured while it is away.
 //
 // Where the numbers come from (all read-only, nothing is installed or changed):
 //   CPU      GetSystemTimes, the share of non-idle time since the last sample
 //   内存     GlobalMemoryStatusEx
-//   GPU/显存 nvml.dll from System32 (NVIDIA's own library, shipped with the driver); the rows are
-//            left out when it isn't there (AMD / Intel)
+//   GPU/显存 nvml.dll from System32 (NVIDIA's own library, shipped with the driver); the meters
+//            are left out when it isn't there (AMD / Intel)
 //   PS       the working set of Photoshop's process
 //   暂存     the "Photoshop Temp*" files at the root of each fixed drive, and that drive's free space
 //   Comfy    ComfyUI's /system_stats (torch_vram_total: what its PyTorch holds), local ComfyUI only
 
 use serde_json::Value;
 
-use crate::protocol::ScreenRect;
+use crate::protocol::{BarHint, BarPart, ScreenRect};
+
+/// What the plugin shows on the bar (None: no WaveLayer panel; the bar is there for the meters only).
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct Bar {
+    pub hints: Vec<BarHint>,
+    pub state: Vec<BarPart>,
+    pub message: Option<BarPart>,
+}
 
 /// Photoshop's scratch files on one drive.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -32,7 +43,7 @@ pub struct Scratch {
     pub free: u64,
 }
 
-/// One sample; None = not available (the row is left out).
+/// One sample; None = not available (left out).
 #[derive(Debug, Clone, Copy, PartialEq, Default)]
 pub struct Stats {
     /// 0..1
@@ -57,9 +68,11 @@ pub enum Level {
     High,
 }
 
+/// A meter on the right of the bar: a label, how full (0..1, also its graph), the value shown.
 #[derive(Debug, Clone, PartialEq)]
-pub struct Row {
+pub struct Meter {
     pub label: &'static str,
+    pub frac: f32,
     pub value: String,
     pub level: Level,
 }
@@ -94,46 +107,68 @@ fn share(used: u64, total: u64) -> f32 {
     }
 }
 
-/// The lines shown, top to bottom.
-pub fn rows(s: &Stats) -> Vec<Row> {
+/// The four meters, in this order, for what was measured.
+pub fn meters(s: &Stats) -> Vec<Meter> {
+    let pct = |f: f32| format!("{:.0}%", f.clamp(0.0, 1.0) * 100.0);
     let mut out = Vec::new();
-    let mut push = |label: &'static str, value: String, level: Level| out.push(Row { label, value, level });
     if let Some(c) = s.cpu {
-        push("CPU", format!("{:.0}%", c.clamp(0.0, 1.0) * 100.0), load(c));
+        out.push(Meter { label: "CPU", frac: c.clamp(0.0, 1.0), value: pct(c), level: load(c) });
     }
     if let Some((used, total)) = s.ram {
-        push("内存", format!("{} / {} GB", gb(used), gb(total)), load(share(used, total)));
+        let f = share(used, total);
+        out.push(Meter { label: "内存", frac: f, value: pct(f), level: load(f) });
     }
     if let Some(g) = s.gpu {
-        push("GPU", format!("{:.0}%", g.clamp(0.0, 1.0) * 100.0), load(g));
+        out.push(Meter { label: "GPU", frac: g.clamp(0.0, 1.0), value: pct(g), level: load(g) });
     }
     if let Some((used, total)) = s.vram {
-        push("显存", format!("{} / {} GB", gb(used), gb(total)), load(share(used, total)));
+        let f = share(used, total);
+        out.push(Meter { label: "显存", frac: f, value: pct(f), level: load(f) });
     }
-    if let Some(ps) = s.photoshop {
-        // Photoshop alone holding most of the machine's memory is what comes before it stalls
-        let level = match s.ram {
-            Some((_, total)) if share(ps, total) >= 0.75 => Level::High,
-            Some((_, total)) if share(ps, total) >= 0.60 => Level::Warn,
-            _ => Level::Normal,
-        };
-        push("PS", format!("{} GB", gb(ps)), level);
+    out
+}
+
+/// The graph value of meter `label` in sample `s` (for the history drawn behind each meter).
+pub fn meter_frac(s: &Stats, label: &str) -> Option<f32> {
+    match label {
+        "CPU" => s.cpu,
+        "内存" => s.ram.map(|(u, t)| share(u, t)),
+        "GPU" => s.gpu,
+        "显存" => s.vram.map(|(u, t)| share(u, t)),
+        _ => None,
+    }
+    .map(|f| f.clamp(0.0, 1.0))
+}
+
+/// What only shows when it runs high: Photoshop holding most of the memory, the scratch drive
+/// running out of room. (text, level), never Normal.
+pub fn warnings(s: &Stats) -> Vec<(String, Level)> {
+    let mut out = Vec::new();
+    if let (Some(ps), Some((_, total))) = (s.photoshop, s.ram) {
+        let f = share(ps, total);
+        if f >= 0.60 {
+            out.push((format!("PS 占用 {} GB", gb(ps)), if f >= 0.75 { Level::High } else { Level::Warn }));
+        }
     }
     if let Some(sc) = s.scratch {
         let free = sc.free as f64 / GB;
-        let level = if free < 20.0 {
-            Level::High
-        } else if free < 50.0 {
-            Level::Warn
-        } else {
-            Level::Normal
-        };
-        push("暂存", format!("{} GB · {}: 余 {} GB", gb(sc.used), sc.drive, gb(sc.free)), level);
-    }
-    if let Some(c) = s.comfy {
-        push("Comfy", format!("{} GB", gb(c)), Level::Normal);
+        if free < 50.0 {
+            out.push((format!("暂存盘 {}: 余 {} GB", sc.drive, gb(sc.free)), if free < 20.0 { Level::High } else { Level::Warn }));
+        }
     }
     out
+}
+
+/// The full lines of the old box, still logged (and in the diagnostics) when asked.
+pub fn summary(s: &Stats) -> String {
+    let mut parts: Vec<String> = meters(s).iter().map(|m| format!("{} {}", m.label, m.value)).collect();
+    if let Some(ps) = s.photoshop {
+        parts.push(format!("PS {} GB", gb(ps)));
+    }
+    if let Some(c) = s.comfy {
+        parts.push(format!("Comfy {} GB", gb(c)));
+    }
+    parts.join(" · ")
 }
 
 /// CPU in use between two GetSystemTimes samples `(idle, kernel + user)`; kernel time includes idle.
@@ -155,10 +190,6 @@ fn comfy_vram(stats: &Value) -> Option<u64> {
 
 type Px = (i32, i32, i32, i32);
 
-fn intersects(a: Px, b: Px) -> bool {
-    a.0 < b.2 && b.0 < a.2 && a.1 < b.3 && b.1 < a.3
-}
-
 /// The canvas view when it lies inside Photoshop's window, else the window itself (no document
 /// open, or a view left over from before the window moved).
 #[cfg_attr(not(windows), allow(dead_code))]
@@ -173,45 +204,49 @@ fn area(view: Option<ScreenRect>, ps: Px) -> Px {
     }
 }
 
-/// Top-left of a `size` box in the bottom-right corner of `area`, `margin` in from the edges; moved
-/// above `avoid` (the completion notice, which uses the same corner) when the two would overlap.
+/// The bar: the whole width of `area`, `height` tall, on its bottom edge (left, top, width, height).
 #[cfg_attr(not(windows), allow(dead_code))]
-fn place(area: Px, size: (i32, i32), margin: i32, avoid: Option<Px>) -> (i32, i32) {
-    let x = (area.2 - size.0 - margin).max(area.0);
-    let mut y = area.3 - size.1 - margin;
-    if let Some(a) = avoid {
-        if intersects((x, y, x + size.0, y + size.1), a) {
-            y = a.1 - size.1 - margin / 2;
-        }
-    }
-    (x, y.max(area.1))
+fn bar_rect(area: Px, height: i32) -> Px {
+    let h = height.min((area.3 - area.1).max(0));
+    (area.0, area.3 - h, (area.2 - area.0).max(0), h)
 }
 
 #[cfg(windows)]
-pub use imp::{set, set_view};
+pub use imp::{bar_height, set, set_bar, set_view};
 
-/// Turns the box on or off; `comfy` is ComfyUI's address for its row (None: no such row).
+/// Turns the meters on or off; `comfy` is ComfyUI's address (None: not measured).
 #[cfg(not(windows))]
 pub fn set(_on: bool, _comfy: Option<String>) {}
 
-/// The canvas on screen (None: no document, the box goes to the corner of Photoshop's window).
+/// What the plugin shows on the bar (None: nothing; the bar stays for the meters when they are on).
+#[cfg(not(windows))]
+pub fn set_bar(_bar: Option<Bar>) {}
+
+/// The canvas on screen (None: no document, the bar goes along the bottom of Photoshop's window).
 #[cfg(not(windows))]
 pub fn set_view(_view: Option<ScreenRect>) {}
 
+/// The bar's height in screen px while it is up (0 when not): the completion notice sits above it.
+#[cfg(not(windows))]
+pub fn bar_height() -> i32 {
+    0
+}
+
 #[cfg(windows)]
 mod imp {
+    use std::collections::VecDeque;
     use std::ffi::c_void;
     use std::ptr::{null, null_mut};
-    use std::sync::atomic::{AtomicBool, AtomicIsize, AtomicU32, Ordering};
+    use std::sync::atomic::{AtomicBool, AtomicI32, AtomicIsize, AtomicU32, Ordering};
     use std::sync::{Mutex, Once};
     use std::thread;
     use std::time::Duration;
 
-    use windows_sys::Win32::Foundation::{CloseHandle, FILETIME, HANDLE, HWND, LPARAM, LRESULT, POINT, RECT, WPARAM};
+    use windows_sys::Win32::Foundation::{CloseHandle, FILETIME, HANDLE, HWND, LPARAM, LRESULT, POINT, RECT, SIZE, WPARAM};
     use windows_sys::Win32::Graphics::Gdi::{
-        BeginPaint, BitBlt, CreateCompatibleBitmap, CreateCompatibleDC, CreateFontW, CreateRoundRectRgn,
-        CreateSolidBrush, DeleteDC, DeleteObject, DrawTextW, EndPaint, FillRect, InvalidateRect, MonitorFromPoint,
-        SelectObject, SetBkMode, SetTextColor, SetWindowRgn, PAINTSTRUCT,
+        BeginPaint, BitBlt, CreateCompatibleBitmap, CreateCompatibleDC, CreateFontW, CreatePen, CreateSolidBrush,
+        DeleteDC, DeleteObject, DrawTextW, EndPaint, FillRect, GetTextExtentPoint32W, InvalidateRect, MonitorFromPoint,
+        RoundRect, SelectObject, SetBkMode, SetTextColor, PAINTSTRUCT, HDC,
     };
     use windows_sys::Win32::Storage::FileSystem::{GetDiskFreeSpaceExW, GetDriveTypeW, GetLogicalDrives};
     use windows_sys::Win32::System::LibraryLoader::{GetModuleHandleW, GetProcAddress, LoadLibraryExW};
@@ -224,7 +259,7 @@ mod imp {
         RegisterClassW, SetLayeredWindowAttributes, SetTimer, SetWindowPos, ShowWindow, MSG, WNDCLASSW,
     };
 
-    use super::{area, comfy_vram, cpu_usage, place, rows, Level, Px, Scratch, Stats};
+    use super::{area, bar_rect, comfy_vram, cpu_usage, meter_frac, meters, summary, warnings, Bar, Level, Px, Scratch, Stats};
     use crate::log;
     use crate::protocol::ScreenRect;
     use crate::win::PsFront;
@@ -241,7 +276,7 @@ mod imp {
     const WM_MOUSEACTIVATE: u32 = 0x0021;
     const WM_NCHITTEST: u32 = 0x0084;
     const WM_TIMER: u32 = 0x0113;
-    /// on / off or the view changed: place again now
+    /// on / off, the view or the hints changed: place and draw again now
     const WM_APP_PLACE: u32 = 0x8000 + 0x61;
     /// a new sample is in STATS
     const WM_APP_STATS: u32 = 0x8000 + 0x62;
@@ -258,44 +293,66 @@ mod imp {
     const PROCESS_VM_READ: u32 = 0x0010;
     const PROCESS_QUERY_LIMITED_INFORMATION: u32 = 0x1000;
     const TRANSPARENT_BK: i32 = 1;
+    const DT_LEFT: u32 = 0x0000;
+    const DT_CENTER: u32 = 0x0001;
     const DT_RIGHT: u32 = 0x0002;
     const DT_VCENTER: u32 = 0x0004;
     const DT_SINGLELINE: u32 = 0x0020;
     const DT_NOPREFIX: u32 = 0x0800;
+    const DT_END_ELLIPSIS: u32 = 0x8000;
     const SRCCOPY: u32 = 0x00CC_0020;
     const DEFAULT_CHARSET: u32 = 1;
     const CLEARTYPE_QUALITY: u32 = 5;
+    const PS_SOLID: i32 = 0;
 
     // logical px (× the display scale); colours are COLORREF 0x00BBGGRR, the plugin's tokens
-    const WIDTH: f64 = 208.0;
-    const ROW: f64 = 18.0;
-    const PAD_X: f64 = 10.0;
-    const PAD_Y: f64 = 7.0;
-    const MARGIN: f64 = 12.0;
-    const RADIUS: f64 = 6.0;
+    const HEIGHT: f64 = 24.0;
+    const PAD_X: f64 = 8.0;
+    const GAP: f64 = 12.0;
+    const KEY_H: f64 = 16.0;
+    const KEY_PAD: f64 = 4.0;
+    const GRAPH_W: f64 = 40.0;
+    const GRAPH_H: f64 = 12.0;
     const FONT_PX: f64 = 12.0; // --fs
-    const ALPHA: u8 = 232;
-    const C_BG: u32 = 0x002A_2A2A; // --c-surface
-    const C_LABEL: u32 = 0x0099_948F; // --c-text-3
+    const ALPHA: u8 = 240;
+    const C_BG: u32 = 0x0026_2626;
+    const C_TOP: u32 = 0x003C_3C3C; // the line along its top edge
+    const C_KEY_BG: u32 = 0x0038_3838;
+    const C_KEY_LINE: u32 = 0x0058_5858;
+    const C_GRAPH_BG: u32 = 0x001C_1C1C;
+    const C_LABEL: u32 = 0x0098_928D; // --c-text-3
+    const C_TEXT2: u32 = 0x00C2_BDB8; // --c-text-2
     const C_TEXT: u32 = 0x00EC_ECEC; // --c-text
+    const C_HI: u32 = 0x00FF_FFFF; // --c-text-hi
+    const C_ACCENT: u32 = 0x009F_B53F; // --c-accent
+    const C_ACCENT_HI: u32 = 0x00B6_CB5F; // --c-accent-hi
+    const C_OK: u32 = 0x008F_C55F; // --c-ok
+    const C_INFO: u32 = 0x00FF_B682; // --c-info
     const C_WARN: u32 = 0x004B_B0E3; // --c-warn
     const C_HIGH: u32 = 0x0069_7AEC; // --c-err
 
     /// the window looks at Photoshop this often (ms); a sample is taken every SAMPLE_MS
     const TICK_MS: u32 = 250;
     const SAMPLE_MS: u64 = 1000;
-    /// Photoshop must be away for this many ticks in a row before the box goes (see win.rs PARK_AFTER_TICKS)
+    /// samples kept for the meters' graphs (one 2-px column each)
+    const HISTORY: usize = 20;
+    /// Photoshop must be away for this many ticks in a row before the bar goes (see win.rs PARK_AFTER_TICKS)
     const AWAY_TICKS: u32 = 2;
 
+    /// the meters are on (性能监视)
     static ON: AtomicBool = AtomicBool::new(false);
     static VISIBLE: AtomicBool = AtomicBool::new(false);
     static AWAY: AtomicU32 = AtomicU32::new(0);
-    /// display scale × 100 the box was last laid out at (for painting)
+    /// display scale × 100 the bar was last laid out at (for painting)
     static SCALE: AtomicU32 = AtomicU32::new(100);
+    /// its height on screen while up, 0 when not (the completion notice goes above it)
+    static HEIGHT_PX: AtomicI32 = AtomicI32::new(0);
     static HWND_SELF: AtomicIsize = AtomicIsize::new(0);
     static COMFY: Mutex<Option<String>> = Mutex::new(None);
     static VIEW: Mutex<Option<ScreenRect>> = Mutex::new(None);
+    static BAR: Mutex<Option<Bar>> = Mutex::new(None);
     static STATS: Mutex<Option<Stats>> = Mutex::new(None);
+    static PAST: Mutex<VecDeque<Stats>> = Mutex::new(VecDeque::new());
     /// where the window is now (left, top, width, height)
     static PLACED: Mutex<Px> = Mutex::new((0, 0, 0, 0));
     static START: Once = Once::new();
@@ -307,30 +364,60 @@ mod imp {
         }
     }
 
-    /// Turns the box on or off; `comfy` is ComfyUI's address for its row (None: no such row).
+    fn start() {
+        START.call_once(|| {
+            thread::spawn(run);
+            thread::spawn(sample_loop);
+        });
+    }
+
+    /// Turns the meters on or off; `comfy` is ComfyUI's address (None: not measured).
     pub fn set(on: bool, comfy: Option<String>) {
         if let Ok(mut c) = COMFY.lock() {
             *c = comfy.filter(|b| !b.trim().is_empty());
         }
         let was = ON.swap(on, Ordering::SeqCst);
         if was != on {
-            log::line(format!("monitor: {}", if on { "on" } else { "off" }));
+            log::line(format!("status bar meters: {}", if on { "on" } else { "off" }));
+            if !on {
+                if let Ok(mut s) = STATS.lock() {
+                    *s = None;
+                }
+            }
         }
         if !on && HWND_SELF.load(Ordering::SeqCst) == 0 {
             return; // never shown: no window to make
         }
-        START.call_once(|| {
-            thread::spawn(run);
-            thread::spawn(sample_loop);
-        });
+        start();
         post(WM_APP_PLACE);
     }
 
-    /// The canvas on screen (None: no document, the box goes to the corner of Photoshop's window).
+    /// What the plugin shows on the bar (None: no WaveLayer panel; the bar stays for the meters).
+    pub fn set_bar(bar: Option<Bar>) {
+        let changed = BAR.lock().map(|mut b| std::mem::replace(&mut *b, bar.clone()) != bar).unwrap_or(false);
+        if !changed {
+            return;
+        }
+        if bar.is_none() && HWND_SELF.load(Ordering::SeqCst) == 0 {
+            return;
+        }
+        start();
+        post(WM_APP_PLACE);
+    }
+
+    /// The canvas on screen (None: no document, the bar goes along the bottom of Photoshop's window).
     pub fn set_view(view: Option<ScreenRect>) {
         let changed = VIEW.lock().map(|mut v| std::mem::replace(&mut *v, view) != view).unwrap_or(false);
         if changed {
             post(WM_APP_PLACE);
+        }
+    }
+
+    pub fn bar_height() -> i32 {
+        if VISIBLE.load(Ordering::SeqCst) {
+            HEIGHT_PX.load(Ordering::SeqCst)
+        } else {
+            0
         }
     }
 
@@ -347,13 +434,19 @@ mod imp {
     unsafe fn hide(h: HWND) {
         if VISIBLE.swap(false, Ordering::SeqCst) {
             ShowWindow(h, SW_HIDE);
-            log::line("monitor: hidden");
+            HEIGHT_PX.store(0, Ordering::SeqCst);
+            log::line("status bar: hidden");
         }
     }
 
-    /// Shows, moves or hides the box for where Photoshop is now.
+    /// Something to draw: the plugin's hints / state / result, or the meters.
+    fn wanted() -> bool {
+        ON.load(Ordering::SeqCst) || BAR.lock().map(|b| b.is_some()).unwrap_or(false)
+    }
+
+    /// Shows, moves or hides the bar for where Photoshop is now.
     unsafe fn tick(h: HWND) {
-        if !ON.load(Ordering::SeqCst) {
+        if !wanted() {
             hide(h);
             return;
         }
@@ -371,40 +464,68 @@ mod imp {
             hide(h); // minimised or gone
             return;
         };
-        let stats = STATS.lock().ok().and_then(|s| *s);
-        let n = stats.map(|s| rows(&s).len()).unwrap_or(0);
-        if n == 0 {
-            // nothing measured yet; shown so the sampler starts (it waits for VISIBLE)
-            VISIBLE.store(true, Ordering::SeqCst);
-            return;
-        }
         let view = VIEW.lock().ok().and_then(|v| *v);
         let a = area(view, ps);
-        let k = scale_at(a.2 - 1, a.3 - 1);
-        let size = ((WIDTH * k) as i32, ((PAD_Y * 2.0 + ROW * n as f64) * k) as i32);
-        let (x, y) = place(a, size, (MARGIN * k) as i32, crate::win::toast_rect());
-        let want = (x, y, size.0, size.1);
+        let k = scale_at(a.0 + 1, a.3 - 1);
+        let want = bar_rect(a, (HEIGHT * k).round() as i32);
+        if want.2 <= 0 || want.3 <= 0 {
+            hide(h);
+            return;
+        }
         let Ok(mut placed) = PLACED.lock() else { return };
         let shown = VISIBLE.load(Ordering::SeqCst) && *placed != (0, 0, 0, 0);
         if shown && *placed == want {
             return;
         }
-        if (placed.2, placed.3) != size {
-            let r = (RADIUS * k * 2.0) as i32;
-            let rgn = CreateRoundRectRgn(0, 0, size.0 + 1, size.1 + 1, r, r);
-            // the window owns the region from here on
-            if SetWindowRgn(h, rgn, 1) == 0 {
-                DeleteObject(rgn);
-            }
-        }
         SCALE.store((k * 100.0) as u32, Ordering::SeqCst);
-        SetWindowPos(h, HWND_TOPMOST, x, y, size.0, size.1, SWP_NOACTIVATE | SWP_SHOWWINDOW | SWP_NOOWNERZORDER);
+        SetWindowPos(h, HWND_TOPMOST, want.0, want.1, want.2, want.3, SWP_NOACTIVATE | SWP_SHOWWINDOW | SWP_NOOWNERZORDER);
         if !shown {
-            log::line(format!("monitor: shown at {x},{y} {}x{} rows={n}", size.0, size.1));
+            log::line(format!("status bar: shown at {},{} {}x{}", want.0, want.1, want.2, want.3));
         }
         *placed = want;
+        HEIGHT_PX.store(want.3, Ordering::SeqCst);
         VISIBLE.store(true, Ordering::SeqCst);
         InvalidateRect(h, null(), 0);
+    }
+
+    unsafe fn text_w(dc: HDC, s: &str) -> i32 {
+        let w: Vec<u16> = s.encode_utf16().collect();
+        let mut sz = SIZE { cx: 0, cy: 0 };
+        GetTextExtentPoint32W(dc, w.as_ptr(), w.len() as i32, &mut sz);
+        sz.cx
+    }
+
+    unsafe fn text(dc: HDC, s: &str, color: u32, left: i32, right: i32, top: i32, bottom: i32, flags: u32) {
+        let w = wide(s);
+        let mut r = RECT { left, top, right, bottom };
+        SetTextColor(dc, color);
+        DrawTextW(dc, w.as_ptr(), -1, &mut r, flags | DT_SINGLELINE | DT_VCENTER | DT_NOPREFIX);
+    }
+
+    unsafe fn fill(dc: HDC, left: i32, top: i32, right: i32, bottom: i32, color: u32) {
+        let b = CreateSolidBrush(color);
+        let r = RECT { left, top, right, bottom };
+        FillRect(dc, &r, b);
+        DeleteObject(b);
+    }
+
+    fn level_color(l: Level) -> u32 {
+        match l {
+            Level::Normal => C_ACCENT,
+            Level::Warn => C_WARN,
+            Level::High => C_HIGH,
+        }
+    }
+
+    fn kind_color(kind: &str) -> u32 {
+        match kind {
+            "ok" => C_OK,
+            "error" | "warn" => if kind == "error" { C_HIGH } else { C_WARN },
+            "busy" => C_TEXT,
+            "filter" => C_ACCENT_HI,
+            "mode" => C_INFO,
+            _ => C_TEXT2,
+        }
     }
 
     unsafe fn paint(h: HWND) {
@@ -421,49 +542,110 @@ mod imp {
         let mem = CreateCompatibleDC(dc);
         let bmp = CreateCompatibleBitmap(dc, w, ht);
         let old_bmp = SelectObject(mem, bmp);
-        let bg = CreateSolidBrush(C_BG);
-        FillRect(mem, &rc, bg);
-        DeleteObject(bg);
-
+        fill(mem, 0, 0, w, ht, C_BG);
         let k = SCALE.load(Ordering::SeqCst) as f64 / 100.0;
+        let px = |v: f64| (v * k).round() as i32;
+        fill(mem, 0, 0, w, px(1.0).max(1), C_TOP);
+
         let face = wide("Microsoft YaHei UI");
-        let font = CreateFontW(
-            -((FONT_PX * k).round() as i32),
-            0,
-            0,
-            0,
-            400,
-            0,
-            0,
-            0,
-            DEFAULT_CHARSET,
-            0,
-            0,
-            CLEARTYPE_QUALITY,
-            0,
-            face.as_ptr(),
-        );
+        let font = CreateFontW(-px(FONT_PX), 0, 0, 0, 400, 0, 0, 0, DEFAULT_CHARSET, 0, 0, CLEARTYPE_QUALITY, 0, face.as_ptr());
         let old_font = SelectObject(mem, font);
         SetBkMode(mem, TRANSPARENT_BK);
-        let list = STATS.lock().ok().and_then(|s| *s).map(|s| rows(&s)).unwrap_or_default();
-        let (px, py, row) = ((PAD_X * k) as i32, (PAD_Y * k) as i32, ROW * k);
-        for (i, r) in list.iter().enumerate() {
-            let top = py + (row * i as f64) as i32;
-            let mut line = RECT { left: px, top, right: w - px, bottom: top + row as i32 };
-            let label = wide(r.label);
-            SetTextColor(mem, C_LABEL);
-            DrawTextW(mem, label.as_ptr(), -1, &mut line, DT_SINGLELINE | DT_VCENTER | DT_NOPREFIX);
-            let value = wide(&r.value);
-            SetTextColor(
-                mem,
-                match r.level {
-                    Level::Normal => C_TEXT,
-                    Level::Warn => C_WARN,
-                    Level::High => C_HIGH,
-                },
-            );
-            DrawTextW(mem, value.as_ptr(), -1, &mut line, DT_SINGLELINE | DT_VCENTER | DT_RIGHT | DT_NOPREFIX);
+        let (top, bottom) = (0, ht);
+        let gap = px(GAP);
+
+        // ── right: the meters (and what runs high), from the right edge leftwards ──
+        let mut right = w - px(PAD_X);
+        if ON.load(Ordering::SeqCst) {
+            let now = STATS.lock().ok().and_then(|s| *s);
+            let past: Vec<Stats> = PAST.lock().map(|p| p.iter().copied().collect()).unwrap_or_default();
+            if let Some(s) = now {
+                let value_w = text_w(mem, "100%");
+                let (gw, gh) = (px(GRAPH_W), px(GRAPH_H));
+                for m in meters(&s).iter().rev() {
+                    let label_w = text_w(mem, m.label);
+                    let x0 = right - (label_w + px(4.0) + gw + px(4.0) + value_w);
+                    if x0 < w / 3 {
+                        break; // never more than two thirds of the bar
+                    }
+                    text(mem, m.label, C_LABEL, x0, x0 + label_w, top, bottom, DT_LEFT);
+                    // the graph: one column per sample, newest at the right, in the level's colour
+                    let gx = x0 + label_w + px(4.0);
+                    let gy = (ht - gh) / 2;
+                    fill(mem, gx, gy, gx + gw, gy + gh, C_GRAPH_BG);
+                    let col = (gw / HISTORY as i32).max(1);
+                    for (i, p) in past.iter().rev().take(HISTORY).enumerate() {
+                        let Some(f) = meter_frac(p, m.label) else { continue };
+                        let x1 = gx + gw - col * i as i32;
+                        let bar_h = ((gh as f32) * f).round().max(1.0) as i32;
+                        let c = if i == 0 { level_color(m.level) } else { level_color(super::load(f)) };
+                        fill(mem, (x1 - col).max(gx), gy + gh - bar_h, x1, gy + gh, c);
+                    }
+                    text(mem, &m.value, if m.level == Level::Normal { C_TEXT } else { level_color(m.level) }, gx + gw + px(4.0), right, top, bottom, DT_RIGHT);
+                    right = x0 - gap;
+                }
+                for (t, l) in warnings(&s).iter().rev() {
+                    let tw = text_w(mem, t);
+                    if right - tw < w / 3 {
+                        break;
+                    }
+                    text(mem, t, level_color(*l), right - tw, right, top, bottom, DT_LEFT);
+                    right -= tw + gap;
+                }
+            }
         }
+
+        // ── the last result, just left of the meters ──
+        let bar = BAR.lock().ok().and_then(|b| b.clone()).unwrap_or_default();
+        if let Some(m) = bar.message.as_ref().filter(|m| !m.text.is_empty()) {
+            let tw = text_w(mem, &m.text).min(w * 35 / 100);
+            text(mem, &m.text, kind_color(&m.kind), right - tw, right, top, bottom, DT_RIGHT | DT_END_ELLIPSIS);
+            right -= tw + gap * 2;
+        }
+
+        // ── left: the hints, as long as they fit ──
+        let mut x = px(PAD_X);
+        let (kh, kp) = (px(KEY_H), px(KEY_PAD));
+        let key_top = (ht - kh) / 2;
+        let line = CreatePen(PS_SOLID, px(1.0).max(1), C_KEY_LINE);
+        let lit_line = CreatePen(PS_SOLID, px(1.0).max(1), C_ACCENT_HI);
+        let key_bg = CreateSolidBrush(C_KEY_BG);
+        let old_pen = SelectObject(mem, line);
+        let old_brush = SelectObject(mem, key_bg);
+        for hint in &bar.hints {
+            let keys_w: i32 = hint.keys.iter().map(|k| text_w(mem, k) + kp * 2 + px(3.0)).sum();
+            let need = keys_w + text_w(mem, &hint.label);
+            if x + need > right {
+                break;
+            }
+            SelectObject(mem, if hint.on { lit_line } else { line });
+            for key in &hint.keys {
+                let kw = text_w(mem, key) + kp * 2;
+                RoundRect(mem, x, key_top, x + kw, key_top + kh, px(5.0), px(5.0));
+                text(mem, key, if hint.on { C_ACCENT_HI } else { C_TEXT }, x, x + kw, key_top, key_top + kh, DT_CENTER);
+                x += kw + px(3.0);
+            }
+            let lw = text_w(mem, &hint.label);
+            text(mem, &hint.label, if hint.on { C_HI } else { C_TEXT2 }, x, x + lw, top, bottom, DT_LEFT);
+            x += lw + gap;
+        }
+        SelectObject(mem, old_pen);
+        SelectObject(mem, old_brush);
+        DeleteObject(line);
+        DeleteObject(lit_line);
+        DeleteObject(key_bg);
+
+        // ── the panel's state, after the hints when there is room ──
+        x += gap;
+        for p in &bar.state {
+            let tw = text_w(mem, &p.text);
+            if x + tw > right {
+                break;
+            }
+            text(mem, &p.text, kind_color(&p.kind), x, x + tw, top, bottom, DT_LEFT);
+            x += tw + gap;
+        }
+
         BitBlt(dc, 0, 0, w, ht, mem, 0, 0, SRCCOPY);
         SelectObject(mem, old_font);
         DeleteObject(font);
@@ -475,12 +657,12 @@ mod imp {
 
     unsafe extern "system" fn proc(h: HWND, msg: u32, w: WPARAM, l: LPARAM) -> LRESULT {
         match msg {
-            WM_TIMER | WM_APP_PLACE => {
+            WM_TIMER => {
                 tick(h);
                 0
             }
-            WM_APP_STATS => {
-                tick(h); // the number of rows may have changed
+            WM_APP_PLACE | WM_APP_STATS => {
+                tick(h);
                 if VISIBLE.load(Ordering::SeqCst) {
                     InvalidateRect(h, null(), 0);
                 }
@@ -500,7 +682,7 @@ mod imp {
     fn run() {
         unsafe {
             let inst = GetModuleHandleW(null());
-            let class = wide("WavePlugMonitor");
+            let class = wide("WavePlugStatusBar");
             let wc = WNDCLASSW {
                 style: 0,
                 lpfnWndProc: Some(proc),
@@ -514,7 +696,7 @@ mod imp {
                 lpszClassName: class.as_ptr(),
             };
             RegisterClassW(&wc);
-            let title = wide("WavePlug 性能监视");
+            let title = wide("WavePlug 状态栏");
             let h = CreateWindowExW(
                 WS_EX_LAYERED | WS_EX_TRANSPARENT | WS_EX_NOACTIVATE | WS_EX_TOOLWINDOW | WS_EX_TOPMOST,
                 class.as_ptr(),
@@ -530,14 +712,14 @@ mod imp {
                 null(),
             );
             if h.is_null() {
-                log::line("monitor: window not created");
+                log::line("status bar: window not created");
                 return;
             }
             // layered is what makes WS_EX_TRANSPARENT pass clicks to other processes
             SetLayeredWindowAttributes(h, 0, ALPHA, LWA_ALPHA);
             HWND_SELF.store(h as isize, Ordering::SeqCst);
             SetTimer(h, 1, TICK_MS, None);
-            log::line("monitor: window ready");
+            log::line("status bar: window ready");
             tick(h);
             let mut m: MSG = std::mem::zeroed();
             while GetMessageW(&mut m, null_mut(), 0, 0) > 0 {
@@ -694,15 +876,15 @@ mod imp {
 
     fn sample_loop() {
         let nvml = Nvml::load();
-        // CPU is a difference between two samples: take the first now, so the row is there from
-        // the first time the box is drawn (a row appearing later would make the box jump)
+        // CPU is a difference between two samples: take the first now, so its meter is there from
+        // the first time the bar is drawn (a meter appearing later would make the bar jump)
         let mut cpu_prev: Option<(u64, u64)> = cpu_times();
         thread::sleep(Duration::from_millis(250));
         let mut ps_handle: isize = 0;
         let (mut scratch_now, mut comfy_now) = (None, None);
         let mut n: u64 = 0;
         loop {
-            // nothing is measured while the box is off or Photoshop isn't in front
+            // nothing is measured while the meters are off or Photoshop isn't in front
             if !ON.load(Ordering::SeqCst) || !VISIBLE.load(Ordering::SeqCst) {
                 thread::sleep(Duration::from_millis(500));
                 continue;
@@ -727,11 +909,21 @@ mod imp {
             }
             s.scratch = scratch_now;
             s.comfy = comfy_now;
-            n += 1;
-            let changed = STATS.lock().map(|mut cur| std::mem::replace(&mut *cur, Some(s)) != Some(s)).unwrap_or(false);
-            if changed {
-                post(WM_APP_STATS);
+            if n % 60 == 0 {
+                log::line(format!("status bar meters: {}", summary(&s)));
             }
+            n += 1;
+            if let Ok(mut p) = PAST.lock() {
+                p.push_back(s);
+                while p.len() > HISTORY {
+                    p.pop_front();
+                }
+            }
+            if let Ok(mut cur) = STATS.lock() {
+                *cur = Some(s);
+            }
+            // the graphs move every sample
+            post(WM_APP_STATS);
             thread::sleep(Duration::from_millis(SAMPLE_MS));
         }
     }
@@ -744,31 +936,32 @@ mod tests {
     const G: u64 = 1024 * 1024 * 1024;
 
     #[test]
-    fn only_what_was_measured_is_listed() {
-        assert!(rows(&Stats::default()).is_empty());
-        let r = rows(&Stats { cpu: Some(0.374), ram: Some((20 * G, 32 * G)), ..Default::default() });
-        assert_eq!(r.iter().map(|r| r.label).collect::<Vec<_>>(), ["CPU", "内存"]);
-        assert_eq!(r[0].value, "37%");
-        assert_eq!(r[1].value, "20.0 / 32.0 GB");
+    fn only_what_was_measured_gets_a_meter() {
+        assert!(meters(&Stats::default()).is_empty());
+        let m = meters(&Stats { cpu: Some(0.374), ram: Some((21 * G, 32 * G)), ..Default::default() });
+        assert_eq!(m.iter().map(|m| m.label).collect::<Vec<_>>(), ["CPU", "内存"]);
+        assert_eq!(m[0].value, "37%");
+        assert_eq!(m[1].value, "66%");
     }
 
     #[test]
-    fn every_row_in_order() {
-        let r = rows(&Stats {
+    fn four_meters_in_order() {
+        let s = Stats {
             cpu: Some(0.05),
             ram: Some((8 * G, 32 * G)),
             gpu: Some(0.57),
-            vram: Some((9 * G + G / 10, 16 * G)),
+            vram: Some((15 * G, 16 * G)),
             photoshop: Some(6 * G),
             scratch: Some(Scratch { drive: 'G', used: 82 * G, free: 721 * G }),
             comfy: Some(7 * G + G / 5),
-        });
-        let text: Vec<String> = r.iter().map(|r| format!("{} {}", r.label, r.value)).collect();
-        assert_eq!(
-            text,
-            ["CPU 5%", "内存 8.0 / 32.0 GB", "GPU 57%", "显存 9.1 / 16.0 GB", "PS 6.0 GB", "暂存 82.0 GB · G: 余 721 GB", "Comfy 7.2 GB"]
-        );
-        assert!(r.iter().all(|r| r.level == Level::Normal));
+        };
+        let m = meters(&s);
+        assert_eq!(m.iter().map(|m| format!("{} {}", m.label, m.value)).collect::<Vec<_>>(), ["CPU 5%", "内存 25%", "GPU 57%", "显存 94%"]);
+        assert_eq!(m[3].level, Level::High);
+        assert_eq!(meter_frac(&s, "显存"), Some(15.0 / 16.0));
+        // nothing runs high apart from video memory: no warnings
+        assert!(warnings(&s).is_empty());
+        assert_eq!(summary(&s), "CPU 5% · 内存 25% · GPU 57% · 显存 94% · PS 6.0 GB · Comfy 7.2 GB");
     }
 
     #[test]
@@ -776,16 +969,18 @@ mod tests {
         assert_eq!(load(0.79), Level::Normal);
         assert_eq!(load(0.80), Level::Warn);
         assert_eq!(load(0.92), Level::High);
-        // Photoshop holding most of the memory
-        let ps = |bytes| rows(&Stats { ram: Some((30 * G, 32 * G)), photoshop: Some(bytes), ..Default::default() })[1].level;
-        assert_eq!(ps(10 * G), Level::Normal);
-        assert_eq!(ps(20 * G), Level::Warn);
-        assert_eq!(ps(25 * G), Level::High);
-        // the scratch drive running out
-        let sc = |free| rows(&Stats { scratch: Some(Scratch { drive: 'D', used: G, free }), ..Default::default() })[0].level;
-        assert_eq!(sc(60 * G), Level::Normal);
-        assert_eq!(sc(40 * G), Level::Warn);
-        assert_eq!(sc(10 * G), Level::High);
+    }
+
+    #[test]
+    fn warnings_only_when_running_high() {
+        let ps = |bytes| warnings(&Stats { ram: Some((30 * G, 32 * G)), photoshop: Some(bytes), ..Default::default() });
+        assert!(ps(10 * G).is_empty());
+        assert_eq!(ps(20 * G), [("PS 占用 20.0 GB".to_string(), Level::Warn)]);
+        assert_eq!(ps(25 * G)[0].1, Level::High);
+        let sc = |free| warnings(&Stats { scratch: Some(Scratch { drive: 'D', used: G, free }), ..Default::default() });
+        assert!(sc(60 * G).is_empty());
+        assert_eq!(sc(40 * G), [("暂存盘 D: 余 40.0 GB".to_string(), Level::Warn)]);
+        assert_eq!(sc(10 * G)[0].1, Level::High);
     }
 
     #[test]
@@ -808,18 +1003,10 @@ mod tests {
     }
 
     #[test]
-    fn sits_in_the_bottom_right_corner() {
-        assert_eq!(place((1000, 100, 3000, 2000), (200, 130), 12, None), (2788, 1858));
-        // a canvas smaller than the box: stays inside its top-left
-        assert_eq!(place((0, 0, 100, 50), (200, 130), 12, None), (0, 0));
-    }
-
-    #[test]
-    fn moves_above_the_completion_notice() {
-        let toast = (2688, 1918, 2988, 1988);
-        assert_eq!(place((1000, 100, 3000, 2000), (200, 130), 12, Some(toast)), (2788, 1918 - 130 - 6));
-        // a notice somewhere else changes nothing
-        assert_eq!(place((1000, 100, 3000, 2000), (200, 130), 12, Some((0, 0, 300, 70))), (2788, 1858));
+    fn runs_along_the_bottom_of_the_canvas() {
+        assert_eq!(bar_rect((1000, 100, 3000, 2000), 36), (1000, 1964, 2000, 36));
+        // a canvas lower than the bar: the bar is no taller than the canvas
+        assert_eq!(bar_rect((0, 0, 100, 20), 36), (0, 0, 100, 20));
     }
 
     #[test]

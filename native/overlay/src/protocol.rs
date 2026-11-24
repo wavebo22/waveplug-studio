@@ -19,6 +19,26 @@ pub struct ScreenRect {
     pub bottom: f64,
 }
 
+/// One hint on the status bar: its keys / mouse buttons, what they do, and whether its modifiers are held.
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+pub struct BarHint {
+    #[serde(default)]
+    pub keys: Vec<String>,
+    #[serde(default)]
+    pub label: String,
+    #[serde(default)]
+    pub on: bool,
+}
+
+/// A piece of text on the status bar and its kind (info / filter / mode / warn; ok / error / busy).
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+pub struct BarPart {
+    #[serde(default)]
+    pub text: String,
+    #[serde(default)]
+    pub kind: String,
+}
+
 /// plugin → helper
 #[cfg_attr(not(windows), allow(dead_code))] // `view` is used by win.rs
 #[derive(Debug, Clone, Deserialize)]
@@ -108,6 +128,22 @@ pub enum Command {
         on: bool,
         #[serde(default)]
         comfy: Option<String>,
+        #[serde(default)]
+        view: Option<ScreenRect>,
+    },
+    /// 状态栏 (monitor.rs): the line along the bottom of the canvas, like Blender's status bar —
+    /// the WaveLayer panel's hints (keys and what they do), its state and its last result; the
+    /// 性能监视 meters sit at its right. `on: false`: the plugin has no panel to speak for (the bar
+    /// stays only for the meters, when those are on). `view`: the canvas on screen.
+    StatusBar {
+        #[serde(default)]
+        on: bool,
+        #[serde(default)]
+        hints: Vec<BarHint>,
+        #[serde(default)]
+        state: Vec<BarPart>,
+        #[serde(default)]
+        message: Option<BarPart>,
         #[serde(default)]
         view: Option<ScreenRect>,
     },
@@ -498,6 +534,15 @@ mod tests {
         }
         assert!(matches!(parse(r#"{"type":"web-catch","on":false}"#), Some(Command::WebCatch { on: false, .. })));
         assert!(matches!(parse(r#"{"type":"watch-keys","on":true}"#), Some(Command::WatchKeys { on: true })));
+        match parse(r#"{"type":"status-bar","on":true,"hints":[{"keys":["Ctrl","左键"],"label":"加选","on":true}],"state":[{"text":"已选 2 个图层","kind":"info"}],"message":{"text":"已删除","kind":"ok"}}"#) {
+            Some(Command::StatusBar { on: true, hints, state, message: Some(m), view: None }) => {
+                assert_eq!(hints[0].keys, ["Ctrl", "左键"]);
+                assert!(hints[0].on);
+                assert_eq!(state[0].text, "已选 2 个图层");
+                assert_eq!(m.kind, "ok");
+            }
+            other => panic!("{other:?}"),
+        }
         assert_eq!(encode(&Event::Keys { ctrl: false, shift: true, alt: true }), r#"{"type":"keys","ctrl":false,"shift":true,"alt":true}"#);
         assert_eq!(encode(&Event::ExternalDragWanted), r#"{"type":"external-drag-wanted"}"#);
         assert!(matches!(
