@@ -18,7 +18,8 @@ const common = { define: { __BUILT_AT__: JSON.stringify(BUILT_AT), __CHANGES__: 
 mkdirSync("dist/plugin", { recursive: true });
 mkdirSync("dist/preview", { recursive: true });
 for (const f of ["manifest.json", "index.html", "loader.js", "styles.css"]) cpSync(`plugin/${f}`, `dist/plugin/${f}`);
-cpSync("plugin/icons", "dist/plugin/icons", { recursive: true });
+// an empty plugin/icons is not kept by git: a fresh clone has none
+if (existsSync("plugin/icons")) cpSync("plugin/icons", "dist/plugin/icons", { recursive: true });
 cpSync("plugin/styles.css", "dist/preview/styles.css");
 cpSync("src/preview/preview.html", "dist/preview/index.html");
 cpSync("src/preview/gallery.html", "dist/preview/gallery.html");
