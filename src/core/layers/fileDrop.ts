@@ -57,26 +57,14 @@ export function planFileDrop<T>(files: readonly { file: T; name: string }[], swa
   return { items: items.slice(0, MAX_DROP_FILES), unsupported, leftOut: Math.max(0, items.length - MAX_DROP_FILES) };
 }
 
-/** The overlay while files hover the panel: two zones, 上半 = 嵌入为智能对象, 下半 = 链接; the one under
- *  the pointer is the mode of the drop (all files). Photoshop's UXP never reports Alt during a drag
- *  (11-16 log: alt false on every drag and drop), so the pointer's position picks the mode. */
-export interface FileDropZone { mode: FileDropMode; title: string; sub: string }
-export function fileDropZones(count = 0): FileDropZone[] {
-  const n = count > 1 ? ` ${count} 个文件` : "";
-  return [
-    { mode: "embedded", title: `置入为智能对象${n}`, sub: "内容存进文档" },
-    { mode: "linked", title: `链接置入${n}`, sub: "文档指向原文件，原文件改了会更新" },
-  ];
-}
-/** The zone at `y` (0 = the overlay's top, 1 = its bottom). */
-export const fileDropZoneAt = (y: number): FileDropMode => (y < 0.5 ? "embedded" : "linked");
-
 /** The text over the panel while files hover it. */
 export function fileDropHint(swap = false): string {
   return swap ? "松开置入（Alt：PSD 嵌入，其他链接）" : "松开置入文件（PSD 链接，其他嵌入；按住 Alt 互换）";
 }
 
 export interface FileDropResult { linked: number; embedded: number; opened: number; failed: string[] }
+/** where dropped files go: before (above) / after (below) / inside layer `rel` (the insertion line) */
+export interface FileDropSpot { rel: number; place: "before" | "after" | "inside" }
 
 /** The WaveLayer status line after a drop. */
 export function fileDropResultText(r: FileDropResult, plan: Pick<FileDropPlan, "unsupported" | "leftOut">): { text: string; kind: "ok" | "error" | "info" } {

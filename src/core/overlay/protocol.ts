@@ -78,6 +78,8 @@ export type OverlayCommand =
    *  `on: false` takes it away. Answered by web-drop / web-drop-leave. */
   | { type: "web-catch"; on: true; clientX: number; clientY: number; left: number; top: number; width: number; height: number; folder: string }
   | { type: "web-catch"; on: false }
+  /** 按键 (helper ≥ KEYS_HELPER_VERSION): report Ctrl / Shift / Alt while on (renew within 3 s) */
+  | { type: "watch-keys"; on: boolean }
   /** The settings for what the helper does (APP_SETTING_KEYS), for the WavePlug app window's
    *  功能设置: sent on connect and whenever one changes. Answered by app-settings-set. */
   | { type: "app-settings"; settings: Record<string, string | boolean> }
@@ -160,6 +162,10 @@ export type OverlayEvent =
   | { type: "menu-result"; menuId: string; item: string | null }
   /** the WaveLayer drag was let go over the 外置删除区: delete what was dragged */
   | { type: "layer-drag-trash-drop" }
+  /** the drag card is over another program and nothing was prepared: export now */
+  | { type: "external-drag-wanted" }
+  /** Ctrl / Shift / Alt as held now (after watch-keys on) */
+  | { type: "keys"; ctrl: boolean; shift: boolean; alt: boolean }
   /** 牵手 Illustrator: a message from the Illustrator panel */
   | { type: "bridge"; from: string; msg: unknown }
   /** 功能设置 changed in the WavePlug app window: apply and save these */
@@ -221,6 +227,8 @@ export function appSettingsOf(settings: Record<string, unknown>): Record<string,
 
 /** 从网页拖入 through the helper's drop catcher (web-catch) needs at least this helper */
 export const WEBDROP_HELPER_VERSION = "0.16.0";
+/** watch-keys / keys and external-drag-wanted need at least this helper */
+export const KEYS_HELPER_VERSION = "0.18.0";
 
 /** `version` is older than EXPECTED_HELPER_VERSION (numeric x.y.z; unparsable counts as older). */
 export function helperOutdated(version: string | null, expected = EXPECTED_HELPER_VERSION): boolean {
@@ -266,6 +274,8 @@ export function parseOverlayEvent(text: string): OverlayEvent | null {
     return { type: "menu-result", menuId: m.menuId, item: m.item ?? null };
   }
   if (m?.type === "layer-drag-trash-drop") return { type: "layer-drag-trash-drop" };
+  if (m?.type === "external-drag-wanted") return { type: "external-drag-wanted" };
+  if (m?.type === "keys") return { type: "keys", ctrl: m.ctrl === true, shift: m.shift === true, alt: m.alt === true };
   if (m?.type === "web-drop-leave") return { type: "web-drop-leave" };
   if (m?.type === "app-settings-set" && m.changes && typeof m.changes === "object") return { type: "app-settings-set", changes: appSettingChanges(m.changes) };
   if (m?.type === "plugin-report" && typeof m.folder === "string" && /^[A-Za-z]:\\/.test(m.folder)) return { type: "plugin-report", folder: m.folder };

@@ -186,6 +186,8 @@ struct Engine {
     shown: bool,
     last: (i32, i32),
     started: Instant,
+    /// this drag already asked the plugin to export (ExternalWanted): once per drag
+    export_wanted: bool,
 }
 
 thread_local! {
@@ -220,6 +222,7 @@ impl Engine {
         self.foreign_cache = (0, false, String::new());
         self.drawn = None;
         self.started = Instant::now();
+        self.export_wanted = false;
         // shown for the whole drag, whoever has the foreground (Alt+Tab to the target is fine)
         self.shown = true;
         self.ps_thread = crate::win::photoshop_thread_in_front();
@@ -262,7 +265,21 @@ impl Engine {
     /// Over another program's window: show that the files are being prepared, or, once they are
     /// ready, start the system drag (posted: never from inside the hook).
     fn check_external(&mut self, x: i32, y: i32, over_target: bool) {
-        if self.ole_active || self.session.is_none() || self.transfer.as_ref().map_or(true, |t| t.requested) {
+        if self.ole_active || self.session.is_none() {
+            return;
+        }
+        // Over another program and the plugin hasn't started exporting: it only does so when its
+        // panel sees the pointer leave, and a quick throw out of Photoshop gives it no such move
+        // (the card then said 正在准备 for good until the drag went back into the panel). Ask once.
+        if self.transfer.is_none() {
+            if !self.export_wanted && !over_target && self.foreign(x, y) {
+                self.export_wanted = true;
+                log::line(format!("external drag: over {} with nothing prepared, asking the plugin", self.foreign_cache.2));
+                emit(Event::ExternalWanted);
+            }
+            return;
+        }
+        if self.transfer.as_ref().map_or(true, |t| t.requested) {
             return;
         }
         let foreign = !over_target && self.foreign(x, y);
@@ -1284,6 +1301,7 @@ fn run() {
                 shown: false,
                 last: (0, 0),
                 started: Instant::now(),
+                export_wanted: false,
             })
         });
         HWND_SELF.store(h as isize, Ordering::SeqCst);

@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { MAX_DROP_FILES, fileBaseName, fileDropHint, fileDropMode, fileDropZoneAt, fileDropZones, pageImage, webDrop, webDropResultText, webImageExt, webImageName, fileDropResultText, fileExt, fileLayerName, pathsFromDropText, planFileDrop } from "../src/core/layers/fileDrop.ts";
+import { MAX_DROP_FILES, fileBaseName, fileDropHint, fileDropMode, pageImage, webDrop, webDropResultText, webImageExt, webImageName, fileDropResultText, fileExt, fileLayerName, pathsFromDropText, planFileDrop } from "../src/core/layers/fileDrop.ts";
 
 test("拖拽文件置入：PSD / PSB 默认链接，其他嵌入，Alt 互换", () => {
   assert.equal(fileDropMode("海报.psd"), "linked");
@@ -55,11 +55,7 @@ test("拖拽文件置入：从拖拽文字里取文件路径", () => {
   assert.deepEqual(pathsFromDropText(""), []);
 });
 
-test("拖入文件的提示层: two zones, the pointer picks the mode", () => {
-  assert.deepEqual(fileDropZones().map(z => z.mode), ["embedded", "linked"]);
-  assert.equal(fileDropZones(3)[1].title, "链接置入 3 个文件");
-  assert.equal(fileDropZoneAt(0.2), "embedded");
-  assert.equal(fileDropZoneAt(0.8), "linked");
+test("拖入文件：Alt 决定嵌入或链接，全部文件同一种方式", () => {
   const plan = planFileDrop([{ file: 1, name: "a.psd" }, { file: 2, name: "b.png" }, { file: 3, name: "c.txt" }], false, "embedded");
   assert.deepEqual(plan.items.map(i => i.mode), ["embedded", "embedded"]);
   assert.deepEqual(planFileDrop([{ file: 1, name: "b.png" }], false, "linked").items.map(i => i.mode), ["linked"]);

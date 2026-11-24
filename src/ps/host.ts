@@ -6,7 +6,7 @@
 // variations are always generated from the document *without* the group, i.e. from the original.
 
 import type { Pixels } from "../core/image/png.ts";
-import type { FileDropItem, FileDropResult } from "../core/layers/fileDrop.ts";
+import type { FileDropItem, FileDropResult, FileDropSpot } from "../core/layers/fileDrop.ts";
 import type { Rect } from "../core/image/region.ts";
 import type { Side, TaskType } from "../core/workflow/profile.ts";
 import type { ToolLayer, ToolResult } from "../core/layers/smart.ts";
@@ -122,7 +122,8 @@ export interface PsHost {
    *  active document above the selected layer, each as a linked or an embedded smart object, as one
    *  undo step; with no document open the files are opened instead. `file` is what the drop gave
    *  (a UXP entry, or an object with a native path). */
-  placeDroppedFiles?(files: FileDropItem[]): Promise<FileDropResult>;
+  /** `at`: the insertion line in the WaveLayer list (none: above the active layer, as Photoshop does) */
+  placeDroppedFiles?(files: FileDropItem[], at?: FileDropSpot | null): Promise<FileDropResult>;
   /** 从网页拖入: downloads the image addresses (http(s) or data:) to the temporary folder; each
    *  becomes a file to place, or a failure with why (not an image, no answer). */
   downloadDropImages?(urls: string[]): Promise<{ files: FileDropItem[]; failed: string[] }>;

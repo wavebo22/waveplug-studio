@@ -8,7 +8,7 @@
 
 import { onDispose } from "../ui/dom.ts";
 import { log, setLogContext } from "./log.ts";
-import { EXPECTED_HELPER_VERSION, OVERLAY_URL, type ComfyManagerStatus, type ExternalDragEvent, type ExternalDragFile, HANG_SECONDS, type HangDoc, type MenuNode, type OverlayCommand, MENU_HELPER_VERSION, OPEN_APP_HELPER_VERSION, type ScreenRect, TRASH_HELPER_VERSION, WEBDROP_HELPER_VERSION, type WebDropEvent, helperOutdated, parseOverlayEvent } from "../core/overlay/protocol.ts";
+import { EXPECTED_HELPER_VERSION, OVERLAY_URL, type ComfyManagerStatus, type ExternalDragEvent, type ExternalDragFile, HANG_SECONDS, type HangDoc, type MenuNode, type OverlayCommand, MENU_HELPER_VERSION, OPEN_APP_HELPER_VERSION, type ScreenRect, TRASH_HELPER_VERSION, WEBDROP_HELPER_VERSION, KEYS_HELPER_VERSION, type WebDropEvent, helperOutdated, parseOverlayEvent } from "../core/overlay/protocol.ts";
 import { type Hub, createHub } from "../core/overlay/hub.ts";
 
 const RETRY_MS = 3000;
@@ -84,6 +84,12 @@ export interface Overlay {
   onPluginReport(cb: (folder: string) => void): () => void;
   /** web-drop / web-drop-leave from the helper */
   onWebDrop(cb: (event: WebDropEvent) => void): () => void;
+  /** 按键: ask the helper to report Ctrl / Shift / Alt (renew within 3 s while needed); false when
+   *  it isn't connected or is older than KEYS_HELPER_VERSION */
+  watchKeys(on: boolean): boolean;
+  onKeys(cb: (keys: { ctrl: boolean; shift: boolean; alt: boolean }) => void): () => void;
+  /** the helper's drag card is over another program and no files were prepared for it */
+  onExternalWanted(cb: () => void): () => void;
   /** external-drag-cached / -files-copied / -finished from the helper */
   onExternalDrag(cb: (event: ExternalDragEvent) => void): () => void;
   readonly connected: boolean;
@@ -98,6 +104,8 @@ export function connectOverlay(opts: { launch?: () => Promise<string | null>; au
   const comfyListeners = new Set<(status: ComfyManagerStatus) => void>();
   const externalDragListeners = new Set<(event: ExternalDragEvent) => void>();
   const trashListeners = new Set<() => void>();
+  const keysListeners = new Set<(keys: { ctrl: boolean; shift: boolean; alt: boolean }) => void>();
+  const wantedListeners = new Set<() => void>();
   const webDropListeners = new Set<(event: WebDropEvent) => void>();
   const appSettingsListeners = new Set<(changes: Record<string, string | boolean>) => void>();
   const reportListeners = new Set<(folder: string) => void>();
@@ -207,6 +215,15 @@ export function connectOverlay(opts: { launch?: () => Promise<string | null>; au
         trashListeners.forEach(cb => { try { cb(); } catch (err) { log("warn", "trash drop listener", err); } });
         return;
       }
+      if (m?.type === "keys") {
+        const k = { ctrl: m.ctrl, shift: m.shift, alt: m.alt };
+        keysListeners.forEach(cb => { try { cb(k); } catch (err) { log("warn", "keys listener", err); } });
+        return;
+      }
+      if (m?.type === "external-drag-wanted") {
+        wantedListeners.forEach(cb => { try { cb(); } catch (err) { log("warn", "external wanted listener", err); } });
+        return;
+      }
       if (m?.type === "external-drag-cached" || m?.type === "external-drag-files-copied" || m?.type === "external-drag-finished") {
         externalDragListeners.forEach(cb => { try { cb(m); } catch (err) { log("warn", "external drag listener", err); } });
         return;
@@ -294,6 +311,19 @@ export function connectOverlay(opts: { launch?: () => Promise<string | null>; au
     onWebDrop(cb) {
       webDropListeners.add(cb);
       return () => webDropListeners.delete(cb);
+    },
+    watchKeys(on) {
+      if (!on) { if (connected) send({ type: "watch-keys", on: false }); return true; }
+      if (!connected || helperVersion === null || helperOutdated(helperVersion, KEYS_HELPER_VERSION)) return false;
+      return sendChecked({ type: "watch-keys", on: true });
+    },
+    onKeys(cb) {
+      keysListeners.add(cb);
+      return () => keysListeners.delete(cb);
+    },
+    onExternalWanted(cb) {
+      wantedListeners.add(cb);
+      return () => wantedListeners.delete(cb);
     },
     onTrashDrop(cb) {
       trashListeners.add(cb);

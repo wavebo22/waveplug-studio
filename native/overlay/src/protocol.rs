@@ -214,6 +214,12 @@ pub enum Command {
         #[serde(default)]
         folder: String,
     },
+    /// 按键: while `on`, the helper reports Ctrl / Shift / Alt as they change (`keys`). UXP gives
+    /// a panel no key state during a drag (files dropped from Explorer); renewed by the plugin, and
+    /// given up by the helper a while after the last renewal.
+    WatchKeys {
+        on: bool,
+    },
     /// The drag ended in the plugin (or the export failed) before any system drag.
     ExternalDragCancel {
         #[serde(rename = "sessionId")]
@@ -282,6 +288,14 @@ pub enum Event {
     },
     /// The WaveLayer drag was let go over the 外置删除区: the plugin deletes what it was dragging.
     LayerDragTrashDrop,
+    /// The drag card is over another program and no files were prepared: the plugin exports now.
+    ExternalDragWanted,
+    /// Ctrl / Shift / Alt as held now (after watch-keys on; sent on each change and on start).
+    Keys {
+        ctrl: bool,
+        shift: bool,
+        alt: bool,
+    },
     /// 功能设置 changed in the app window: the plugin applies and saves `changes` (its settings keys).
     AppSettingsSet {
         changes: Value,
@@ -483,6 +497,9 @@ mod tests {
             other => panic!("{other:?}"),
         }
         assert!(matches!(parse(r#"{"type":"web-catch","on":false}"#), Some(Command::WebCatch { on: false, .. })));
+        assert!(matches!(parse(r#"{"type":"watch-keys","on":true}"#), Some(Command::WatchKeys { on: true })));
+        assert_eq!(encode(&Event::Keys { ctrl: false, shift: true, alt: true }), r#"{"type":"keys","ctrl":false,"shift":true,"alt":true}"#);
+        assert_eq!(encode(&Event::ExternalDragWanted), r#"{"type":"external-drag-wanted"}"#);
         assert!(matches!(
             parse(r#"{"type":"layer-drag-preview-end"}"#),
             Some(Command::LayerDragPreviewEnd)

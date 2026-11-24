@@ -7,7 +7,7 @@ import { placeGray } from "../core/image/compose.ts";
 import { crumb, flushLog, log } from "../app/log.ts";
 import type { CanvasView } from "../core/overlay/protocol.ts";
 import type { VectorInput } from "../core/overlay/svgFragment.ts";
-import { type FileDropItem, type FileDropResult, pageImage, webImageExt, webImageName } from "../core/layers/fileDrop.ts";
+import { type FileDropItem, type FileDropResult, type FileDropSpot, pageImage, webImageExt, webImageName } from "../core/layers/fileDrop.ts";
 import { type ActiveLayer, type Capture, type DocInfo, BLEND_PREFIX, EXPAND_PREFIX, EXTRACT_PREFIX, FILL_PREFIX, GENERATE_PREFIX, UPSCALE_PREFIX, type FillGroup, type LayerInfo, type Pads, type PsHost, type Variation, type VariationMask, padsLabel, parsePads } from "./host.ts";
 
 declare const require: (m: string) => any;
@@ -447,7 +447,7 @@ export class UxpHost implements PsHost {
     return isGroupId(docId, layerId) ? readGroupImage(docId, layerId) : readLayerImage(docId, layerId);
   }
 
-  async placeDroppedFiles(files: FileDropItem[]): Promise<FileDropResult> {
+  async placeDroppedFiles(files: FileDropItem[], at?: FileDropSpot | null): Promise<FileDropResult> {
     const fs = uxpStorage().localFileSystem;
     const { app } = ps();
     const out: FileDropResult = { linked: 0, embedded: 0, opened: 0, failed: [] };
@@ -505,6 +505,15 @@ export class UxpHost implements PsHost {
             if (r?._obj === "error" || placed === null || placed === before) throw new Error(String(r?.message ?? "Photoshop 没有置入这个文件"));
             if (f.mode === "linked") out.linked++; else out.embedded++;
             log("info", "file drop placed", JSON.stringify({ name: f.name, mode: f.mode, layerId: placed }));
+            // to the insertion line the drop was let go on, in the same history step
+            if (at) {
+              const made = findLayer(doc.layers, placed), rel = findLayer(doc.layers, at.rel);
+              const where = ps().constants.ElementPlacement;
+              if (made && rel && rel.id !== made.id) {
+                try { await made.move(rel, at.place === "before" ? where.PLACEBEFORE : at.place === "after" ? where.PLACEAFTER : where.PLACEINSIDE); }
+                catch (e) { log("warn", "file drop move to the line", JSON.stringify({ placed, at }), e); }
+              } else if (!rel) log("warn", "file drop line layer gone", JSON.stringify(at));
+            }
           } catch (e) { log("warn", "file drop place", f.name, f.mode, e); out.failed.push(f.name); }
         }
         // nothing went in: leave no empty history step

@@ -2295,6 +2295,42 @@ export function createLayerTreeView(tree: LayerTree, status: Status, tools?: Lay
     marker.style.height = height;
   }
 
+  /** 拖入文件: the insertion line under a drag from another program (files, web content), drawn with
+   *  the layer drag's marker. The position comes from the event's own target (the row it is over)
+   *  and offsetY within it, never from client coordinates (they don't match in UXP). Over the empty
+   *  space below the rows: after the last row. Null outside the list or with no document. */
+  function fileDropSpot(target: EventTarget | null, offsetY: number | undefined, link: boolean): { rel: number; place: "before" | "after" | "inside"; label: string } | null {
+    if (docId === null || !rows.length || drag) { clearFileDropSpot(); return null; }
+    const t = target as HTMLElement | null;
+    if (!t || typeof (t as any).closest !== "function" || !list.contains(t)) { clearFileDropSpot(); return null; }
+    const rowEl = t.closest(".lt-row") as HTMLElement | null;
+    let idx = rows.length - 1, frac = 1;
+    if (rowEl) {
+      const r = pool.find(p => p.el === rowEl);
+      if (!r || !rows[r.index]) { clearFileDropSpot(); return null; }
+      idx = r.index;
+      const off = rowEl === t ? { x: 0, y: 0 } : offsetIn(t, rowEl);
+      if (typeof offsetY === "number" && Number.isFinite(offsetY) && off) frac = Math.max(0, Math.min(1, (off.y + offsetY) / heightOf(rows[idx])));
+      else frac = 0.5;
+    }
+    const row = rows[idx], l = row.layer;
+    const open = filterEnabled && (filter !== "all" || queryActive(query)) || !collapsed.has(l.id);
+    let where: Where = row.filter ? "below" : dropZone(l, frac, open);
+    // nothing goes under the background: above it instead
+    if (l.kind === "background" && where !== "above") where = "above";
+    const indent = LEAD + l.depth * INDENT + (where === "inside" ? 0 : 16);
+    setShown(marker, true);
+    marker.className = "lt-drop" + (where === "inside" ? " into" : "") + (link ? " link" : "");
+    marker.style.left = indent + "px";
+    marker.style.top = (where === "inside" ? yOf(idx) : yOf(where === "above" ? idx : idx + 1) - 1) + "px";
+    marker.style.height = where === "inside" ? heightOf(row) + "px" : "";
+    return {
+      rel: l.id, place: where === "above" ? "before" : where === "below" ? "after" : "inside",
+      label: `「${l.name}」${where === "above" ? "上方" : where === "below" ? "下方" : "组内"}`,
+    };
+  }
+  function clearFileDropSpot() { if (!drag) setShown(marker, false); }
+
   /** -1 / 1 while the pointer is in the 22px band just inside the list's top / bottom edge. The
    *  buffer bands outside the rows don't scroll: they are stable "first / last visible slot" drops. */
   /** rows per second the list scrolls by itself during a drag (dragGeometry.edgeScrollRate) */
@@ -2471,6 +2507,20 @@ export function createLayerTreeView(tree: LayerTree, status: Status, tools?: Lay
   // the move/release before the drag controller sees it.
   listen(window, "mousemove", handleDragMove, true);
 
+  // The helper saw the drag card over another program with nothing prepared: this panel never saw
+  // the pointer leave (a quick throw out of Photoshop sends it no move outside the list), so the
+  // export starts now, as if it had.
+  overlay?.onExternalWanted(() => {
+    const d = drag;
+    if (!d?.active || d.external || d.trashed || d.sub || !exportLayerPng || !overlay) {
+      log("info", "external drag wanted: nothing to export", JSON.stringify({ drag: !!d, active: d?.active ?? false, started: !!d?.external, sub: d?.sub?.kind ?? null }));
+      return;
+    }
+    if (d.exportTimer) { clearTimeout(d.exportTimer); d.exportTimer = null; }
+    const candidates = externalDragCandidates(layers, d.ids, false);
+    log("info", "external drag wanted by helper", JSON.stringify({ ids: d.ids.slice(0, 8), region: d.lifecycle.region, candidates: candidates.length }));
+    if (candidates.length) { startExternalExport(d, candidates); updateHints(); }
+  });
   /** 跨软件拖拽 (externalDrag.ts): prepare, write one PNG per layer, then ready if still dragging. */
   function startExternalExport(d: NonNullable<typeof drag>, all: ReturnType<typeof externalDragCandidates>) {
     const { layers: capped, leftOut } = capExternalLayers(all);
@@ -3536,5 +3586,5 @@ export function createLayerTreeView(tree: LayerTree, status: Status, tools?: Lay
     workbench.el,
     h("div", { class: "lt-foot" }, h("div", { class: "lt-foot-btns" }, menuBtn, frameBtn, nativeBtn, ...(WORKBENCH_ENABLED ? [workbench.toggleButton] : [])), bar));
   render();
-  return { el, refresh };
+  return { el, refresh, fileDropSpot, clearFileDropSpot };
 }

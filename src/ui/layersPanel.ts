@@ -5,7 +5,7 @@ import type { Services } from "../app/services.ts";
 import { createLayerTreeView } from "./layerTree.ts";
 import { askIllustrator, linkOfLayer, pushBoardToIllustrator, pushToIllustrator } from "../app/illustratorBridge.ts";
 import { h, icon, replace } from "./dom.ts";
-import { fileBaseName, fileDropResultText, fileDropZoneAt, fileDropZones, webDrop, webDropResultText, pathsFromDropText, planFileDrop } from "../core/layers/fileDrop.ts";
+import { type FileDropSpot, fileBaseName, fileDropResultText, webDrop, webDropResultText, pathsFromDropText, planFileDrop } from "../core/layers/fileDrop.ts";
 import { log } from "../app/log.ts";
 import { createHintBar, type HintBar } from "./hintBar.ts";
 import { NO_KEYS, hintItems } from "../core/layers/hints.ts";
@@ -30,31 +30,42 @@ export function mountLayersPanel(root: HTMLElement, svc: Services, isShown: () =
   const dropEl = h("div", { class: "lp-drop" });
   const panel = h("div", { class: "lp" }, view.el, hintBar.el, dropEl);
   replace(root, panel);
-  mountFileDrop(panel, dropEl, svc, status, () => void view.refresh(), hintBar);
+  mountFileDrop(panel, dropEl, svc, status, () => void view.refresh(), hintBar, view);
   // hover help is the host's own tooltip from `title` (1.2: the panel's drawn .tip box showed a second copy)
   svc.layers.onChange(() => { if (isShown()) void view.refresh(); });
   return { show: () => void view.refresh() };
 }
 
 /** 拖拽文件置入: files dragged from the file manager onto the panel are placed into the active
- *  document (core/layers/fileDrop.ts: dropped on the upper half embedded, on the lower half linked). WaveLayer's own
- *  layer drags are mouse events, so they never get here.
+ *  document at the insertion line under the pointer (drawn by the list, like a layer drag); embedded,
+ *  or linked while Alt is held — UXP tells a panel no keys during a drag, the helper reads them
+ *  (watch-keys). WaveLayer's own layer drags are mouse events, so they never get here.
  *
  *  11-15 first try in Photoshop: nothing happened and no `file drop` line was logged, so drop never
  *  reached the handler. Now every drag is let in (no filtering on dataTransfer.types, which UXP may
  *  not fill as browsers do: without preventDefault on dragover there is no drop), the events are
  *  heard on the panel and on the document (in case UXP doesn't bubble them), and each drag is logged
  *  (`file drag` / `file drop`) with what the event carried. */
-function mountFileDrop(panel: HTMLElement, dropEl: HTMLElement, svc: Services, status: (text: string, kind?: "info" | "ok" | "error" | "busy") => void, refresh: () => void, hintBar: HintBar) {
+type DropSpotView = { fileDropSpot(target: EventTarget | null, offsetY: number | undefined, link: boolean): (FileDropSpot & { label: string }) | null; clearFileDropSpot(): void };
+function mountFileDrop(panel: HTMLElement, dropEl: HTMLElement, svc: Services, status: (text: string, kind?: "info" | "ok" | "error" | "busy") => void, refresh: () => void, hintBar: HintBar, view: DropSpotView) {
   const place = svc.host.placeDroppedFiles?.bind(svc.host);
   if (!place) return;
   let hide: ReturnType<typeof setTimeout> | null = null, busy = false, loggedAt = 0;
   const handled = new WeakSet<Event>();
-  // the zone under the pointer (上半 嵌入, 下半 链接) is the mode; UXP gives no Alt during a drag
-  let hoverCount = 0, zone: "embedded" | "linked" = "embedded", shown = "", fromWeb = false;
+  // Alt (from the helper, or the event if UXP ever fills it) links; the line under the pointer is where
+  let hoverCount = 0, shown = "", fromWeb = false, alt = false, spot: (FileDropSpot & { label: string }) | null = null, keysAt = 0;
+  let lastOver: { target: EventTarget | null; offsetY: unknown } | null = null;
+  svc.overlay?.onKeys(k => {
+    if (alt === k.alt || !panel.classList.contains("dropping")) return;
+    alt = k.alt;
+    if (lastOver) spotOf(lastOver); // the line takes the link colour
+    paint();
+  });
+  /** keep the helper reporting keys while the drag lasts (it stops 3 s after the last ask) */
+  const watchKeys = () => { const now = Date.now(); if (now - keysAt > 1000) { keysAt = now; svc.overlay?.watchKeys(true); } };
   // 从网页拖入 through the helper: UXP only passes text, the helper's drop catcher (webdrop.rs)
   // over this area reads the whole drag (the image itself, like other Windows programs do)
-  let catching = false, webFolder: string | null = null;
+  let catching = false, webFolder: string | null = null, webSpot: FileDropSpot | null = null;
   void svc.host.webDropFolder?.().then(f => { webFolder = f; }, () => undefined);
   const startCatch = (e: any) => {
     const ov = svc.overlay, r = dropEl.getBoundingClientRect?.();
@@ -62,28 +73,29 @@ function mountFileDrop(panel: HTMLElement, dropEl: HTMLElement, svc: Services, s
     catching = ov.webCatch({ clientX: Number(e.clientX), clientY: Number(e.clientY), left: r.left, top: r.top, width: r.width, height: r.height, folder: webFolder });
     log("info", "web catch", JSON.stringify({ asked: catching, x: e.clientX, y: e.clientY, w: r.width, h: r.height }));
   };
+  /** the banner at the bottom of the panel: what letting go does, and where */
   const paint = () => {
-    const key = zone + hoverCount + fromWeb;
+    const mode = alt ? "linked" : "embedded";
+    const key = mode + hoverCount + fromWeb + (spot?.label ?? "");
     if (key === shown) return;
     shown = key;
-    // from a browser: no files, one zone (images are downloaded and embedded, words become text)
-    hintBar.hints(hintItems({ mode: "fileDrag", fileDrag: { count: hoverCount, fromWeb }, keys: NO_KEYS }));
-    const zones = fromWeb ? [{ mode: "embedded" as const, title: "置入网页内容", sub: "图片下载后嵌入为智能对象；文字新建文字图层" }] : fileDropZones(hoverCount);
-    const lit = fromWeb ? "embedded" : zone;
-    replace(dropEl, ...zones.map(z =>
-      h("div", { class: "lp-drop-zone " + z.mode + (z.mode === lit ? " on" : "") },
-        h("div", { class: "lp-drop-icon" }, icon(fromWeb ? "image" : z.mode === "linked" ? "psLink" : "psSmart", z.mode === lit ? 56 : 28)),
-        h("div", { class: "lp-drop-title" }, z.title),
-        h("div", { class: "lp-drop-sub" }, z.sub))));
+    hintBar.hints(hintItems({ mode: "fileDrag", fileDrag: { count: hoverCount, fromWeb }, keys: { ...NO_KEYS, alt } }));
+    const n = hoverCount > 1 ? ` ${hoverCount} 个文件` : "";
+    const where = spot ? `放到${spot.label}` : "放到当前图层上方";
+    const title = fromWeb ? "置入网页内容" : mode === "linked" ? `链接置入${n}` : `嵌入为智能对象${n}`;
+    const sub = fromWeb ? `图片嵌入、文字新建文字图层 · ${where}` : `${where} · ${mode === "linked" ? "松开 Alt：改为嵌入" : "按住 Alt：改为链接"}`;
+    replace(dropEl, h("div", { class: "lp-drop-zone " + mode + " on" },
+      h("div", { class: "lp-drop-icon" }, icon(fromWeb ? "image" : mode === "linked" ? "psLink" : "psSmart", 20)),
+      h("div", { class: "lp-drop-text" }, h("div", { class: "lp-drop-title" }, title), h("div", { class: "lp-drop-sub" }, sub))));
   };
-  const zoneOf = (e: any) => {
-    const r = dropEl.getBoundingClientRect?.(), y = Number(e?.clientY);
-    if (!r || !r.height || !Number.isFinite(y)) return zone;
-    return fileDropZoneAt((y - r.top) / r.height);
-  };
+  /** the insertion line under the pointer (the list draws it) */
+  const spotOf = (e: any) => { spot = view.fileDropSpot(e?.target ?? null, Number.isFinite(Number(e?.offsetY)) ? Number(e.offsetY) : undefined, alt && !fromWeb); };
   const off = () => {
     if (hide) clearTimeout(hide);
     hide = null; hoverCount = 0; shown = ""; fromWeb = false;
+    if (keysAt) { svc.overlay?.watchKeys(false); keysAt = 0; }
+    alt = false; lastOver = null;
+    view.clearFileDropSpot();
     if (catching) { catching = false; svc.overlay?.webCatch(null); }
     panel.classList.remove("dropping");
   };
@@ -119,7 +131,10 @@ function mountFileDrop(panel: HTMLElement, dropEl: HTMLElement, svc: Services, s
       fromWeb = !hoverCount && !types.includes("application/uxp-entry-type") && !types.includes("Files") && types.some(t => /^text\//i.test(t));
       if (fromWeb) startCatch(e);
     }
-    zone = zoneOf(e);
+    if (e.altKey) alt = true;
+    lastOver = { target: e?.target ?? null, offsetY: e?.offsetY };
+    watchKeys();
+    spotOf(e);
     paint();
     // dragleave also fires between the panel's own children, and UXP sends dragover only while the
     // pointer moves: the overlay goes once nothing came for a while, or the pointer left the panel
@@ -130,6 +145,7 @@ function mountFileDrop(panel: HTMLElement, dropEl: HTMLElement, svc: Services, s
   svc.overlay?.onWebDrop(ev => {
     if (!catching) return;
     catching = false;
+    webSpot = spot ? { rel: spot.rel, place: spot.place } : null;
     off();
     if (ev.type === "web-drop-leave") return;
     log("info", "web drop (helper)", JSON.stringify({ files: ev.files.length, formats: ev.formats, html: ev.html.length, url: ev.url.slice(0, 160), text: ev.text.length }));
@@ -143,7 +159,7 @@ function mountFileDrop(panel: HTMLElement, dropEl: HTMLElement, svc: Services, s
     try {
       status(`正在置入 ${files.length} 张网页图片…`, "busy");
       const got = await svc.host.webDropItems(files);
-      const done = got.items.length ? await place!(got.items) : { linked: 0, embedded: 0, opened: 0, failed: [] as string[] };
+      const done = got.items.length ? await place!(got.items, webSpot) : { linked: 0, embedded: 0, opened: 0, failed: [] as string[] };
       const r = webDropResultText({ placed: done.embedded + done.linked + done.opened, failed: [...got.failed, ...done.failed] });
       status(r.text, r.kind);
       refresh();
@@ -161,7 +177,9 @@ function mountFileDrop(panel: HTMLElement, dropEl: HTMLElement, svc: Services, s
   const drop = (via: string) => (e: any) => {
     if (handled.has(e) || !ours(e)) return;
     handled.add(e);
-    const mode = panel.classList.contains("dropping") ? zoneOf(e) : zone;
+    if (panel.classList.contains("dropping")) spotOf(e);
+    const mode = alt || e?.altKey ? "linked" : "embedded", at = spot ? { rel: spot.rel, place: spot.place } : null;
+    log("info", "file drop spot", JSON.stringify({ mode, at, label: spot?.label ?? null }));
     off();
     e.preventDefault?.();
     e.stopPropagation?.();
@@ -169,12 +187,12 @@ function mountFileDrop(panel: HTMLElement, dropEl: HTMLElement, svc: Services, s
     const raw = droppedFiles(dt);
     log("info", "file drop", JSON.stringify({ ...describe(e, via), got: raw.length, names: raw.slice(0, 5).map(f => f.name) }));
     if (busy) { status("上一批文件还在置入", "info"); return; }
-    if (!raw.length) { void dropWeb(dt); return; }
+    if (!raw.length) { webSpot = at; void dropWeb(dt); return; }
     const plan = planFileDrop(raw, false, mode);
     if (!plan.items.length) { const r = fileDropResultText({ linked: 0, embedded: 0, opened: 0, failed: [] }, plan); status(r.text, r.kind); return; }
     busy = true;
     status(`正在置入 ${plan.items.length} 个文件…`, "busy");
-    place(plan.items).then(
+    place(plan.items, at).then(
       done => { const r = fileDropResultText(done, plan); status(r.text, r.kind); refresh(); },
       err => { log("error", "file drop failed", err); status("置入失败：" + ((err as Error)?.message ?? err), "error"); },
     ).finally(() => { busy = false; });
@@ -208,7 +226,7 @@ function mountFileDrop(panel: HTMLElement, dropEl: HTMLElement, svc: Services, s
         let placed = 0;
         const failed = [...got.failed];
         if (got.files.length) {
-          const done = await place!(got.files);
+          const done = await place!(got.files, webSpot);
           placed = done.embedded + done.linked + done.opened;
           failed.push(...done.failed);
         }

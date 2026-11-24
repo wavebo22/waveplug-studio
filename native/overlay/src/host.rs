@@ -132,6 +132,10 @@ fn on_command(c: Command) {
         }
         _ => {}
     }
+    if let Command::WatchKeys { on } = c {
+        crate::keys::watch(on);
+        return;
+    }
     if let Command::WebCatch { on, client_x, client_y, left, top, width, height, folder } = c {
         crate::webdrop::set(on.then(|| crate::webdrop::CatchRequest { client: (client_x, client_y), area: (left, top, width, height), folder }));
         return;
@@ -454,6 +458,7 @@ impl Host {
                 crate::drag::Event::ExternalFinished { session_id, status, effect, target, count } => {
                     server::send(&Event::ExternalDragFinished { session_id, status, effect, target, count });
                 }
+                crate::drag::Event::ExternalWanted => server::send(&Event::ExternalDragWanted),
             }
         }
     }
@@ -476,6 +481,7 @@ impl Host {
                 Command::Monitor { .. } => {}    // monitor.rs, on its own thread
                 Command::HangGuard { .. } => {}  // hang.rs, on its own thread
                 Command::WebCatch { .. } => {}   // webdrop.rs, on its own thread
+                Command::WatchKeys { .. } => {}  // keys.rs, on its own thread
                 Command::AppSettings { .. } | Command::OpenApp { .. } => {} // app.rs
                 Command::ExternalDragPrepare { .. }
                 | Command::ExternalDragReady { .. }

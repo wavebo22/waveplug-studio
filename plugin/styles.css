@@ -663,16 +663,19 @@ button, .ub { font: inherit; color: inherit; background: none; border: 0; paddin
    big icon, the words under it; UXP gives no Alt during a drag, so position picks the mode */
 .lp-drop { display: none; position: absolute; left: 4px; top: 4px; right: 4px; bottom: 4px; flex-direction: column; gap: 4px; pointer-events: none; }
 .lp.dropping .lp-drop { display: flex; }
-.lp-drop-zone { flex: 1 1 0; min-height: 0; box-sizing: border-box; padding: 12px; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 4px;
-  border: 2px dashed var(--c-line-strong); border-radius: var(--r-s); background: var(--c-scrim); color: var(--c-text-2); text-align: center; }
-.lp-drop-zone.embedded.on { border-color: var(--c-accent-hi); background: var(--c-drop-smart); color: var(--c-text-hi); }
-.lp-drop-zone.linked.on { border-color: var(--c-link-ink); background: var(--c-drop-link); color: var(--c-text-hi); }
+/* one banner at the top (the list below shows the insertion line); the box stays panel-sized: the
+   helper's web-drop catcher is placed over it */
+.lp-drop-zone { flex: none; min-height: 0; box-sizing: border-box; padding: 6px 8px; display: flex; flex-direction: row; align-items: center; justify-content: flex-start; gap: 8px;
+  border: 2px dashed var(--c-line-strong); border-radius: var(--r-s); background: var(--c-scrim); color: var(--c-text-2); text-align: left; }
+.lp-drop-zone.embedded.on { border-color: var(--c-accent-hi); background: var(--c-pop); color: var(--c-text-hi); }
+.lp-drop-zone.linked.on { border-color: var(--c-link-ink); background: var(--c-pop); color: var(--c-text-hi); }
 .lp-drop-icon { display: flex; align-items: center; justify-content: center; width: 40px; height: 40px; border-radius: 50%; background: var(--c-surface-hi); color: var(--c-text-2); }
-.lp-drop-zone.on .lp-drop-icon { width: 96px; height: 96px; margin-bottom: 6px; }
+.lp-drop-zone.on .lp-drop-icon { width: 32px; height: 32px; flex: none; }
+.lp-drop-text { min-width: 0; }
 .lp-drop-zone.embedded.on .lp-drop-icon { background: var(--c-accent); color: var(--c-accent-ink); }
 .lp-drop-zone.linked.on .lp-drop-icon { background: var(--c-link); color: var(--c-text-hi); }
 .lp-drop-title { font-size: var(--fs); font-weight: 600; }
-.lp-drop-zone.on .lp-drop-title { font-size: var(--fs-l); }
+.lp-drop-zone.on .lp-drop-title { font-size: var(--fs); }
 .lp-drop-sub { font-size: var(--fs-s); max-width: 260px; }
 .lp-drop-zone.embedded.on .lp-drop-sub { color: var(--c-text-2); }
 .lp-drop-zone.linked.on .lp-drop-sub { color: var(--c-link-ink); }
@@ -690,6 +693,9 @@ button, .ub { font: inherit; color: inherit; background: none; border: 0; paddin
 /* Alt held while dragging a filter / effect: a copy lands there (amber instead of green) */
 .lt-drop.copy { background: var(--c-copy); }
 .lt-drop.into.copy { background: var(--c-copy-wash); border-color: var(--c-copy); }
+/* a file dropped with Alt goes in linked: the line in the link colour */
+.lt-drop.link { background: var(--c-link-ink); }
+.lt-drop.into.link { background: var(--c-drop-link); border-color: var(--c-link-ink); }
 /* a filter chip's new place along its row: an upright bar between chips */
 .lt-drop.vbar { right: auto; width: 3px; border-radius: var(--r-s); }
 /* the chip being dragged, left faded where it was */

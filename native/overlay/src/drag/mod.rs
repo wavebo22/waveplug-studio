@@ -47,6 +47,8 @@ pub enum Event {
     /// a drag to another program (OLE) ended: dropped / cancelled / rejected / error
     /// `target`: the program it was let go over, by name; `count`: files offered
     ExternalFinished { session_id: String, status: &'static str, effect: &'static str, target: String, count: usize },
+    /// the card is over another program and the plugin has prepared no files: it should export now
+    ExternalWanted,
 }
 
 static ACTIVE: AtomicBool = AtomicBool::new(false);
