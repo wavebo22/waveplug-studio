@@ -74,6 +74,15 @@ else {
       console.log("  连不上 GitHub（网络问题）：" + why.split("\n").pop());
     }
   }
+  // Files that differ only in their line endings (a Windows editor saved them as CRLF, 11-18: 15
+  // files) count as local changes and stop the pull. Their content is the repository's: put them back.
+  const changed = git("diff", "--name-only").stdout.split("\n").map(f => f.trim()).filter(Boolean);
+  const eolOnly = changed.filter(f => git("diff", "--ignore-cr-at-eol", "--quiet", "--", f).status === 0);
+  if (eolOnly.length) {
+    const r = git("checkout", "--", ...eolOnly);
+    if (r.status === 0) console.log(`  已还原 ${eolOnly.length} 个只是换行符变了的文件（内容和仓库里一样）`);
+    else console.log("  还原只改了换行符的文件失败：" + (r.stderr || "").trim());
+  }
   // inherit: Git's messages reach the user
   // no console password prompt (WavePlug runs this without a console); Git's own sign-in window may still appear
   const r = spawnSync("git", ["pull", "--ff-only"], { stdio: "inherit", env: { ...process.env, GIT_TERMINAL_PROMPT: "0" } });
