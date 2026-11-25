@@ -14,3 +14,4 @@ Photoshop UXP 插件：连接本地 ComfyUI，把 AI 结果以图层组 + 变体
 - 改文件时不要用「先清空再写」的写法（曾经清空过源码），写到 `.new` 文件再 `mv`，或者用编辑工具。
 - `workflows/` 下两个未跟踪的 JSON 不属于本项目的改动，不要动。
 - 写或改界面样式前读 [`docs/UI_DESIGN_SYSTEM.md`](docs/UI_DESIGN_SYSTEM.md)：只用 `styles.css` 开头的 token（颜色、间距、控件高度），字号不小于 11px，有现成组件就复用。
+- 外置窗口（`native/overlay`）的位置只由 `native/overlay/src/layout.rs` 决定（规则见 `native/overlay/HANDOFF.md` 4.0 节），新窗口也照这个，不要各自算位置。

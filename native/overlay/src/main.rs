@@ -21,6 +21,7 @@ mod drag_target;
 mod frame;
 mod hang;
 mod keys;
+mod layout;
 mod life;
 mod menu;
 mod monitor;

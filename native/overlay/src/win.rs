@@ -1036,7 +1036,9 @@ pub fn variant_sync_height(logical_content_height: f32) {
         x: geom.x,
         y: geom.y,
     }) / 96.0;
-    let wanted = ((capped as f64 * dpi).floor() as i32).max(1);
+    let wanted = ((capped as f64 * dpi).floor() as i32)
+        .min(VARIANT_LAYOUT_CAP.load(Ordering::SeqCst))
+        .max(1);
     VARIANT_HEIGHT_CAP.store(wanted, Ordering::SeqCst);
     let changed = VARIANT_LAST_AUTO_HEIGHT.swap(wanted, Ordering::SeqCst) != wanted;
     if changed || geom.h > wanted {
@@ -1251,6 +1253,9 @@ pub fn variant_place(view: Option<ScreenRect>) -> bool {
     if let Ok(mut stored) = VARIANT_VIEW.lock() {
         *stored = view;
     }
+    if let Some(v) = view {
+        set_canvas(view_rect(v));
+    }
     if let Ok(mut bounds) = VARIANT_OWNER_RECT.lock() {
         *bounds = window_rect(owner).map(|r| (r.left, r.top, r.right, r.bottom));
     }
@@ -1381,6 +1386,111 @@ pub fn cursor_in_panel_reveal_zone(logical_height: f32) -> bool {
     let scale = dpi_at(POINT { x, y }) / 96.0;
     let reveal_height = (logical_height.max(0.0) as f64 * scale).ceil() as i32;
     point_in_panel_reveal_zone(POINT { x, y }, panel, reveal_height)
+}
+
+// ── 吸附布局 (layout.rs): where every external window sits; this applies it ──
+
+/// the canvas on screen (physical px) the windows were last put up against
+static CANVAS: Mutex<Option<RECT>> = Mutex::new(None);
+/// the tallest the variant rail / the workbench may be now (physical px; layout.rs rule 3)
+static VARIANT_LAYOUT_CAP: AtomicI32 = AtomicI32::new(i32::MAX);
+static SHELF_LAYOUT_CAP: AtomicI32 = AtomicI32::new(i32::MAX);
+/// the gap between two windows, at 96 DPI
+const GAP: f64 = 8.0;
+
+fn set_canvas(r: RECT) {
+    if r.right > r.left && r.bottom > r.top && r.left > -30000 && r.top > -30000 {
+        if let Ok(mut c) = CANVAS.lock() {
+            *c = Some(r);
+        }
+    }
+}
+
+fn view_rect(v: ScreenRect) -> RECT {
+    RECT { left: v.left.round() as i32, top: v.top.round() as i32, right: v.right.round() as i32, bottom: v.bottom.round() as i32 }
+}
+
+fn as_r(r: RECT) -> crate::layout::R {
+    (r.left, r.top, r.right, r.bottom)
+}
+
+/// The canvas, its work area (above the status bar), the margin and the gap there.
+fn layout_frame() -> Option<(RECT, crate::layout::R, i32, i32, f64)> {
+    let canvas = CANVAS.lock().ok().and_then(|c| *c)?;
+    let k = dpi_at(POINT { x: (canvas.left + canvas.right) / 2, y: (canvas.top + canvas.bottom) / 2 }) / 96.0;
+    let work = crate::layout::work_area(as_r(canvas), crate::monitor::bar_height());
+    Some((canvas, work, (MARGIN * k).round() as i32, (GAP * k).round() as i32, k))
+}
+
+/// The part of the generate panel that shows, where it is meant to be (also while parked).
+fn generate_shown_rect() -> Option<crate::layout::R> {
+    if !SHOWN.load(Ordering::SeqCst) {
+        return None;
+    }
+    let placed = PLACED.lock().ok()?;
+    let p = placed.as_ref()?;
+    let bottom = p.at.1 + p.size.1;
+    let clip = CLIP_PX.load(Ordering::SeqCst);
+    let top = if clip >= 0 { bottom - clip } else { p.at.1 };
+    Some((p.at.0, top, p.at.0 + p.size.0, bottom))
+}
+
+/// Puts every external window where layout.rs says, now. Runs on every watch tick and after a
+/// window is shown, so a window that changed (the panel unfolding, the status bar coming up)
+/// moves the others at once instead of waiting for the plugin to send something.
+pub fn relayout() {
+    if DRAG_ORIGIN.lock().map(|d| d.is_some()).unwrap_or(true) {
+        return; // the user is dragging the panel: it goes where the pointer is
+    }
+    let Some((_, work, m, gap, k)) = layout_frame() else { return };
+    let min_h = (60.0 * k).round() as i32;
+    // 1–2: the generate panel, above the status bar, where the user put it
+    if SHOWN.load(Ordering::SeqCst) {
+        let moved = PLACED.lock().ok().and_then(|mut placed| {
+            let p = placed.as_mut()?;
+            let offset = OFFSET.lock().map(|o| *o).unwrap_or((0, 0));
+            let snap = SNAP.lock().map(|s| *s).unwrap_or((0, 0));
+            let (x, y, _, _) = crate::layout::generate_rect(work, m, crate::layout::Panel { size: p.size, offset, snap });
+            p.bounds = RECT { left: work.0, top: work.1, right: work.2, bottom: work.3 };
+            (p.at != (x, y)).then(|| {
+                p.at = (x, y);
+                (x, y)
+            })
+        });
+        if let Some((x, y)) = moved {
+            if !PARKED.load(Ordering::SeqCst) {
+                unsafe {
+                    SetWindowPos(own_window(), null_mut(), x, y, 0, 0, SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE | SWP_ASYNCWINDOWPOS);
+                }
+            }
+            log::line(format!("layout: generate panel to {x},{y}"));
+        }
+    }
+    let generate = generate_shown_rect();
+    // 3: the variant rail and the workbench end above the panel in their column
+    let mut wake = false;
+    if VARIANT_SHOWN.load(Ordering::SeqCst) {
+        if let Ok(g) = VARIANT_GEOMETRY.lock() {
+            let cap = crate::layout::height_limit(work, m, gap, g.y, (g.x, g.x + g.w), generate, min_h);
+            wake |= VARIANT_LAYOUT_CAP.swap(cap, Ordering::SeqCst) != cap;
+        }
+    }
+    if SHELF_SHOWN.load(Ordering::SeqCst) {
+        let view = SHELF_VIEW.lock().ok().and_then(|v| *v);
+        let owner = SHELF_OWNER.load(Ordering::SeqCst) as HWND;
+        if let Some((x, y, w, _)) = shelf_rect_for(view, owner) {
+            let cap = crate::layout::height_limit(work, m, gap, y, (x, x + w), generate, min_h);
+            if SHELF_LAYOUT_CAP.swap(cap, Ordering::SeqCst) != cap && !SHELF_PARKED.load(Ordering::SeqCst) {
+                let h = shelf_hwnd();
+                if !h.is_null() {
+                    shelf_put(h);
+                }
+            }
+        }
+    }
+    if wake {
+        crate::host::wake(); // the rail takes its new cap on its next frame
+    }
 }
 
 // ── 展开 / 收起: the generate panel's window keeps its open height; folding shows only its
@@ -1668,21 +1778,22 @@ pub fn place_toast(view: Option<ScreenRect>, size: Vec2) -> bool {
         x: area.2 as i32 - 1,
         y: area.3 as i32 - 1,
     }) / 96.0;
-    // above the status bar (monitor.rs) along the canvas' bottom edge, when it is up
-    let (w, h, m) = (size.x as f64 * k, size.y as f64 * k, MARGIN * k + crate::monitor::bar_height() as f64);
+    // layout.rs rule 4: bottom-right above the status bar, or above the generate panel
+    let canvas = (area.0.round() as i32, area.1.round() as i32, area.2.round() as i32, area.3.round() as i32);
+    let work = crate::layout::work_area(canvas, crate::monitor::bar_height());
+    let size = ((size.x as f64 * k).round() as i32, (size.y as f64 * k).round() as i32);
+    let (x, y, w, h) = crate::layout::toast_rect(
+        work,
+        (MARGIN * k).round() as i32,
+        (GAP * k).round() as i32,
+        size,
+        generate_shown_rect(),
+    );
     unsafe {
         if !owner.is_null() {
             SetWindowLongPtrW(t, GWLP_HWNDPARENT, owner as isize);
         }
-        SetWindowPos(
-            t,
-            null_mut(),
-            (area.2 - w - m) as i32,
-            (area.3 - h - m) as i32,
-            w as i32,
-            h as i32,
-            SWP_NOACTIVATE | SWP_ASYNCWINDOWPOS,
-        );
+        SetWindowPos(t, null_mut(), x, y, w, h, SWP_NOACTIVATE | SWP_ASYNCWINDOWPOS);
     }
     log::line("toast placed");
     true
@@ -1752,34 +1863,29 @@ pub fn show(panel: &str, view: Option<ScreenRect>, size: Vec2) {
             },
         };
         let m = MARGIN * k;
-        let w = size.x as f64 * k;
-        let h = (size.y as f64 * k).min((area.3 - area.1 - 2.0 * m).max(200.0 * k));
-        let bounds = RECT {
+        let canvas = RECT {
             left: area.0.round() as i32,
             top: area.1.round() as i32,
             right: area.2.round() as i32,
             bottom: area.3.round() as i32,
         };
+        if view.is_some() {
+            set_canvas(canvas);
+        }
+        // the canvas above the status bar (layout.rs rule 1); the panel stays inside it
+        let work = crate::layout::work_area(as_r(canvas), crate::monitor::bar_height());
+        let bounds = RECT { left: work.0, top: work.1, right: work.2, bottom: work.3 };
+        let w = (size.x as f64 * k).round() as i32;
+        let h = ((size.y as f64 * k).min(((work.3 - work.1) as f64 - 2.0 * m).max(200.0 * k))).round() as i32;
         // Free positions retain the existing bottom-left-relative offset. When an edge was
         // magnetically attached, recompute that edge from the latest canvas dimensions.
-        let (ox, oy) = OFFSET.lock().map(|o| *o).unwrap_or((0, 0));
+        let offset = OFFSET.lock().map(|o| *o).unwrap_or((0, 0));
         let mut snap = SNAP.lock().map(|s| *s).unwrap_or((0, 0));
-        if w > area.2 - area.0 { snap.0 = 0; }
-        if h > area.3 - area.1 { snap.1 = 0; }
+        if w > work.2 - work.0 { snap.0 = 0; }
+        if h > work.3 - work.1 { snap.1 = 0; }
         if let Ok(mut saved) = SNAP.lock() { *saved = snap; }
-        let free_x = (area.0 + m + ox as f64).clamp(area.0, (area.2 - w).max(area.0));
-        let free_y = (area.3 - h - m + oy as f64).clamp(area.1, (area.3 - h).max(area.1));
-        let x = match snap.0 {
-            -1 => area.0,
-            1 => (area.2 - w).max(area.0),
-            _ => free_x,
-        };
-        let y = match snap.1 {
-            -1 => area.1,
-            1 => (area.3 - h).max(area.1),
-            _ => free_y,
-        };
-        (x as i32, y as i32, w as i32, h as i32, window_rect(ps), bounds, snap)
+        let (x, y, w, h) = crate::layout::generate_rect(work, m.round() as i32, crate::layout::Panel { size: (w, h), offset, snap });
+        (x, y, w, h, window_rect(ps), bounds, snap)
     };
     // Store the desired geometry before any parking; the physical parked HWND is never the
     // source of truth for restore, resizing, or user dragging.
@@ -1795,6 +1901,8 @@ pub fn show(panel: &str, view: Option<ScreenRect>, size: Vec2) {
     }
     VIEW_REQUESTED.store(false, Ordering::SeqCst);
     SHOWN.store(true, Ordering::SeqCst);
+    // the others make room for it now (layout.rs)
+    relayout();
     // the same rule as watch(); a show arriving before its first tick looks at the foreground itself
     let ready = photoshop_window_ready(OWNER.load(Ordering::SeqCst) as HWND);
     let active = ready
@@ -2074,6 +2182,10 @@ pub fn watch() {
                 PS_PRESENT.store(present, Ordering::SeqCst);
                 log::line(format!("photoshop present {present}: foreground={now_front}"));
             }
+            // every window where the layout says, every tick (layout.rs)
+            if present {
+                relayout();
+            }
             // Independent viewports follow Photoshop even when the generate surface is hidden.
             watch_variant(now_front, present);
             watch_shelf(now_front, present);
@@ -2194,6 +2306,7 @@ fn shelf_rect_for(view: Option<ScreenRect>, owner: HWND) -> Option<(i32, i32, i3
     let (lw, lh) = SHELF_SIZE.lock().map(|s| *s).unwrap_or((crate::panel::shelf::WIDTH, 200.0));
     let (w, h) = ((lw as f64 * k).round() as i32, (lh as f64 * k).round() as i32);
     let m = (MARGIN * k).round() as i32;
+    let h = h.min(SHELF_LAYOUT_CAP.load(Ordering::SeqCst));
     Some((right - m - w, top + m, w.max(80), h.max(60)))
 }
 
@@ -2231,6 +2344,10 @@ pub fn shelf_place(view: Option<ScreenRect>) -> bool {
     if let Ok(mut v) = SHELF_VIEW.lock() {
         *v = view.or(*v);
     }
+    if let Some(v) = view {
+        set_canvas(view_rect(v));
+    }
+    relayout();
     SHELF_SHOWN.store(true, Ordering::SeqCst);
     SHELF_PARKED.store(true, Ordering::SeqCst);
     shelf_put(h);

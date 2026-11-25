@@ -120,6 +120,16 @@ src/ui/app.ts  startOverlay()      生成页提供状态和     src/panel/genera
 - 被同角色新连接替换掉的旧连接，断开时不算「Photoshop 走了」，不触发 `on_disconnect`。
 - 纯函数 `route()` / `missing()` 有测试。
 
+## 4.0 外置窗口的位置：唯一标准（2026-11-24，用户要求以后都照这个）
+
+所有外置窗口的位置**只由 `src/layout.rs` 决定**，`win.rs` 只负责把它算出来的结果套到窗口上。不要在某个窗口自己的代码里另算位置。
+
+- **分区**：画布内、离边 `MARGIN`（12 px × DPI）。底部提示栏占画布最下面一整条；其余窗口都在它上面的「工作区」（`work_area`）里：变体栏左上、编辑工作台右上、生图面板左下（或用户拖到 / 吸附到的位置）、完成提示右下。
+- **规则**（按顺序）：① 提示栏占底边，别的窗口不压它；② 生图面板先放，不给别人让位；③ 同一列、在它上方的窗口（变体栏、工作台）缩到它上面 `GAP`（8 px × DPI）为止，最少 60 px；生图面板收起时按露出的底栏算，展开时它们跟着缩（变体栏有缓动）；④ 完成提示在右下，会压到生图面板时放到面板上方。
+- **何时生效**：`win::relayout()` 每个 watch 周期（250 ms，PS 在前台时）跑一次，任何窗口显示时也立即跑一次。所以一个窗口变了（展开、提示栏出现、画布变化），其他窗口马上让开，不用等插件发消息。用户拖生图面板时不重排。
+- **新增外置窗口**：在 `layout.rs` 里给它一个角或边、写清它和已有窗口的关系（让谁、被谁让）并加测试；在 `relayout()` 里套用；位置不要写在别处。
+- 日志：`layout: generate panel to x,y`。
+
 ## 4. 新增一个外附介面（步骤）
 
 以「图层工具面板」为例，名称 `layertools`：
@@ -127,7 +137,7 @@ src/ui/app.ts  startOverlay()      生成页提供状态和     src/panel/genera
 1. **插件，格式**：新建 `src/core/overlay/layerToolsPanel.ts`，写区块类型 `LayerToolsSections`（每个字段是一个区块，可 JSON 化）、操作类型和 `parseLayerToolsAction(raw)`（逐字段检查，不合格返回 null）。照 `generatePanel.ts`。
 2. **插件，接线**：新建 `src/ui/layerToolsSurface.ts`，`overlay.hub.register({ id: "layertools", sections, parseAction, onAction, onViewRequest })`；决定何时 `hub.show` / `hub.hide`；状态可能变化处调用 `overlay.queueSync()`。照 `generateSurface.ts`。
 3. **小程序，介面**：新建 `src/panel/layertools/`，实现 `Surface`（`panel/mod.rs`）：`id()` 返回同一个名称；`apply(sections)` 只更新收到的区块；`ui(ui)` 画画面并返回操作 JSON。界面元件和颜色用 `panel/theme.rs`（token 取自 `plugin/styles.css`）。照 `panel/generate/`。
-4. **小程序，登记**：在 `src/host.rs` 的 `surfaces()` 里加一行。
+4. **小程序，登记**：在 `src/host.rs` 的 `surfaces()` 里加一行；位置按 4.0 节写进 `src/layout.rs`。
 5. **测试**：插件端照 `tests/overlay_protocol.test.ts` / `tests/overlay_hub.test.ts` 测格式；小程序端照 `panel/generate/mod.rs` 里的 `tests` 测套用区块和操作 JSON；用 `tools/fake_plugin.ts` 的写法做一个假插件跑端到端，加 `WAVEPLUG_HOST_SHOT` 截图核对。
 
 共用层（连线、版本号、重连、视窗、显示 / 隐藏、位置）不需要改。

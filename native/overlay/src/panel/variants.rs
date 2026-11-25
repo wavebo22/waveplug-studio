@@ -83,7 +83,7 @@ fn paint_compact_thumb_slider(ui: &mut egui::Ui, size: &mut f32) {
             Color32::from_gray(139)
         },
     );
-    response.on_hover_text(format!("缩略图大小：{} px", size.round()));
+    let _ = response; // no tooltip window over the rail (user 11-24)
 }
 
 /// Read only the 24-byte PNG header. Full pixel decoding remains lazy for visible rows.
@@ -364,7 +364,7 @@ impl VariantRail {
                                         "groupId": self.group_id
                                     }));
                                 }
-                                hit.on_hover_text(format!("删除变体 v{number}"));
+                                let _ = hit;
                             }
                             if response.clicked() && !chosen && !deleted {
                                 actions.push(json!({
@@ -373,7 +373,8 @@ impl VariantRail {
                                     "groupId": self.group_id
                                 }));
                             }
-                            response.on_hover_text(format!("变体 v{} · 单击切换", number));
+                            // no tooltip (user 11-24): the label under the picture says enough
+                            let _ = response;
                         }
                     });
             });
@@ -411,7 +412,7 @@ fn draw_resize_edges(ctx: &egui::Context) {
                     },
                 ),
             );
-            response.on_hover_text("拖动调整变体栏高度");
+            let _ = response;
         });
 }
 
