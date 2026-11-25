@@ -171,6 +171,14 @@ test("编组 / 取消编组走 Illustrator 的菜单命令", () => {
   assert.match(JSON.parse(loadHost(SOURCE).call("menu", { cmd: "rm -rf" })).error, /unknown/);
 });
 
+test("面板有键盘时，复制粘贴快捷键交给 Illustrator 自己的编辑菜单", () => {
+  const { call } = host();
+  for (const [cmd, id] of [["copy", "copy"], ["cut", "cut"], ["paste", "paste"], ["pasteFront", "pasteFront"], ["pasteBack", "pasteBack"], ["pasteInPlace", "pasteInPlace"], ["pasteAllArtboards", "pasteInAllArtboard"]]) {
+    call("menu", { cmd });
+    assert.equal(app.menuLog.at(-1), id);
+  }
+});
+
 test("搜索：按名字、类型和状态，带上路径", () => {
   const { call } = host();
   const r = call("search", { text: "星" });

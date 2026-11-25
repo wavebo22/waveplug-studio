@@ -542,7 +542,10 @@ var WavePlugWL = (function () {
         sameStyle: "Find Style menu item", sameSymbol: "Find Symbol Instance menu item", sameBlend: "Find Blending Mode menu item",
         inverse: "Inverse menu item", selectAll: "selectall", deselect: "deselectall",
         bringFront: "sendToFront", bringForward: "sendForward", sendBackward: "sendBackward", sendBack: "sendToBack",
-        fitArtboard: "fitin", fitAll: "fitall", selectOnArtboard: "selectallinartboard"
+        fitArtboard: "fitin", fitAll: "fitall", selectOnArtboard: "selectallinartboard",
+        // 编辑 menu, for the shortcuts the panel passes on while it has the keyboard
+        copy: "copy", cut: "cut", paste: "paste", pasteFront: "pasteFront", pasteBack: "pasteBack",
+        pasteInPlace: "pasteInPlace", pasteAllArtboards: "pasteInAllArtboard"
     };
     function menu(a) {
         var id = MENU[a.cmd];

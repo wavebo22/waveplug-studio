@@ -111,7 +111,7 @@ export function mountPanel(root: HTMLElement, deps: PanelDeps) {
   ];
   const psBar = h("div", { class: "wl-ps" }, h("div", { class: "wl-ps-line" }, psDot, psText), h("div", { class: "wl-ps-btns" }, ...psButtons));
 
-  const search = h("input", { class: "field wl-search", type: "search", placeholder: "搜索名称或文字", title: "在整个文档里找（Ctrl+F）。回车搜索，Esc 清除" }) as HTMLInputElement;
+  const search = h("input", { class: "field wl-search", type: "search", placeholder: "搜索名称或文字", title: "在整个文档里找。回车搜索，Esc 清除" }) as HTMLInputElement;
   const filterBtn = h("button", { class: "icon-btn", title: "按类型和状态筛选", onClick: () => { setShown(chips, chips.style.display === "none"); } }, icon("filters"));
   const tools = h("div", { class: "wl-tools" }, search, filterBtn,
     h("button", { class: "icon-btn", title: "定位到 Illustrator 里选中的对象", onClick: () => void revealSelection(true) }, icon("psMove")),
@@ -593,6 +593,11 @@ export function mountPanel(root: HTMLElement, deps: PanelDeps) {
   }
 
   // ── keyboard ──
+  /** Ctrl+key → Illustrator's 编辑 menu command (Shift+Ctrl+V: 就地粘贴; Alt+Shift+Ctrl+V: 在所有画板上粘贴) */
+  const CLIPBOARD_KEYS: Record<string, [string, string]> = {
+    c: ["copy", "已复制到剪贴板"], x: ["cut", "已剪切"], v: ["paste", "已粘贴"],
+    f: ["pasteFront", "已贴在前面"], b: ["pasteBack", "已贴在后面"],
+  };
   list.addEventListener("keydown", e => {
     if (renaming) return;
     const k = e.key, ctrl = e.ctrlKey || e.metaKey;
@@ -608,7 +613,14 @@ export function mountPanel(root: HTMLElement, deps: PanelDeps) {
       const n = pickedNodes()[0];
       if (n && isContainer(n.kind) && (k === "ArrowRight") !== open.has(n.key)) toggleOpen(n, false);
     } else if (ctrl && k.toLowerCase() === "g") { e.preventDefault(); void menuCmd(e.shiftKey ? "ungroup" : "group", e.shiftKey ? "已取消编组" : "已编组"); }
-    else if (ctrl && k.toLowerCase() === "f") { e.preventDefault(); search.focus(); }
+    // 复制 / 粘贴: while the panel has the keyboard (any click on a row gives it), Illustrator gets
+    // none of its shortcuts — Ctrl+C / X / V / F / B did nothing at all. Passed on as its own
+    // 编辑 menu commands, so they act exactly as in Illustrator (Ctrl+F used to focus the search box).
+    else if (ctrl && !e.altKey && CLIPBOARD_KEYS[k.toLowerCase()] && !(e.shiftKey && k.toLowerCase() !== "v")) {
+      e.preventDefault();
+      const [cmd, done] = e.shiftKey ? ["pasteInPlace", "已就地粘贴"] : CLIPBOARD_KEYS[k.toLowerCase()];
+      void menuCmd(cmd, done);
+    } else if (ctrl && e.altKey && e.shiftKey && k.toLowerCase() === "v") { e.preventDefault(); void menuCmd("pasteAllArtboards", "已在所有画板上粘贴"); }
     // the panel has the keyboard: Illustrator's own Ctrl+Z wouldn't reach it
     else if (ctrl && k.toLowerCase() === "z") { e.preventDefault(); void act(e.shiftKey ? "redo" : "undo", {}, e.shiftKey ? "已重做" : "已撤销"); }
     else if (ctrl && k.toLowerCase() === "y") { e.preventDefault(); void act("redo", {}, "已重做"); }
@@ -799,7 +811,7 @@ export function mountPanel(root: HTMLElement, deps: PanelDeps) {
       h("button", { class: "btn", onClick: () => openCleanup() }, "整理文档…"),
       h("div", { class: "group-label" }, "快捷键（列表有焦点时）"),
       ...([["Delete", "删除"], ["F2 / 连点两下", "改名"], ["↑ ↓", "上一行 / 下一行"], ["← →", "折叠 / 展开"], ["Ctrl+G / Ctrl+Shift+G", "编组 / 取消编组"],
-        ["Ctrl+Z / Ctrl+Shift+Z", "撤销 / 重做"], ["Ctrl+F", "搜索"], ["Alt+点眼睛 / 锁", "只显示 / 只解锁这一项"], ["Alt+拖动", "复制"], ["Alt+点三角", "展开里面所有层级"]] as const)
+        ["Ctrl+Z / Ctrl+Shift+Z", "撤销 / 重做"], ["Ctrl+C / X / V", "复制 / 剪切 / 粘贴（和 Illustrator 一样）"], ["Ctrl+F / Ctrl+B", "贴在前面 / 后面"], ["Alt+点眼睛 / 锁", "只显示 / 只解锁这一项"], ["Alt+拖动", "复制"], ["Alt+点三角", "展开里面所有层级"]] as const)
         .map(([k, v]) => h("div", { class: "wl-key" }, h("span", { class: "wl-key-k" }, k), h("span", { class: "small muted" }, v))),
       h("div", { class: "small muted" }, `WaveLayer for Illustrator ${deps.version}`));
   }
