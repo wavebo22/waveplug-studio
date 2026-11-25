@@ -23,7 +23,7 @@
 
 use serde_json::Value;
 
-use crate::protocol::{BarHint, BarPart, ScreenRect};
+use crate::protocol::{BarHint, BarMode, BarPart, ScreenRect};
 
 /// What the plugin shows on the bar (None: no WaveLayer panel; the bar is there for the meters only).
 #[derive(Debug, Clone, PartialEq, Default)]
@@ -31,6 +31,8 @@ pub struct Bar {
     pub hints: Vec<BarHint>,
     pub state: Vec<BarPart>,
     pub message: Option<BarPart>,
+    /// what the panel is in the middle of: a badge before the hints
+    pub mode: Option<BarMode>,
 }
 
 /// Photoshop's scratch files on one drive.
@@ -330,6 +332,9 @@ mod imp {
     const C_INFO: u32 = 0x00FF_B682; // --c-info
     const C_WARN: u32 = 0x004B_B0E3; // --c-warn
     const C_HIGH: u32 = 0x0069_7AEC; // --c-err
+    const C_EMBED: u32 = 0x009F_B53F; // --c-accent: 嵌入
+    const C_LINK: u32 = 0x00D9_864F; // --c-link: 链接
+    const C_WEB: u32 = 0x003A_90E0; // 网页内容
 
     /// the window looks at Photoshop this often (ms); a sample is taken every SAMPLE_MS
     const TICK_MS: u32 = 250;
@@ -528,6 +533,17 @@ mod imp {
         }
     }
 
+    /// a mode badge's fill
+    fn tone_color(tone: &str) -> u32 {
+        match tone {
+            "embed" => C_EMBED,
+            "link" => C_LINK,
+            "web" => C_WEB,
+            "warn" => C_WARN,
+            _ => C_INFO,
+        }
+    }
+
     unsafe fn paint(h: HWND) {
         let mut ps: PAINTSTRUCT = std::mem::zeroed();
         let dc = BeginPaint(h, &mut ps);
@@ -603,10 +619,37 @@ mod imp {
             right -= tw + gap * 2;
         }
 
-        // ── left: the hints, as long as they fit ──
+        // ── left: what the panel is in the middle of, as a filled badge, then where ──
         let mut x = px(PAD_X);
         let (kh, kp) = (px(KEY_H), px(KEY_PAD));
         let key_top = (ht - kh) / 2;
+        if let Some(m) = bar.mode.as_ref().filter(|m| !m.text.is_empty()) {
+            let c = tone_color(&m.tone);
+            let bold = CreateFontW(-px(FONT_PX), 0, 0, 0, 700, 0, 0, 0, DEFAULT_CHARSET, 0, 0, CLEARTYPE_QUALITY, 0, face.as_ptr());
+            let prev = SelectObject(mem, bold);
+            let bw = text_w(mem, &m.text) + kp * 4;
+            let brush = CreateSolidBrush(c);
+            let pen = CreatePen(PS_SOLID, 1, c);
+            let (ob, op) = (SelectObject(mem, brush), SelectObject(mem, pen));
+            let (bt, bb) = (key_top - px(1.0), key_top + kh + px(1.0));
+            RoundRect(mem, x, bt, x + bw, bb, px(6.0), px(6.0));
+            SelectObject(mem, ob);
+            SelectObject(mem, op);
+            DeleteObject(brush);
+            DeleteObject(pen);
+            text(mem, &m.text, C_HI, x, x + bw, bt, bb, DT_CENTER);
+            SelectObject(mem, prev);
+            DeleteObject(bold);
+            x += bw + px(6.0);
+            if !m.detail.is_empty() {
+                let dw = text_w(mem, &m.detail).min((right - x).max(0) / 2);
+                text(mem, &m.detail, C_HI, x, x + dw, top, bottom, DT_LEFT | DT_END_ELLIPSIS);
+                x += dw + gap;
+            }
+            // a divider before the hints
+            fill(mem, x, key_top + px(2.0), x + px(1.0).max(1), key_top + kh - px(2.0), C_KEY_LINE);
+            x += gap;
+        }
         let line = CreatePen(PS_SOLID, px(1.0).max(1), C_KEY_LINE);
         let lit_line = CreatePen(PS_SOLID, px(1.0).max(1), C_ACCENT_HI);
         let key_bg = CreateSolidBrush(C_KEY_BG);

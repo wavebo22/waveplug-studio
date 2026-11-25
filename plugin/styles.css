@@ -647,6 +647,13 @@ button, .ub { font: inherit; color: inherit; background: none; border: 0; paddin
 .hb-label { flex: none; }
 .hb-item.on .hb-key { border-color: var(--c-accent); color: var(--c-accent-hi); }
 .hb-item.on .hb-label { color: var(--c-text-hi); }
+/* 状态模式: what the panel is in the middle of, a filled badge before the hints (the helper's bar draws the same) */
+.hb-mode { flex: none; height: 16px; line-height: 16px; padding: 0 6px; margin-right: 6px; border-radius: var(--r); font-weight: 600; color: var(--c-text-hi); background: var(--c-info); }
+.hb-mode.embed { background: var(--c-accent); }
+.hb-mode.link { background: var(--c-link); }
+.hb-mode.web { background: #e0903a; }
+.hb-mode.warn { background: var(--c-warn); }
+.hb-mode-detail { flex: none; margin-right: 10px; color: var(--c-text-hi); }
 .hb-line { display: flex; align-items: center; height: 18px; min-width: 0; }
 .hb-state { display: flex; flex: 1 1 auto; min-width: 0; overflow: hidden; white-space: nowrap; }
 .hb-part { flex: none; margin-right: 8px; }
@@ -663,27 +670,10 @@ button, .ub { font: inherit; color: inherit; background: none; border: 0; paddin
 .hb-history-row.error { color: var(--c-err); }
 .hb-history-row.ok { color: var(--c-ok); }
 .hb-time { flex: none; color: var(--c-text-3); }
-/* 拖拽文件置入: shown over the panel while files from the file manager hover it; never takes the pointer */
-/* two zones: 上半 嵌入为智能对象 (deep teal), 下半 链接 (deep blue); the one under the pointer is lit, with the
-   big icon, the words under it; UXP gives no Alt during a drag, so position picks the mode */
-.lp-drop { display: none; position: absolute; left: 4px; top: 4px; right: 4px; bottom: 4px; flex-direction: column; gap: 4px; pointer-events: none; }
-.lp.dropping .lp-drop { display: flex; }
-/* one banner at the top (the list below shows the insertion line); the box stays panel-sized: the
-   helper's web-drop catcher is placed over it */
-.lp-drop-zone { flex: none; min-height: 0; box-sizing: border-box; padding: 6px 8px; display: flex; flex-direction: row; align-items: center; justify-content: flex-start; gap: 8px;
-  border: 2px dashed var(--c-line-strong); border-radius: var(--r-s); background: var(--c-scrim); color: var(--c-text-2); text-align: left; }
-.lp-drop-zone.embedded.on { border-color: var(--c-accent-hi); background: var(--c-pop); color: var(--c-text-hi); }
-.lp-drop-zone.linked.on { border-color: var(--c-link-ink); background: var(--c-pop); color: var(--c-text-hi); }
-.lp-drop-icon { display: flex; align-items: center; justify-content: center; width: 40px; height: 40px; border-radius: 50%; background: var(--c-surface-hi); color: var(--c-text-2); }
-.lp-drop-zone.on .lp-drop-icon { width: 32px; height: 32px; flex: none; }
-.lp-drop-text { min-width: 0; }
-.lp-drop-zone.embedded.on .lp-drop-icon { background: var(--c-accent); color: var(--c-accent-ink); }
-.lp-drop-zone.linked.on .lp-drop-icon { background: var(--c-link); color: var(--c-text-hi); }
-.lp-drop-title { font-size: var(--fs); font-weight: 600; }
-.lp-drop-zone.on .lp-drop-title { font-size: var(--fs); }
-.lp-drop-sub { font-size: var(--fs-s); max-width: 260px; }
-.lp-drop-zone.embedded.on .lp-drop-sub { color: var(--c-text-2); }
-.lp-drop-zone.linked.on .lp-drop-sub { color: var(--c-link-ink); }
+/* 拖拽文件置入: the panel-sized box the helper's web-drop catcher is placed over; it shows nothing
+   (what letting go does is the hint bar's 状态模式 badge) and never takes the pointer */
+.lp-drop { display: none; position: absolute; left: 4px; top: 4px; right: 4px; bottom: 4px; pointer-events: none; }
+.lp.dropping .lp-drop { display: block; }
 
 /* 图层列表: thumbnails and drag to reorder */
 .lt-row { user-select: none; }

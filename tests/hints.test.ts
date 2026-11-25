@@ -28,10 +28,13 @@ test("hints: drags say what letting go does where", () => {
   assert.equal(out[0].label, "正在准备 1/3 个文件…");
 });
 
-test("hints: file drops — embed at the line, Alt links", () => {
-  const items = hintItems({ mode: "fileDrag", fileDrag: { count: 2, fromWeb: false }, keys: { ...NO_KEYS, alt: true } });
-  assert.equal(items[0].label, "嵌入 2 个文件到插入线位置");
-  assert.deepEqual(items.filter(i => i.on).map(i => i.label), ["改为链接"]);
+test("hints: file drops — embed at the line, Alt held links", () => {
+  const embed = hintItems({ mode: "fileDrag", fileDrag: { count: 2, fromWeb: false }, keys: NO_KEYS });
+  assert.equal(embed[0].label, "嵌入 2 个文件到插入线位置");
+  assert.ok(embed.some(i => i.label === "按住改为链接" && !i.on));
+  const link = hintItems({ mode: "fileDrag", fileDrag: { count: 2, fromWeb: false }, keys: { ...NO_KEYS, alt: true } });
+  assert.equal(link[0].label, "链接 2 个文件到插入线位置");
+  assert.deepEqual(link.filter(i => i.on).map(i => i.label), ["放开 Alt 改为嵌入"]);
 });
 
 test("state: filters, modes and the helper", () => {

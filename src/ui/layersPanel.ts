@@ -4,7 +4,7 @@
 import type { Services } from "../app/services.ts";
 import { createLayerTreeView } from "./layerTree.ts";
 import { askIllustrator, linkOfLayer, pushBoardToIllustrator, pushToIllustrator } from "../app/illustratorBridge.ts";
-import { h, icon, replace } from "./dom.ts";
+import { h, replace } from "./dom.ts";
 import { type FileDropSpot, fileBaseName, fileDropResultText, webDrop, webDropResultText, pathsFromDropText, planFileDrop } from "../core/layers/fileDrop.ts";
 import { log } from "../app/log.ts";
 import { createHintBar, type HintBar } from "./hintBar.ts";
@@ -86,7 +86,8 @@ function mountFileDrop(panel: HTMLElement, dropEl: HTMLElement, svc: Services, s
     catching = ov.webCatch({ clientX: Number(e.clientX), clientY: Number(e.clientY), left: r.left, top: r.top, width: r.width, height: r.height, folder: webFolder });
     log("info", "web catch", JSON.stringify({ asked: catching, x: e.clientX, y: e.clientY, w: r.width, h: r.height }));
   };
-  /** the banner at the bottom of the panel: what letting go does, and where */
+  /** what letting go does, and where: the 状态模式 badge on the hint bar (the panel's own banner
+   *  overlapped the search field) */
   const paint = () => {
     const mode = alt ? "linked" : "embedded";
     const key = mode + hoverCount + fromWeb + (spot?.label ?? "");
@@ -95,11 +96,9 @@ function mountFileDrop(panel: HTMLElement, dropEl: HTMLElement, svc: Services, s
     hintBar.hints(hintItems({ mode: "fileDrag", fileDrag: { count: hoverCount, fromWeb }, keys: { ...NO_KEYS, alt } }));
     const n = hoverCount > 1 ? ` ${hoverCount} 个文件` : "";
     const where = spot ? `放到${spot.label}` : "放到当前图层上方";
-    const title = fromWeb ? "置入网页内容" : mode === "linked" ? `链接置入${n}` : `嵌入为智能对象${n}`;
-    const sub = fromWeb ? `图片嵌入、文字新建文字图层 · ${where}` : `${where} · ${mode === "linked" ? "松开 Alt：改为嵌入" : "按住 Alt：改为链接"}`;
-    replace(dropEl, h("div", { class: "lp-drop-zone " + mode + " on" },
-      h("div", { class: "lp-drop-icon" }, icon(fromWeb ? "image" : mode === "linked" ? "psLink" : "psSmart", 20)),
-      h("div", { class: "lp-drop-text" }, h("div", { class: "lp-drop-title" }, title), h("div", { class: "lp-drop-sub" }, sub))));
+    hintBar.mode(fromWeb ? { text: "置入网页内容", detail: `图片嵌入、文字新建文字图层 · ${where}`, tone: "web" }
+      : mode === "linked" ? { text: `链接${n}`, detail: where, tone: "link" }
+      : { text: `嵌入${n}`, detail: where, tone: "embed" });
   };
   /** the insertion line under the pointer (the list draws it) */
   const spotOf = (e: any) => { spot = view.fileDropSpot(e?.target ?? null, Number.isFinite(Number(e?.offsetY)) ? Number(e.offsetY) : undefined, alt && !fromWeb); };
@@ -108,6 +107,7 @@ function mountFileDrop(panel: HTMLElement, dropEl: HTMLElement, svc: Services, s
     hide = null; hoverCount = 0; shown = ""; fromWeb = false;
     if (keysAt) { svc.overlay?.watchKeys(false); keysAt = 0; }
     alt = false; lastOver = null;
+    hintBar.mode(null);
     view.clearFileDropSpot();
     if (catching) { catching = false; svc.overlay?.webCatch(null); }
     panel.classList.remove("dropping");

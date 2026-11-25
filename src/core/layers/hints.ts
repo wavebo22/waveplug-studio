@@ -69,7 +69,10 @@ function itemsFor(h: HintInput): HintItem[] {
     const f = h.fileDrag;
     if (f?.fromWeb) return [it(["松开"], "置入网页内容（图片嵌入为智能对象，文字新建文字图层）")];
     const n = f && f.count > 1 ? ` ${f.count} 个文件` : "";
-    return [it(["松开"], `嵌入${n}到插入线位置`), it(["Alt", "松开"], "改为链接"), it(["移出面板"], "取消")];
+    // the mode itself is the bar's badge (嵌入 / 链接); the hints say how to change it
+    return h.keys.alt
+      ? [it(["松开"], `链接${n}到插入线位置`), it(["Alt"], "放开 Alt 改为嵌入"), it(["移出面板"], "取消")]
+      : [it(["松开"], `嵌入${n}到插入线位置`), it(["Alt"], "按住改为链接"), it(["移出面板"], "取消")];
   }
   if (h.mode === "drag" && h.drag) return dragItems(h);
   return idleItems(h);

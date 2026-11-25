@@ -39,6 +39,19 @@ pub struct BarPart {
     pub kind: String,
 }
 
+/// 状态模式: what the panel is in the middle of (a file drop that embeds or links …), drawn as a
+/// coloured badge at the bar's left end, before the hints; `tone` picks the colour
+/// (embed / link / web / info / warn), `detail` follows it in that colour (where it goes …).
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+pub struct BarMode {
+    #[serde(default)]
+    pub text: String,
+    #[serde(default)]
+    pub detail: String,
+    #[serde(default)]
+    pub tone: String,
+}
+
 /// plugin → helper
 #[cfg_attr(not(windows), allow(dead_code))] // `view` is used by win.rs
 #[derive(Debug, Clone, Deserialize)]
@@ -159,6 +172,8 @@ pub enum Command {
         state: Vec<BarPart>,
         #[serde(default)]
         message: Option<BarPart>,
+        #[serde(default)]
+        mode: Option<BarMode>,
         #[serde(default)]
         view: Option<ScreenRect>,
     },
@@ -550,11 +565,17 @@ mod tests {
         assert!(matches!(parse(r#"{"type":"web-catch","on":false}"#), Some(Command::WebCatch { on: false, .. })));
         assert!(matches!(parse(r#"{"type":"watch-keys","on":true}"#), Some(Command::WatchKeys { on: true })));
         match parse(r#"{"type":"status-bar","on":true,"hints":[{"keys":["Ctrl","左键"],"label":"加选","on":true}],"state":[{"text":"已选 2 个图层","kind":"info"}],"message":{"text":"已删除","kind":"ok"}}"#) {
-            Some(Command::StatusBar { on: true, hints, state, message: Some(m), view: None }) => {
+            Some(Command::StatusBar { on: true, hints, state, message: Some(m), mode: None, view: None }) => {
                 assert_eq!(hints[0].keys, ["Ctrl", "左键"]);
                 assert!(hints[0].on);
                 assert_eq!(state[0].text, "已选 2 个图层");
                 assert_eq!(m.kind, "ok");
+            }
+            other => panic!("{other:?}"),
+        }
+        match parse(r#"{"type":"status-bar","on":true,"mode":{"text":"链接置入","detail":"放到「图层 9」下方","tone":"link"}}"#) {
+            Some(Command::StatusBar { mode: Some(m), .. }) => {
+                assert_eq!((m.text.as_str(), m.detail.as_str(), m.tone.as_str()), ("链接置入", "放到「图层 9」下方", "link"));
             }
             other => panic!("{other:?}"),
         }

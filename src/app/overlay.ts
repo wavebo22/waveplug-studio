@@ -8,7 +8,7 @@
 
 import { onDispose } from "../ui/dom.ts";
 import { log, setLogContext } from "./log.ts";
-import { EXPECTED_HELPER_VERSION, OVERLAY_URL, type ComfyManagerStatus, type ExternalDragEvent, type ExternalDragFile, HANG_SECONDS, type HangDoc, type MenuNode, type OverlayCommand, MENU_HELPER_VERSION, OPEN_APP_HELPER_VERSION, type ScreenRect, TRASH_HELPER_VERSION, WEBDROP_HELPER_VERSION, KEYS_HELPER_VERSION, STATUSBAR_HELPER_VERSION, TINT_HELPER_VERSION, type StatusBarHint, type StatusBarPart, type WebDropEvent, helperOutdated, parseOverlayEvent } from "../core/overlay/protocol.ts";
+import { EXPECTED_HELPER_VERSION, OVERLAY_URL, type ComfyManagerStatus, type ExternalDragEvent, type ExternalDragFile, HANG_SECONDS, type HangDoc, type MenuNode, type OverlayCommand, MENU_HELPER_VERSION, OPEN_APP_HELPER_VERSION, type ScreenRect, TRASH_HELPER_VERSION, WEBDROP_HELPER_VERSION, KEYS_HELPER_VERSION, STATUSBAR_HELPER_VERSION, TINT_HELPER_VERSION, type StatusBarHint, type StatusBarMode, type StatusBarPart, type WebDropEvent, helperOutdated, parseOverlayEvent } from "../core/overlay/protocol.ts";
 import { type Hub, createHub } from "../core/overlay/hub.ts";
 
 const RETRY_MS = 3000;
@@ -96,7 +96,7 @@ export interface Overlay {
   onExternalWanted(cb: () => void): () => void;
   /** 状态栏: what the bar along the canvas' bottom edge shows (null: no panel speaks for it). False
    *  when the helper isn't connected or is older than STATUSBAR_HELPER_VERSION (show it in the panel). */
-  statusBar(bar: { hints: StatusBarHint[]; state: StatusBarPart[]; message: StatusBarPart | null; view?: ScreenRect } | null): boolean;
+  statusBar(bar: { hints: StatusBarHint[]; state: StatusBarPart[]; message: StatusBarPart | null; mode?: StatusBarMode | null; view?: ScreenRect } | null): boolean;
   /** the helper draws the status bar (connected and new enough) */
   readonly statusBarReady: boolean;
   /** external-drag-cached / -files-copied / -finished from the helper */

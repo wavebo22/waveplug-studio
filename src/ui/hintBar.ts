@@ -7,13 +7,16 @@
 import { type HintItem, type HintMessage, type StatePart, messageLife, pushMessage } from "../core/layers/hints.ts";
 import { h, isShown, listen, replace, setShown } from "./dom.ts";
 import type { Overlay } from "../app/overlay.ts";
-import type { ScreenRect } from "../core/overlay/protocol.ts";
+import type { ScreenRect, StatusBarMode } from "../core/overlay/protocol.ts";
 
 export interface HintBar {
   el: HTMLElement;
   hints(items: HintItem[]): void;
   state(parts: StatePart[]): void;
   message(text?: string, kind?: HintMessage["kind"]): void;
+  /** 状态模式: what the panel is in the middle of (a file drop: 嵌入 / 链接 …), a coloured badge
+   *  before the hints; null takes it away. Every such state goes here, not into a banner of its own. */
+  mode(m: StatusBarMode | null): void;
   /** a state part with an action was clicked */
   onAction(cb: (action: NonNullable<StatePart["action"]>) => void): void;
   /** the canvas on screen (where the helper draws the bar) */
@@ -34,12 +37,13 @@ export function createHintBar(overlay?: Overlay): HintBar {
   // what the helper's bar shows, sent (deduplicated by the overlay) whenever a part changes
   let nHints: HintItem[] = [], nState: StatePart[] = [], nMessage: { text: string; kind: string } | null = null;
   let nView: ScreenRect | null = null, on = true, timer: ReturnType<typeof setTimeout> | null = null;
+  let nMode: StatusBarMode | null = null, lastItems: HintItem[] = [];
   const sync = () => {
     if (timer) return;
     timer = setTimeout(() => {
       timer = null;
       const native = !!overlay && (on
-        ? overlay.statusBar({ hints: nHints.map(i => ({ keys: i.keys, label: i.label, on: !!i.on })), state: nState.map(p => ({ text: p.text, kind: p.kind })), message: nMessage, ...(nView ? { view: nView } : {}) })
+        ? overlay.statusBar({ hints: nHints.map(i => ({ keys: i.keys, label: i.label, on: !!i.on })), state: nState.map(p => ({ text: p.text, kind: p.kind })), message: nMessage, mode: nMode, ...(nView ? { view: nView } : {}) })
         : overlay.statusBar(null));
       // the panel's own lines only while the helper can't draw the bar
       setShown(el, !native);
@@ -56,9 +60,14 @@ export function createHintBar(overlay?: Overlay): HintBar {
     if (sig === lastHints) return;
     lastHints = sig;
     nHints = items; sync();
-    replace(hintsEl, ...items.map(i => h("span", { class: "hb-item" + (i.on ? " on" : "") },
+    lastItems = items;
+    drawHints();
+  }
+  function drawHints() {
+    const badge = nMode ? [h("span", { class: "hb-mode " + nMode.tone }, nMode.text), ...(nMode.detail ? [h("span", { class: "hb-mode-detail" }, nMode.detail)] : [])] : [];
+    replace(hintsEl, ...badge, ...lastItems.map(i => h("span", { class: "hb-item" + (i.on ? " on" : "") },
       ...i.keys.map(key), h("span", { class: "hb-label" }, i.label))));
-    hintsEl.title = items.map(i => `${i.keys.join(" + ")}：${i.label}`).join("\n");
+    hintsEl.title = (nMode ? [`${nMode.text}${nMode.detail ? "：" + nMode.detail : ""}`] : []).concat(lastItems.map(i => `${i.keys.join(" + ")}：${i.label}`)).join("\n");
   }
   function state(parts: StatePart[]) {
     const sig = parts.map(p => p.kind + ":" + p.text).join("|");
@@ -98,6 +107,10 @@ export function createHintBar(overlay?: Overlay): HintBar {
   sync();
   return {
     el, hints, state, message, onAction: cb => { actions.push(cb); },
+    mode: m => {
+      if (JSON.stringify(m) === JSON.stringify(nMode)) return;
+      nMode = m; sync(); drawHints();
+    },
     view: v => { if (JSON.stringify(v) !== JSON.stringify(nView)) { nView = v; sync(); } },
     active: v => { if (v !== on) { on = v; sync(); } },
   };

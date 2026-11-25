@@ -162,8 +162,8 @@ fn on_command(c: Command) {
             }
             return;
         }
-        Command::StatusBar { on, hints, state, message, view } => {
-            crate::monitor::set_bar(on.then(|| crate::monitor::Bar { hints: hints.clone(), state: state.clone(), message: message.clone() }));
+        Command::StatusBar { on, hints, state, message, mode, view } => {
+            crate::monitor::set_bar(on.then(|| crate::monitor::Bar { hints: hints.clone(), state: state.clone(), message: message.clone(), mode: mode.clone() }));
             if view.is_some() {
                 crate::monitor::set_view(*view);
             }

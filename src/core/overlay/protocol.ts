@@ -80,7 +80,7 @@ export type OverlayCommand =
   | { type: "web-catch"; on: false }
   /** 状态栏 (helper ≥ STATUSBAR_HELPER_VERSION): the WaveLayer panel's hints, state and last result
    *  on the bar along the canvas' bottom edge (the 性能监视 meters sit at its right) */
-  | { type: "status-bar"; on: boolean; hints: StatusBarHint[]; state: StatusBarPart[]; message: StatusBarPart | null; view?: ScreenRect }
+  | { type: "status-bar"; on: boolean; hints: StatusBarHint[]; state: StatusBarPart[]; message: StatusBarPart | null; mode?: StatusBarMode | null; view?: ScreenRect }
   /** 悬停高亮 (helper ≥ TINT_HELPER_VERSION): the hovered layer's shape (`width` × `height` coverage,
    *  base64) stretched over `rect` and tinted; no rect: take it away */
   | { type: "hover-tint"; rect: ScreenRect | null; clip?: ScreenRect; width?: number; height?: number; alpha?: string }
@@ -241,6 +241,11 @@ export const TINT_HELPER_VERSION = "0.20.0";
 export const STATUSBAR_HELPER_VERSION = "0.19.0";
 export interface StatusBarHint { keys: string[]; label: string; on: boolean }
 export interface StatusBarPart { text: string; kind: string }
+/** 状态模式: what the panel is in the middle of, a coloured badge at the bar's left end (嵌入 / 链接 …);
+ *  `detail` follows it (where it goes); `tone` picks the colour */
+export interface StatusBarMode { text: string; detail: string; tone: "embed" | "link" | "web" | "info" | "warn" }
+/** status-bar `mode` (the badge) needs at least this helper */
+export const BARMODE_HELPER_VERSION = "0.21.0";
 
 /** `version` is older than EXPECTED_HELPER_VERSION (numeric x.y.z; unparsable counts as older). */
 export function helperOutdated(version: string | null, expected = EXPECTED_HELPER_VERSION): boolean {
