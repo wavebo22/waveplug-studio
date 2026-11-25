@@ -348,6 +348,9 @@ mod imp {
     static SCALE: AtomicU32 = AtomicU32::new(100);
     /// its height on screen while up, 0 when not (the completion notice goes above it)
     static HEIGHT_PX: AtomicI32 = AtomicI32::new(0);
+    /// its height when it was last up: kept for it while it is away for a moment (Photoshop in
+    /// the background), so the windows above it don't drop down and jump back (layout.rs)
+    static LAST_PX: AtomicI32 = AtomicI32::new(0);
     static HWND_SELF: AtomicIsize = AtomicIsize::new(0);
     static COMFY: Mutex<Option<String>> = Mutex::new(None);
     static VIEW: Mutex<Option<ScreenRect>> = Mutex::new(None);
@@ -414,9 +417,13 @@ mod imp {
         }
     }
 
+    /// The strip it takes along the canvas' bottom: its height while it is up, and also while it
+    /// is away only because Photoshop is (it still has something to show).
     pub fn bar_height() -> i32 {
         if VISIBLE.load(Ordering::SeqCst) {
             HEIGHT_PX.load(Ordering::SeqCst)
+        } else if wanted() {
+            LAST_PX.load(Ordering::SeqCst)
         } else {
             0
         }
@@ -480,6 +487,7 @@ mod imp {
         }
         *placed = want;
         HEIGHT_PX.store(want.3, Ordering::SeqCst);
+        LAST_PX.store(want.3, Ordering::SeqCst);
         VISIBLE.store(true, Ordering::SeqCst);
         InvalidateRect(h, null(), 0);
     }

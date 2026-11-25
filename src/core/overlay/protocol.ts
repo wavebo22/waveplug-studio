@@ -22,6 +22,8 @@ export type OverlayCommand =
   /** put surface `panel` up, placed against `view` (Photoshop's canvas on screen) */
   | { type: "show"; panel: string; view: ScreenRect | null }
   | { type: "hide"; panel: string }
+  /** the canvas moved on screen while nothing else changed: the helper moves every window */
+  | { type: "canvas"; view: ScreenRect }
   /** the surface's state; `rev` only grows per surface, so the helper drops anything older */
   | { type: "state"; panel: string; rev: number; sections: Record<string, unknown> }
   /** a notice in the bottom-right corner of `view` (shared by every surface; shown even while

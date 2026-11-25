@@ -85,6 +85,8 @@ export interface PsHost {
   selectionBounds(docId: number): Promise<Rect | null>;
   /** Where the document's canvas is on screen (for the floating bar, native/overlay); Photoshop only. */
   canvasView?(docId: number): Promise<CanvasView | null>;
+  /** Photoshop's raw view bounds only (one cheap read), to notice the canvas moving */
+  viewBounds?(docId: number): Promise<string | null>;
   /** Exact grayscale pixels of the active selection (not just its rectangular bounds). */
   selectionMask(docId: number, rect: Rect): Promise<Pixels>;
   /** The fill group the active layer is (or is inside), else null. */

@@ -210,6 +210,13 @@ fn on_command(c: Command) {
         Command::Hide { panel } if panel == "generate" => crate::monitor::set_view(None),
         _ => {}
     }
+    // the canvas moved: the status bar and every window's place follow, off the UI thread
+    if let Command::Canvas { view } = c {
+        crate::monitor::set_view(Some(view));
+        #[cfg(windows)]
+        crate::win::canvas_moved(view);
+        return;
+    }
     // the hover frame is its own window: nothing for the UI thread to draw
     if let Command::HoverFrame { rect, clip } = c {
         crate::frame::set(rect, clip);
@@ -577,6 +584,7 @@ impl Host {
             match c {
                 Command::ManageComfy { .. } => {} // handled on the server thread, never enters the UI queue
                 Command::HoverFrame { .. } => {} // frame.rs, on its own thread
+                Command::Canvas { .. } => {}     // win.rs relayout, on the server thread
                 Command::HoverTint { .. } => {}  // frame.rs, on its own thread
                 Command::MenuOpen { .. } | Command::MenuClose { .. } => {} // menu.rs, on its own thread
                 Command::RestartHelper => {}     // life.rs, on its own thread

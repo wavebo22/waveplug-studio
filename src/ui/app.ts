@@ -830,6 +830,29 @@ export function mountApp(root: HTMLElement, svc: Services) {
     };
   }
 
+  /** The canvas moves on screen without any event the plugin hears (a docked panel beside it
+   *  widened or folded, the window resized): look at Photoshop's view bounds a few times a
+   *  second — one cheap read — and when they changed, tell the helper the new canvas so every
+   *  external window follows at once (native/overlay/src/layout.rs). */
+  function watchCanvas() {
+    let busy = false, last = "";
+    setInterval(async () => {
+      if (busy || !overlay?.connected || !doc || !svc.host.viewBounds || !svc.host.canvasView) return;
+      busy = true;
+      try {
+        const id = doc.id;
+        const key = await svc.host.viewBounds(id);
+        if (!key || key === last) return;
+        const first = !last;
+        last = key;
+        if (first) return; // where it was already sent with the windows' show
+        const v = await svc.host.canvasView(id);
+        if (v) { overlay.canvasMoved(v.view); log("info", "canvas moved", JSON.stringify(v.view)); }
+      } catch { /* Photoshop busy (a modal step): next time */ }
+      finally { busy = false; }
+    }, 200);
+  }
+
   function startOverlay() {
     overlay = connectOverlay({
       launch: svc.launchOverlay,
@@ -844,6 +867,7 @@ export function mountApp(root: HTMLElement, svc: Services) {
     if (svc.bridgePs) attachIllustratorBridge(overlay, svc.bridgePs, svc.host, (text, kind) => setStatus(text, kind));
     syncMonitor();
     void syncHangGuard();
+    watchCanvas();
     overlay.onConnected(() => {
       syncComfyManager(settings.comfyAutoStartWithPhotoshop !== false);
     });

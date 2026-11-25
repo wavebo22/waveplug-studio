@@ -317,6 +317,12 @@ export class UxpHost implements PsHost {
     return { left: v(s.left), top: v(s.top), right: v(s.right), bottom: v(s.bottom) };
   }
 
+  async viewBounds(docId: number): Promise<string | null> {
+    const [vi] = await play([{ _obj: "get", _target: [{ _property: "viewInfo" }, { _ref: "document", _id: docId }], _options: DONT }]);
+    const b = vi?.viewInfo?.activeView?.globalBounds;
+    return b ? `${b.left},${b.top},${b.right},${b.bottom}` : null;
+  }
+
   async canvasView(docId: number): Promise<CanvasView | null> {
     const doc = { _ref: "document", _id: docId };
     const get = (p: string) => ({ _obj: "get", _target: [{ _property: p }, doc], _options: DONT });

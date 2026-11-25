@@ -1429,6 +1429,23 @@ fn set_canvas(r: RECT) {
     }
 }
 
+/// The plugin saw the canvas move (`canvas` message): every window follows now.
+pub fn canvas_moved(view: ScreenRect) {
+    set_canvas(view_rect(view));
+    if let Ok(mut v) = VARIANT_VIEW.lock() {
+        if v.is_some() {
+            *v = Some(view);
+        }
+    }
+    if let Ok(mut v) = SHELF_VIEW.lock() {
+        if v.is_some() {
+            *v = Some(view);
+        }
+    }
+    log::line(format!("canvas moved to {},{} – {},{}", view.left, view.top, view.right, view.bottom));
+    relayout();
+}
+
 /// The canvas for Photoshop's window at `now`, from the canvas and window of the last report.
 fn follow_canvas(canvas: RECT, was: RECT, now: RECT) -> RECT {
     RECT {
