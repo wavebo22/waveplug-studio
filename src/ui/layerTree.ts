@@ -6,6 +6,7 @@
 // stay smooth.
 
 import { crumb, log } from "../app/log.ts";
+import { costed } from "../app/inputCost.ts";
 import { resultText } from "../core/layers/smart.ts";
 import { ThumbCache, thumbRetryDelay } from "../core/layers/thumbs.ts";
 import { activateLayerDragLifecycle, cancelLayerDragLifecycle, createLayerDragLifecycle, releaseLayerDragLifecycle, routeLayerDragRelease, updateLayerDragLifecycle, type LayerDragLifecycle, type LayerDragRegion } from "../core/layers/drag.ts";
@@ -859,12 +860,19 @@ export function createLayerTreeView(tree: LayerTree, status: Status, tools?: Lay
   list.append(inner, empty, sbar);
   list.addEventListener("mouseleave", () => { hideFrame(); frameView = null; hoverEl?.classList.remove("hover"); hoverEl = null; });
   // a real pointer move over the list: the row under it may be framed (frameAt)
-  list.addEventListener("mousemove", e => {
-    pointerMovedAt = Date.now();
+  // A fast mouse sends hundreds of moves a second: this does almost nothing for most of them (the
+  // row lookup at most every 40 ms), or the moves crowd out the panel's timers and Photoshop's
+  // commands (11-25: seconds-long stalls with nothing else running).
+  let rowLookAt = 0;
+  list.addEventListener("mousemove", costed(e => {
+    const t = Date.now();
+    pointerMovedAt = t;
+    if (frameId !== null || t - rowLookAt < 40) return;
+    rowLookAt = t;
     // after a scroll, the row under a pointer that starts moving again is framed at once
     const row = (e.target as HTMLElement | null)?.closest?.(".lt-row");
-    if (row && frameId === null) { const r = pool.find(p => p.el === row); if (r && !r.sub) frameAt(r.id); }
-  });
+    if (row) { const r = pool.find(p => p.el === row); if (r && !r.sub) frameAt(r.id); }
+  }));
   const pool: RowEl[] = [];
 
   function makeRow(): RowEl {
@@ -2690,7 +2698,7 @@ export function createLayerTreeView(tree: LayerTree, status: Status, tools?: Lay
 
   // Capture phase is deliberate: a child row, chip, native overlay, or UXP widget cannot swallow
   // the move/release before the drag controller sees it.
-  listen(window, "mousemove", handleDragMove, true);
+  listen(window, "mousemove", costed(handleDragMove), true);
 
   // The helper saw the drag card over another program with nothing prepared: this panel never saw
   // the pointer leave (a quick throw out of Photoshop sends it no move outside the list), so the
@@ -3695,13 +3703,16 @@ export function createLayerTreeView(tree: LayerTree, status: Status, tools?: Lay
   const keysOf = (e: any): HeldKeys => ({ ctrl: !!(e.ctrlKey || e.metaKey), shift: !!e.shiftKey, alt: !!e.altKey });
   if (hintBar) {
     hintBar.onAction(a => { if (a === "clearFilters") { resetFilters(); render(); } });
-    listen(window, "mousemove", e => {
-      const z = drag?.active ? { zone: hintZone, id: hintLayer } : zoneAt(e.target as Element | null);
+    // the zone changes only where the pointer enters another element: mouseover, not every move
+    // (a drag updates its own hints as it moves)
+    listen(window, "mouseover", costed((e: Event) => {
+      if (drag?.active) return;
+      const z = zoneAt(e.target as Element | null);
       const k = keysOf(e);
-      if (z.zone === hintZone && z.id === hintLayer && k.ctrl === heldKeys.ctrl && k.shift === heldKeys.shift && k.alt === heldKeys.alt && !drag?.active) return;
+      if (z.zone === hintZone && z.id === hintLayer && k.ctrl === heldKeys.ctrl && k.shift === heldKeys.shift && k.alt === heldKeys.alt) return;
       hintZone = z.zone; hintLayer = z.id; heldKeys = k;
       updateHints();
-    }, true);
+    }), true);
     for (const type of ["keydown", "keyup"]) listen(document, type, e => {
       const k = keysOf(e);
       if (k.ctrl === heldKeys.ctrl && k.shift === heldKeys.shift && k.alt === heldKeys.alt) return;

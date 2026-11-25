@@ -1,6 +1,7 @@
 // Photoshop UXP implementation, Generative-Fill style: one layer group per fill, masked by the
 // selection, one cropped pixel layer per variation inside it.
 
+import { inputCost } from "../app/inputCost.ts";
 import { encodePng, type Pixels, withPlacementHints } from "../core/image/png.ts";
 import { type Rect, nonZeroBounds, rectH, rectW } from "../core/image/region.ts";
 import { placeGray } from "../core/image/compose.ts";
@@ -107,9 +108,10 @@ function probeStalls(): void {
     if (late > 300 && stallLines < 80) {
       stallLines++;
       const busy = [...inflight.values()].map(x => `${x.name.replace(/^WavePlug\s*/, "")}:${now - x.at}ms`);
-      log("info", "panel stalled", late, "ms", JSON.stringify({ inflight: busy.slice(0, 6), input: { ...seen } }));
+      log("info", "panel stalled", late, "ms", JSON.stringify({ inflight: busy.slice(0, 6), input: { ...seen }, handlers: { ...inputCost } }));
     }
     seen.move = seen.wheel = seen.down = seen.key = 0;
+    inputCost.ms = inputCost.calls = 0;
   }, 100);
   t?.unref?.(); // never keeps a test run alive
 }
