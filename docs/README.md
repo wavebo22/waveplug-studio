@@ -12,6 +12,7 @@
 | 2e | [`UI_DESIGN_SYSTEM.md`](UI_DESIGN_SYSTEM.md) | UI 规范 v0 草案：token、组件规则、UXP 限制、现状审计、迁移步骤 | 写或改任何界面样式之前 |
 | 2f | [`../native/overlay/HANDOFF.md`](../native/overlay/HANDOFF.md) | 外附介面（`native/overlay`，Rust 写的 Windows 小程序；目前是外置生成面板）：分层架构、协议、新增一个外附介面的步骤、PS 画布坐标、阶段进度 | 碰 `native/overlay` 或插件的 overlay 代码之前 |
 | 2g | [`WAVELIBRARY_SPEC.md`](WAVELIBRARY_SPEC.md) | WaveLibrary 项目素材管理系统的需求与设计 V1.1：固定名字的 `WaveLibrary/` 文件夹、托管区 / 自由区、智能对象外置化、外部文件变体。**还没实现，动工前先做第 13 节的 POC** | 做素材库、改变体方案之前 |
+| 2h | [`CODE_AUDIT.md`](CODE_AUDIT.md) | 代码检查记录：找到的 bug、冗余代码、过时文档，修了哪些 | 清理代码、修 bug 之前 |
 | 3 | [`DEVELOPMENT.md`](DEVELOPMENT.md) | 构建、打包、用 UPIA 安装、开发版、日志位置、已确认的 UXP 行为 | 要打包、安装或排查环境时 |
 | — | [`../README.md`](../README.md) | 面向用户的使用说明（1.0 时写的，部分功能没写进去） | 想知道用户看到什么时 |
 | — | [`../CHANGELOG.md`](../CHANGELOG.md) | 已发布版本的改动 | 发版时 |
