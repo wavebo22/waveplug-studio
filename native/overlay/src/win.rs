@@ -221,6 +221,19 @@ mod activation_tests {
     }
 
     #[test]
+    fn the_canvas_keeps_its_distance_to_photoshops_edges_while_the_window_is_resized() {
+        let r = |l, t, rr, b| RECT { left: l, top: t, right: rr, bottom: b };
+        let canvas = r(60, 120, 1500, 1000);
+        let was = r(0, 0, 1800, 1050);
+        // wider and taller: the right panels and the bottom move with the edges
+        let c = follow_canvas(canvas, was, r(0, 0, 2000, 1200));
+        assert_eq!((c.left, c.top, c.right, c.bottom), (60, 120, 1700, 1150));
+        // moved: everything shifts
+        let c = follow_canvas(canvas, was, r(100, 50, 1900, 1100));
+        assert_eq!((c.left, c.top, c.right, c.bottom), (160, 170, 1600, 1050));
+    }
+
+    #[test]
     fn every_window_follows_one_photoshop_rule() {
         // Photoshop or a window that goes with it in front, and Photoshop not minimised
         for front in ["photoshop", "overlay", "variants", "workbench"] {
@@ -1398,12 +1411,79 @@ static SHELF_LAYOUT_CAP: AtomicI32 = AtomicI32::new(i32::MAX);
 /// the gap between two windows, at 96 DPI
 const GAP: f64 = 8.0;
 
+/// The canvas as the plugin last reported it, and Photoshop's window at that moment: while the
+/// window is resized or moved, the canvas keeps its distance to the window's edges (the toolbar
+/// and the docked panels move with them), so it can be followed without asking the plugin —
+/// which can't answer while Photoshop runs its resize loop.
+static CANVAS_BASE: Mutex<Option<(RECT, RECT)>> = Mutex::new(None);
+
 fn set_canvas(r: RECT) {
     if r.right > r.left && r.bottom > r.top && r.left > -30000 && r.top > -30000 {
         if let Ok(mut c) = CANVAS.lock() {
             *c = Some(r);
         }
+        let ps = monitor_photoshop();
+        if let Ok(mut base) = CANVAS_BASE.lock() {
+            *base = photoshop_window_ready(ps).then(|| window_rect(ps)).flatten().map(|w| (r, w));
+        }
     }
+}
+
+/// The canvas for Photoshop's window at `now`, from the canvas and window of the last report.
+fn follow_canvas(canvas: RECT, was: RECT, now: RECT) -> RECT {
+    RECT {
+        left: now.left + (canvas.left - was.left),
+        top: now.top + (canvas.top - was.top),
+        right: now.right - (was.right - canvas.right),
+        bottom: now.bottom - (was.bottom - canvas.bottom),
+    }
+}
+
+/// Every frame the screen shows (DwmFlush): when Photoshop's window has moved or changed size
+/// since the canvas was reported, work the canvas out from it and put every window in place
+/// at once — while the user drags, not only after the plugin answers the view request.
+pub fn follow_photoshop() {
+    thread::spawn(|| {
+        let mut last: Option<RECT> = None;
+        loop {
+            if unsafe { windows_sys::Win32::Graphics::Dwm::DwmFlush() } < 0 {
+                thread::sleep(Duration::from_millis(16));
+            }
+            let Some((canvas, was)) = CANVAS_BASE.lock().ok().and_then(|b| *b) else {
+                thread::sleep(Duration::from_millis(100));
+                continue;
+            };
+            let ps = monitor_photoshop();
+            if !photoshop_window_ready(ps) {
+                thread::sleep(Duration::from_millis(100));
+                continue;
+            }
+            let Some(now) = window_rect(ps) else { continue };
+            let same = |a: RECT, b: RECT| (a.left, a.top, a.right, a.bottom) == (b.left, b.top, b.right, b.bottom);
+            if last.is_some_and(|l| same(l, now)) {
+                continue;
+            }
+            last = Some(now);
+            let followed = if same(was, now) { canvas } else { follow_canvas(canvas, was, now) };
+            if followed.right - followed.left < 100 || followed.bottom - followed.top < 100 {
+                continue;
+            }
+            let changed = CANVAS.lock().map(|mut c| {
+                let differs = !c.is_some_and(|old| same(old, followed));
+                *c = Some(followed);
+                differs
+            }).unwrap_or(false);
+            if changed {
+                crate::monitor::set_view(Some(ScreenRect {
+                    left: followed.left as f64,
+                    top: followed.top as f64,
+                    right: followed.right as f64,
+                    bottom: followed.bottom as f64,
+                }));
+                relayout();
+            }
+        }
+    });
 }
 
 fn view_rect(v: ScreenRect) -> RECT {
@@ -1470,9 +1550,27 @@ pub fn relayout() {
     // 3: the variant rail and the workbench end above the panel in their column
     let mut wake = false;
     if VARIANT_SHOWN.load(Ordering::SeqCst) {
-        if let Ok(g) = VARIANT_GEOMETRY.lock() {
-            let cap = crate::layout::height_limit(work, m, gap, g.y, (g.x, g.x + g.w), generate, min_h);
+        // top-left of the canvas
+        let anchor = (work.0 + m, work.1 + m);
+        let moved = VARIANT_GEOMETRY.lock().ok().and_then(|mut g| {
+            let cap = crate::layout::height_limit(work, m, gap, anchor.1, (anchor.0, anchor.0 + g.w), generate, min_h);
             wake |= VARIANT_LAYOUT_CAP.swap(cap, Ordering::SeqCst) != cap;
+            ((g.x, g.y) != anchor).then(|| {
+                g.x = anchor.0;
+                g.y = anchor.1;
+                anchor
+            })
+        });
+        if let Some((x, y)) = moved {
+            if let Ok(mut last) = VARIANT_LAST_ANCHOR.lock() {
+                *last = Some((x, y));
+            }
+            let h = find(VARIANTS_TITLE);
+            if !h.is_null() && !VARIANT_PARKED.load(Ordering::SeqCst) {
+                unsafe {
+                    SetWindowPos(h, null_mut(), x, y, 0, 0, SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE | SWP_ASYNCWINDOWPOS);
+                }
+            }
         }
     }
     if SHELF_SHOWN.load(Ordering::SeqCst) {
@@ -1480,9 +1578,12 @@ pub fn relayout() {
         let owner = SHELF_OWNER.load(Ordering::SeqCst) as HWND;
         if let Some((x, y, w, _)) = shelf_rect_for(view, owner) {
             let cap = crate::layout::height_limit(work, m, gap, y, (x, x + w), generate, min_h);
-            if SHELF_LAYOUT_CAP.swap(cap, Ordering::SeqCst) != cap && !SHELF_PARKED.load(Ordering::SeqCst) {
-                let h = shelf_hwnd();
-                if !h.is_null() {
+            let capped = SHELF_LAYOUT_CAP.swap(cap, Ordering::SeqCst) != cap;
+            let h = shelf_hwnd();
+            if !h.is_null() && !SHELF_PARKED.load(Ordering::SeqCst) {
+                // the canvas moved (shelf_rect_for follows it) or the cap changed
+                let at = window_rect(h).map(|r| (r.left, r.top));
+                if capped || at != shelf_rect_for(view, owner).map(|r| (r.0, r.1)) {
                     shelf_put(h);
                 }
             }
@@ -2075,6 +2176,7 @@ pub fn drag_finished() {
 /// Every 250 ms while a surface is up: if Photoshop's window moved or changed size, ask the
 /// plugin for the canvas again (only it knows where the canvas is inside the window).
 pub fn watch() {
+    follow_photoshop();
     thread::spawn(|| {
         let mut front = "";
         let mut photoshop_process: isize = 0;
@@ -2298,9 +2400,11 @@ pub fn shelf_window_exists() -> bool {
 
 /// Screen rectangle (physical px) for the workbench at the canvas top-right.
 fn shelf_rect_for(view: Option<ScreenRect>, owner: HWND) -> Option<(i32, i32, i32, i32)> {
-    let (right, top) = view
+    // the canvas the layout follows (also while Photoshop's window is being resized)
+    let (right, top) = CANVAS.lock().ok().and_then(|c| *c).map(|c| (c.right, c.top))
+        .or_else(|| view
         .filter(|v| v.right > v.left && v.bottom > v.top && v.left > -30000.0 && v.top > -30000.0)
-        .map(|v| (v.right.round() as i32, v.top.round() as i32))
+        .map(|v| (v.right.round() as i32, v.top.round() as i32)))
         .or_else(|| window_rect(owner).map(|r| (r.right, r.top)))?;
     let k = dpi_at(POINT { x: right - 1, y: top }) / 96.0;
     let (lw, lh) = SHELF_SIZE.lock().map(|s| *s).unwrap_or((crate::panel::shelf::WIDTH, 200.0));
