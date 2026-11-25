@@ -33,7 +33,9 @@ export async function play(descriptors: object[]): Promise<any[]> {
     const o = (d as any)._options;
     return o?.dialogOptions === "display" ? d : { ...d, _options: { ...o, dialogOptions: "silent" } };
   });
-  const out: any[] = await ps().action.batchPlay(quiet, {});
+  const done = track("play " + descriptors.map(d => (d as any)?._obj).join(","));
+  let out: any[];
+  try { out = await ps().action.batchPlay(quiet, {}); } finally { done(); }
   out?.forEach?.((r, i) => {
     const d = descriptors[i] as any;
     if (r?._obj === "error" && d?._obj !== "get" && r.result !== -128) {
@@ -59,8 +61,10 @@ export async function modal<T>(name: string, fn: (ctx: any) => Promise<T>, opts:
   probeStalls();
   const t0 = Date.now();
   let started = 0;
+  const done = track("modal " + name);
   try { return await ps().core.executeAsModal((ctx: any) => { started = Date.now(); return fn(ctx); }, { commandName: name, ...opts }); }
   finally {
+    done();
     const end = Date.now();
     if (end - t0 > 250) log("info", "modal slow", name, JSON.stringify({ waitMs: (started || end) - t0, runMs: started ? end - started : 0 }));
     for (const cb of modalDone) { try { cb(name); } catch (e) { log("warn", "modal done", e); } }
@@ -75,15 +79,37 @@ let directRefused = false;
 
 // 面板卡顿探针: a timer due every 100 ms that comes late means this plugin's own script was busy
 // (or Photoshop didn't run it) for that long; logged with the slow commands to tell the two apart.
+// 11-25: during 7 s stalls the panel still handled clicks (logged) while its timers and modal
+// commands waited, so each stall also says what was in flight and what input came meanwhile.
 let stallProbe = false, stallLines = 0;
+const inflight = new Map<number, { name: string; at: number }>();
+let inflightSeq = 0;
+const seen = { move: 0, wheel: 0, down: 0, key: 0 };
+function track(name: string): () => void {
+  const id = ++inflightSeq;
+  inflight.set(id, { name, at: Date.now() });
+  return () => { inflight.delete(id); };
+}
 function probeStalls(): void {
   if (stallProbe) return;
   stallProbe = true;
+  try {
+    const w: any = typeof window !== "undefined" ? window : null;
+    w?.addEventListener?.("mousemove", () => { seen.move++; }, true);
+    w?.addEventListener?.("wheel", () => { seen.wheel++; }, true);
+    w?.addEventListener?.("mousedown", () => { seen.down++; }, true);
+    w?.addEventListener?.("keydown", () => { seen.key++; }, true);
+  } catch { /* no window in tests */ }
   let last = Date.now();
   const t: any = setInterval(() => {
     const now = Date.now(), late = now - last - 100;
     last = now;
-    if (late > 300 && stallLines < 60) { stallLines++; log("info", "panel stalled", late, "ms"); }
+    if (late > 300 && stallLines < 80) {
+      stallLines++;
+      const busy = [...inflight.values()].map(x => `${x.name.replace(/^WavePlug\s*/, "")}:${now - x.at}ms`);
+      log("info", "panel stalled", late, "ms", JSON.stringify({ inflight: busy.slice(0, 6), input: { ...seen } }));
+    }
+    seen.move = seen.wheel = seen.down = seen.key = 0;
   }, 100);
   t?.unref?.(); // never keeps a test run alive
 }
