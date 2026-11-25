@@ -26,7 +26,7 @@ import { RATIOS, createExpandEditor } from "./expandEditor.ts";
 import { createToolsView } from "./tools.ts";
 import { type Overlay, connectOverlay } from "../app/overlay.ts";
 import type { PanelParam } from "../core/overlay/generatePanel.ts";
-import { EXPECTED_HELPER_VERSION, HANG_HELPER_VERSION, HANG_SECONDS, MONITOR_HELPER_VERSION, OPEN_APP_HELPER_VERSION, appSettingsOf, hangDocs, helperOutdated } from "../core/overlay/protocol.ts";
+import { OPEN_APP_HELPER_VERSION, appSettingsOf, hangDocs } from "../core/overlay/protocol.ts";
 import { attachGenerateSurface } from "./generateSurface.ts";
 import { attachIllustratorBridge } from "../app/illustratorBridge.ts";
 import { attachVariantsSurface } from "./variantsSurface.ts";

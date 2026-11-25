@@ -1,7 +1,6 @@
 // Photoshop UXP implementation, Generative-Fill style: one layer group per fill, masked by the
 // selection, one cropped pixel layer per variation inside it.
 
-import { inputCost } from "../app/inputCost.ts";
 import { encodePng, type Pixels, withPlacementHints } from "../core/image/png.ts";
 import { type Rect, nonZeroBounds, rectH, rectW } from "../core/image/region.ts";
 import { placeGray } from "../core/image/compose.ts";
@@ -72,20 +71,12 @@ export async function modal<T>(name: string, fn: (ctx: any) => Promise<T>, opts:
   }
 }
 
-/** Runs a command that may not need a modal scope (selecting layers) straight away, without
- *  waiting for Photoshop to hand one out: on 11-24 a selection waited 2–7 s for its modal scope
- *  while running 20–110 ms. If Photoshop refuses it outside a modal scope, it runs in one from
- *  then on. The modal-done listeners hear it either way. */
-let directRefused = false;
-
-// 面板卡顿探针: a timer due every 100 ms that comes late means this plugin's own script was busy
-// (or Photoshop didn't run it) for that long; logged with the slow commands to tell the two apart.
-// 11-25: during 7 s stalls the panel still handled clicks (logged) while its timers and modal
-// commands waited, so each stall also says what was in flight and what input came meanwhile.
+// 面板卡顿探针: a timer due every 200 ms that comes late means the plugin's script (all its panels
+// share one) didn't get to run for that long; logged with the Photoshop commands then in flight.
+// 11-25 it found seconds-long stalls from input handlers flooded by a fast mouse (layerTree.ts).
 let stallProbe = false, stallLines = 0;
 const inflight = new Map<number, { name: string; at: number }>();
 let inflightSeq = 0;
-const seen = { move: 0, wheel: 0, down: 0, key: 0 }; // move: mouseovers
 function track(name: string): () => void {
   const id = ++inflightSeq;
   inflight.set(id, { name, at: Date.now() });
@@ -94,44 +85,17 @@ function track(name: string): () => void {
 function probeStalls(): void {
   if (stallProbe) return;
   stallProbe = true;
-  try {
-    const w: any = typeof window !== "undefined" ? window : null;
-    // not mousemove: a listener on every move is what crowded the plugin out (11-25)
-    w?.addEventListener?.("mouseover", () => { seen.move++; }, true);
-    w?.addEventListener?.("wheel", () => { seen.wheel++; }, true);
-    w?.addEventListener?.("mousedown", () => { seen.down++; }, true);
-    w?.addEventListener?.("keydown", () => { seen.key++; }, true);
-  } catch { /* no window in tests */ }
   let last = Date.now();
   const t: any = setInterval(() => {
-    const now = Date.now(), late = now - last - 100;
+    const now = Date.now(), late = now - last - 200;
     last = now;
-    if (late > 300 && stallLines < 80) {
+    if (late > 400 && stallLines < 40) {
       stallLines++;
       const busy = [...inflight.values()].map(x => `${x.name.replace(/^WavePlug\s*/, "")}:${now - x.at}ms`);
-      log("info", "panel stalled", late, "ms", JSON.stringify({ inflight: busy.slice(0, 6), input: { ...seen }, handlers: { ...inputCost } }));
+      log("info", "panel stalled", late, "ms", JSON.stringify({ inflight: busy.slice(0, 6) }));
     }
-    seen.move = seen.wheel = seen.down = seen.key = 0;
-    inputCost.ms = inputCost.calls = 0;
-  }, 100);
+  }, 200);
   t?.unref?.(); // never keeps a test run alive
-}
-export async function direct<T>(name: string, fn: () => Promise<T>): Promise<T> {
-  probeStalls();
-  if (directRefused) return modal(name, fn);
-  const t0 = Date.now();
-  try {
-    const r = await fn();
-    if (Date.now() - t0 > 250) log("info", "direct slow", name, Date.now() - t0, "ms");
-    for (const cb of modalDone) { try { cb(name); } catch (e) { log("warn", "modal done", e); } }
-    return r;
-  } catch (e) {
-    const m = String((e as Error)?.message ?? e);
-    if (!/modal/i.test(m)) throw e;
-    directRefused = true;
-    log("info", "direct command refused outside modal: using modal", name, m.slice(0, 200));
-    return modal(name, fn);
-  }
 }
 
 /** Runs `fn` as one undo step named `name` in document `docId`. */

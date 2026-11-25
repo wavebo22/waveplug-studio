@@ -6,7 +6,6 @@
 // stay smooth.
 
 import { crumb, log } from "../app/log.ts";
-import { costed } from "../app/inputCost.ts";
 import { resultText } from "../core/layers/smart.ts";
 import { ThumbCache, thumbRetryDelay } from "../core/layers/thumbs.ts";
 import { activateLayerDragLifecycle, cancelLayerDragLifecycle, createLayerDragLifecycle, releaseLayerDragLifecycle, routeLayerDragRelease, updateLayerDragLifecycle, type LayerDragLifecycle, type LayerDragRegion } from "../core/layers/drag.ts";
@@ -20,7 +19,7 @@ import { MULTI_EFFECTS } from "../core/layers/effects.ts";
 import { type AdvancedFilter, type Filter, type LayerAction, aiStrayMoves, isAiStray, type LayerKind, type LockKey, type MoveStep, type Row, type SmartAction, type TreeLayer, type Where, BLEND_MODES, ancestors, isCompactRow, queryActive, clickSelect, contentUsers, canDropToDelete, type DeleteDragPart, canDropMaskOnto, copyPlan, dropPlan, previewMoveTree, dropZone, filterCounts, isVariantLayer, layerMenu, nextLayerAfterDelete, layerTags, linkPeers, lockPlan, packChips, lockedByGroup, sharedColors, selectionAfterLocalClear, visibleRows } from "../core/layers/tree.ts";
 import { isDuplicateLayerDoubleAction, isLayerDoubleClick, type LayerClickPoint, type LayerDoubleAction } from "../core/layers/clicks.ts";
 import { matchesInlineRenameRow } from "../core/layers/rename.ts";
-import { type LayerTools, type LayerTree, type PsHost, type RunOptions, type TargetPart, ADJUSTMENTS, FILL_PREFIX, BLEND_PREFIX, EXTRACT_PREFIX, EXPAND_PREFIX, GENERATE_PREFIX, UPSCALE_PREFIX } from "../ps/host.ts";
+import { type LayerTools, type LayerTree, type PsHost, type RunOptions, type TargetPart, ADJUSTMENTS } from "../ps/host.ts";
 import type { Overlay } from "../app/overlay.ts";
 import type { CanvasView } from "../core/overlay/protocol.ts";
 import { vectorFragment } from "../core/overlay/svgFragment.ts";
@@ -888,11 +887,11 @@ export function createLayerTreeView(tree: LayerTree, status: Status, tools?: Lay
   // Not on every move: the pointer entering another element (mouseover) at another spot is a real
   // move; a row sliding under a still pointer (the list scrolling) comes at the same spot.
   let overX = NaN, overY = NaN;
-  list.addEventListener("mouseover", costed(e => {
+  list.addEventListener("mouseover", e => {
     const m = e as MouseEvent;
     if (m.clientX !== overX || m.clientY !== overY) pointerMovedAt = Date.now();
     overX = m.clientX; overY = m.clientY;
-  }), true);
+  }, true);
   const pool: RowEl[] = [];
 
   function makeRow(): RowEl {
@@ -925,7 +924,7 @@ export function createLayerTreeView(tree: LayerTree, status: Status, tools?: Lay
       paintTo(r.index);
     });
     // anywhere on a row: the pointer may leave the column a little while dragging
-    el.addEventListener("mouseover", costed(() => rowOver(r)));
+    el.addEventListener("mouseover", () => rowOver(r));
     twisty.addEventListener("click", e => { e.stopPropagation(); toggleGroup(r.id); });
     for (const x of [eye, twisty]) x.addEventListener("mousedown", e => e.stopPropagation());
     // A double-click is told from two presses on the same part of the row (the first click re-draws
@@ -2713,7 +2712,7 @@ export function createLayerTreeView(tree: LayerTree, status: Status, tools?: Lay
 
   // Capture phase is deliberate: a child row, chip, native overlay, or UXP widget cannot swallow
   // the move/release before the drag controller sees it.
-  const armDragMoves = movesWhile(window, costed(handleDragMove), () => !!drag, true);
+  const armDragMoves = movesWhile(window, handleDragMove, () => !!drag, true);
 
   // The helper saw the drag card over another program with nothing prepared: this panel never saw
   // the pointer leave (a quick throw out of Photoshop sends it no move outside the list), so the
@@ -3728,7 +3727,7 @@ export function createLayerTreeView(tree: LayerTree, status: Status, tools?: Lay
       updateHints();
     });
     hintOverCancel = hintOver.cancel;
-    listen(window, "mouseover", costed((e: Event) => hintOver({ t: e.target as Element | null, k: keysOf(e) })), true);
+    listen(window, "mouseover", e => hintOver({ t: e.target as Element | null, k: keysOf(e) }), true);
     for (const type of ["keydown", "keyup"]) listen(document, type, e => {
       const k = keysOf(e);
       if (k.ctrl === heldKeys.ctrl && k.shift === heldKeys.shift && k.alt === heldKeys.alt) return;
