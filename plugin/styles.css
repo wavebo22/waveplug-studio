@@ -15,6 +15,11 @@
   --c-field: rgba(0, 0, 0, .26);    /* 输入框、下拉框、分段控件底 */
   --c-pop: #2a2c2e;                 /* 浮层（菜单、弹出框、提示）：实心，盖在内容上 */
   --c-scrim: rgba(0, 0, 0, .58);    /* 缩略图上的文字底 */
+  --c-depth-1: rgba(0, 0, 0, .09);  /* 图层面板：展开的组里的行，每深一层底色更深 */
+  --c-depth-2: rgba(0, 0, 0, .18);
+  --c-depth-3: rgba(0, 0, 0, .27);
+  --c-depth-4: rgba(0, 0, 0, .36);
+  --c-depth-5: rgba(0, 0, 0, .45);
   --c-line: rgba(255, 255, 255, .15);       /* 控件描边 */
   --c-line-strong: rgba(255, 255, 255, .26); /* 浮层描边、层级引导线 */
   --c-line-soft: rgba(255, 255, 255, .07);  /* 分区分割线、卡片描边 */
@@ -598,6 +603,12 @@ button, .ub { font: inherit; color: inherit; background: none; border: 0; paddin
 .lt-inner { position: relative; }
 .lt-empty { position: absolute; left: 0; right: 0; top: 10px; text-align: center; font-size: var(--fs); }
 .lt-row { position: relative; width: 100%; flex: none; height: var(--lt-row); display: flex; align-items: center; padding-right: 6px; cursor: default; color: var(--c-text); font-size: var(--fs); border-bottom: 1px solid var(--c-line-row); }
+/* 组里的内容按层级逐层加深（放在 hover / on / peer 之前，让它们盖过底色） */
+.lt-row.d1 { background: var(--c-depth-1); }
+.lt-row.d2 { background: var(--c-depth-2); }
+.lt-row.d3 { background: var(--c-depth-3); }
+.lt-row.d4 { background: var(--c-depth-4); }
+.lt-row.d5 { background: var(--c-depth-5); }
 .lt-row.hover { background: var(--c-hover); }
 .lt-row.on { background: var(--c-accent-wash-strong); }
 .lt-row.on.hover { background: var(--c-accent-wash-max); }
@@ -965,6 +976,12 @@ button, .ub { font: inherit; color: inherit; background: none; border: 0; paddin
 .lt-find .lt-search { flex: 1 1 120px; }
 /* groups stand apart from layers: a tinted band, bold name, bigger folder; their lock in front */
 .lt-row.group { background: var(--c-surface-hi); border-bottom-color: var(--c-scrim); }
+/* 嵌套的组：色带用所在层级的底色，组里的内容再深一层 */
+.lt-row.group.d1 { background: var(--c-depth-1); }
+.lt-row.group.d2 { background: var(--c-depth-2); }
+.lt-row.group.d3 { background: var(--c-depth-3); }
+.lt-row.group.d4 { background: var(--c-depth-4); }
+.lt-row.group.d5 { background: var(--c-depth-5); }
 .lt-row.group.hover { background: var(--c-hover); }
 .lt-row.group.on { background: var(--c-accent-wash-strong); }
 .lt-row.group .lt-name { font-weight: var(--fw-bold); }
