@@ -119,6 +119,7 @@ function info(d: any): DocInfo {
 }
 
 /** when "canvas view display scale unavailable" was last logged */
+let viewLogged = false;
 let viewWarnedAt = 0;
 export function findLayer(layers: any[], id: number): any | null {
   for (const l of layers) {
@@ -341,6 +342,7 @@ export class UxpHost implements PsHost {
           return null;
         }
         centerScale = scale;
+        if (!viewLogged) { viewLogged = true; log("info", "canvas view", JSON.stringify({ bounds: b, center: { h, v }, zoom, scale, display: display?.globalBounds, displays: displays.map((x: any) => ({ b: x.globalBounds, s: x.scaleFactor })) })); }
       } catch (e) {
         log("warn", "canvas view display configuration failed", e);
         return null;
