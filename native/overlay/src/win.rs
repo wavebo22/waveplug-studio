@@ -22,7 +22,7 @@ use std::ptr::null_mut;
 use std::sync::atomic::{AtomicBool, AtomicI32, AtomicIsize, AtomicU32, Ordering};
 use std::sync::Mutex;
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use eframe::egui::Vec2;
 use windows_sys::Win32::Foundation::{CloseHandle, HWND, LPARAM, LRESULT, POINT, RECT, WPARAM};
@@ -206,6 +206,18 @@ mod activation_tests {
         assert!(!should_restore_photoshop_focus(
             true, false, "overlay", false
         ));
+    }
+
+    #[test]
+    fn the_rail_eases_to_its_size_and_its_window_never_cuts_it_short() {
+        assert_eq!(rail_size_at((100.0, 200.0), (140, 300), 0.0), (100.0, 200.0));
+        let (w, h) = rail_size_at((100.0, 200.0), (140, 300), 0.5);
+        assert!(w > 100.0 && w < 140.0 && h > 200.0 && h < 300.0);
+        assert_eq!(rail_size_at((100.0, 200.0), (140, 300), 1.0), (140.0, 300.0));
+        // growing: the window is the new size at once; shrinking: it stays until the end
+        assert_eq!(rail_window_size((100.0, 200.0), (140, 300)), (140, 300));
+        assert_eq!(rail_window_size((140.0, 300.0), (100, 200)), (140, 300));
+        assert_eq!(rail_window_size((120.5, 250.2), (100, 200)), (121, 251));
     }
 
     #[test]
@@ -936,6 +948,12 @@ fn variant_restore(h: HWND) {
         )
     } != 0;
     if ok {
+        if let Ok(mut st) = RAIL_SIZE.lock() {
+            st.vis = (geom.w as f32, geom.h as f32);
+            st.to = (geom.w, geom.h);
+            st.moving = None;
+            st.win = (geom.w, geom.h);
+        }
         // in from the left edge of the canvas (anim.rs)
         crate::anim::slide(h as isize, &VARIANT_SLIDE, crate::anim::Place::Live(variant_place_now), (-crate::anim::SLIDE_PX, 0), true, crate::anim::SLIDE_IN_MS, None);
         VARIANT_PARKED.store(false, Ordering::SeqCst);
@@ -966,27 +984,8 @@ pub fn variant_sync_width(logical_width: f32) {
     let wanted = wanted.max(96);
     if geom.w != wanted {
         geom.w = wanted;
-        log::line(format!("variants width set by thumbnails: {wanted}px"));
     }
-    if VARIANT_PARKED.load(Ordering::SeqCst) {
-        return;
-    }
-    let Some(r) = window_rect(hwnd) else {
-        return;
-    };
-    if ((r.right - r.left) - wanted).abs() > 1 {
-        unsafe {
-            SetWindowPos(
-                hwnd,
-                null_mut(),
-                0,
-                0,
-                wanted,
-                r.bottom - r.top,
-                SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE | SWP_ASYNCWINDOWPOS,
-            );
-        }
-    }
+    // the window follows in variant_apply_size
 }
 
 fn half_editor_logical_height(editor_height: f64, scale: f64) -> f32 {
@@ -1042,28 +1041,128 @@ pub fn variant_sync_height(logical_content_height: f32) {
     let changed = VARIANT_LAST_AUTO_HEIGHT.swap(wanted, Ordering::SeqCst) != wanted;
     if changed || geom.h > wanted {
         geom.h = wanted;
-        log::line(format!(
-            "variants autofit height {}px (editor half max {}px)",
-            wanted,
-            (max_logical as f64 * dpi).floor() as i32
-        ));
+        if changed {
+            log::line(format!(
+                "variants autofit height {}px (editor half max {}px)",
+                wanted,
+                (max_logical as f64 * dpi).floor() as i32
+            ));
+        }
     }
-    if VARIANT_PARKED.load(Ordering::SeqCst) {
+    // the window follows in variant_apply_size
+}
+
+// ── 变体栏的尺寸变化: one place sets the rail's size, and eases into it ──
+// Before 11-24 egui (its viewport builder) and this file both resized the window, every frame,
+// asynchronously and rounded differently, so it shook while a variant came in or the slider
+// moved. Now only variant_apply_size does, from the UI thread: the window takes the larger of
+// where it is and where it is going at once, and a window region uncovers / covers the
+// difference over RESIZE_SECS (the rail is anchored top-left, so it grows right and down, into
+// the part the region hides until the next frame has drawn it).
+
+struct RailSize {
+    /// what shows now (the region), physical px
+    vis: (f32, f32),
+    /// where it is going, and the move under way: (from, since)
+    to: (i32, i32),
+    moving: Option<((f32, f32), Instant)>,
+    /// the window size this sets last (a different one means the user dragged its edge)
+    win: (i32, i32),
+}
+static RAIL_SIZE: Mutex<RailSize> = Mutex::new(RailSize { vis: (0.0, 0.0), to: (0, 0), moving: None, win: (0, 0) });
+
+/// The size shown `t` (0–1) of the way through a move — eased, exact at the end.
+fn rail_size_at(from: (f32, f32), to: (i32, i32), t: f32) -> (f32, f32) {
+    if t >= 1.0 {
+        return (to.0 as f32, to.1 as f32);
+    }
+    (crate::anim::tween(from.0, to.0 as f32, t), crate::anim::tween(from.1, to.1 as f32, t))
+}
+
+/// The window's size while showing `vis` on the way to `to`: never smaller than either.
+fn rail_window_size(vis: (f32, f32), to: (i32, i32)) -> (i32, i32) {
+    (to.0.max(vis.0.ceil() as i32), to.1.max(vis.1.ceil() as i32))
+}
+
+/// Sizes the rail to VARIANT_GEOMETRY (set by variant_sync_width / _height), eased. Returns
+/// whether it is still moving (the host draws again for the next step).
+pub fn variant_apply_size() -> bool {
+    if !VARIANT_SHOWN.load(Ordering::SeqCst) {
+        return false;
+    }
+    let hwnd = find(VARIANTS_TITLE);
+    if hwnd.is_null() {
+        return false;
+    }
+    let Some(r) = window_rect(hwnd) else { return false };
+    let actual = (r.right - r.left, r.bottom - r.top);
+    let Ok(mut geom) = VARIANT_GEOMETRY.lock() else { return false };
+    let Ok(mut st) = RAIL_SIZE.lock() else { return false };
+    let parked = VARIANT_PARKED.load(Ordering::SeqCst);
+    // (only with the mouse button held: a restore / park that has not landed yet is not a drag)
+    let button_down = unsafe { windows_sys::Win32::UI::Input::KeyboardAndMouse::GetAsyncKeyState(0x01) } < 0;
+    if button_down && st.moving.is_none() && st.win != (0, 0) && actual != st.win && !parked {
+        // the user dragged the bottom edge: that is the size now (within the cap)
+        let cap = VARIANT_HEIGHT_CAP.load(Ordering::SeqCst).max(1);
+        geom.h = actual.1.clamp(1, cap);
+        st.win = actual;
+        st.vis = (actual.0 as f32, actual.1 as f32);
+        st.to = actual;
+        clip_rail(hwnd, None);
+        return false;
+    }
+    let target = (geom.w.max(1), geom.h.max(1));
+    drop(geom);
+    if parked || st.vis.0 <= 0.0 {
+        // nobody sees it: be there at once
+        st.vis = (target.0 as f32, target.1 as f32);
+        st.to = target;
+        st.moving = None;
+    } else if target != st.to {
+        st.moving = Some((st.vis, Instant::now()));
+        st.to = target;
+    }
+    let mut moving = false;
+    if let Some((from, since)) = st.moving {
+        let t = since.elapsed().as_secs_f32() / crate::anim::RESIZE_SECS;
+        st.vis = rail_size_at(from, st.to, t);
+        if t >= 1.0 {
+            st.moving = None;
+        } else {
+            moving = true;
+        }
+    }
+    let win = rail_window_size(st.vis, st.to);
+    if win != actual {
+        // the window's own thread: done before the next frame is drawn at the new size
+        unsafe {
+            SetWindowPos(hwnd, null_mut(), 0, 0, win.0, win.1, SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE);
+        }
+    }
+    st.win = win;
+    let shown = (st.vis.0.round() as i32, st.vis.1.round() as i32);
+    clip_rail(hwnd, (shown != win).then_some(shown));
+    moving
+}
+
+/// Shows only the top-left `size` of the rail (None: all of it).
+fn clip_rail(hwnd: HWND, size: Option<(i32, i32)>) {
+    static LAST: Mutex<Option<(i32, i32)>> = Mutex::new(None);
+    let Ok(mut last) = LAST.lock() else { return };
+    if *last == size {
         return;
     }
-    if let Some(r) = window_rect(hwnd) {
-        let actual = r.bottom - r.top;
-        if changed || actual > wanted {
-            unsafe {
-                SetWindowPos(
-                    hwnd,
-                    null_mut(),
-                    0,
-                    0,
-                    r.right - r.left,
-                    geom.h,
-                    SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE | SWP_ASYNCWINDOWPOS,
-                );
+    *last = size;
+    unsafe {
+        match size {
+            Some((w, h)) => {
+                let rgn = CreateRectRgn(0, 0, w.max(1), h.max(1));
+                if SetWindowRgn(hwnd, rgn, 1) == 0 {
+                    DeleteObject(rgn);
+                }
+            }
+            None => {
+                SetWindowRgn(hwnd, null_mut(), 1);
             }
         }
     }
@@ -1158,11 +1257,14 @@ pub fn variant_place(view: Option<ScreenRect>) -> bool {
     align_variant_to_canvas_top(owner, view, true);
     VARIANT_LAST_AUTO_HEIGHT.store(0, Ordering::SeqCst);
     VARIANT_SHOWN.store(true, Ordering::SeqCst);
+    // a new (or newly made) window: its size starts over, without a move
+    if let Ok(mut st) = RAIL_SIZE.lock() {
+        *st = RailSize { vis: (0.0, 0.0), to: (0, 0), moving: None, win: (0, 0) };
+    }
+    clip_rail(hwnd, None);
+    // the same rule as watch() (photoshop_present); before its first tick, the foreground itself
     if photoshop_window_ready(owner)
-        && matches!(
-            who(unsafe { GetForegroundWindow() }),
-            "photoshop" | "variants" | "overlay"
-        )
+        && (photoshop_present() || present_now(true, steady_front(who(unsafe { GetForegroundWindow() }), "")))
     {
         variant_restore(hwnd);
     } else {

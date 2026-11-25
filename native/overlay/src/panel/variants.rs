@@ -22,6 +22,26 @@ const PANEL_PADDING_Y: f32 = 6.0;
 const SLIDER_HEIGHT: f32 = 13.0;
 const SLIDER_LIST_GAP: f32 = 3.0;
 const RESIZE_GRIP_RESERVE: f32 = 10.0;
+/// the 删除 button in a hovered thumbnail's corner
+const DELETE_ICON: f32 = 18.0;
+
+/// A small dark rounded button with a bin (like the WaveLayer panel's 垃圾桶), red while the
+/// pointer is on it.
+fn paint_delete_icon(p: &egui::Painter, r: Rect, hot: bool) {
+    p.rect_filled(r, CornerRadius::same(4), if hot { theme::ERR } else { Color32::from_black_alpha(190) });
+    p.rect_stroke(r, CornerRadius::same(4), Stroke::new(1.0_f32, Color32::from_white_alpha(if hot { 0 } else { 50 })), StrokeKind::Inside);
+    let c = r.center();
+    let ink = if hot { Color32::WHITE } else { theme::TEXT };
+    let s = Stroke::new(1.2_f32, ink);
+    // lid with its handle, then the can with two ribs
+    p.line_segment([Pos2::new(c.x - 4.5, c.y - 3.0), Pos2::new(c.x + 4.5, c.y - 3.0)], s);
+    p.line_segment([Pos2::new(c.x - 1.5, c.y - 4.8), Pos2::new(c.x + 1.5, c.y - 4.8)], s);
+    p.line_segment([Pos2::new(c.x - 3.3, c.y - 1.5), Pos2::new(c.x - 2.6, c.y + 4.5)], s);
+    p.line_segment([Pos2::new(c.x + 3.3, c.y - 1.5), Pos2::new(c.x + 2.6, c.y + 4.5)], s);
+    p.line_segment([Pos2::new(c.x - 2.6, c.y + 4.5), Pos2::new(c.x + 2.6, c.y + 4.5)], s);
+    p.line_segment([Pos2::new(c.x - 0.9, c.y - 0.5), Pos2::new(c.x - 0.9, c.y + 3.0)], Stroke::new(1.0_f32, ink));
+    p.line_segment([Pos2::new(c.x + 0.9, c.y - 0.5), Pos2::new(c.x + 0.9, c.y + 3.0)], Stroke::new(1.0_f32, ink));
+}
 
 fn paint_compact_thumb_slider(ui: &mut egui::Ui, size: &mut f32) {
     let (rect, response) = ui.allocate_exact_size(
@@ -321,7 +341,32 @@ impl VariantRail {
                                     },
                                 );
                             }
-                            if response.clicked() && !chosen {
+                            // 删除: a small × in the picture's top-right corner while the pointer
+                            // is on the row (never for the last one left: the AI layer needs one)
+                            let mut deleted = false;
+                            if self.items.len() > 1 && ui.is_rect_visible(row) {
+                                let picture_right = row.center().x + size.x * 0.5;
+                                let top = row.top() + THUMB_BORDER + 1.0;
+                                let icon = Rect::from_min_size(
+                                    Pos2::new(picture_right - DELETE_ICON - 3.0, top + 3.0),
+                                    Vec2::splat(DELETE_ICON),
+                                );
+                                // added after the row, so it is on top of it for the pointer
+                                let hit = ui.interact(icon, Id::new(("variant-delete", id)), Sense::click());
+                                if response.hovered() || hit.hovered() {
+                                    paint_delete_icon(ui.painter(), icon, hit.hovered());
+                                }
+                                if hit.clicked() {
+                                    deleted = true;
+                                    actions.push(json!({
+                                        "kind": "delete-variant",
+                                        "layerId": id,
+                                        "groupId": self.group_id
+                                    }));
+                                }
+                                hit.on_hover_text(format!("删除变体 v{number}"));
+                            }
+                            if response.clicked() && !chosen && !deleted {
                                 actions.push(json!({
                                     "kind": "show-variant",
                                     "layerId": id,

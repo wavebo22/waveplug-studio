@@ -970,6 +970,11 @@ export function mountApp(root: HTMLElement, svc: Services) {
         const selected = variations.find(v => v.layerId === layerId);
         if (selected && !selected.visible) void showVariation(selected);
       },
+      deleteVariant: (layerId, groupId) => {
+        if (!group || group.layerId !== groupId || run) return;
+        const v = variations.find(x => x.layerId === layerId);
+        if (v) void deleteVariation(v);
+      },
     });
     variantSurface.refresh();
   }
@@ -1020,6 +1025,26 @@ export function mountApp(root: HTMLElement, svc: Services) {
     renderAll();
     void loadDocThumb();
     if (profile && conn.state === "ok") void quietSync(profile);
+  }
+
+  /** 删除 from the variant rail: one Photoshop history step; the shown one gone, the last left
+   *  takes its place (uxpHost deleteVariation). The AI layer keeps at least one variation. */
+  let deletingVariation = false;
+  async function deleteVariation(v: Variation) {
+    if (!group || run || deletingVariation) return;
+    if (variations.length <= 1) { setStatus("这是最后一个变体；要去掉整个 AI 图层，请在图层面板里删除", "info"); return; }
+    const g = group;
+    deletingVariation = true;
+    try {
+      await svc.host.deleteVariation(g, v.layerId);
+      thumbs.delete(g.docId + ":" + v.layerId);
+      if (group?.docId === g.docId && group.layerId === g.layerId) variations = await svc.host.variations(g);
+      log("info", "variation deleted from the rail", g.layerId, v.layerId, `v${v.number}`);
+      setStatus(`已删除变体 v${v.number}`, "ok");
+      renderHistory();
+    } catch (e) {
+      setStatus("删除变体失败：" + (e as Error).message, "error");
+    } finally { deletingVariation = false; }
   }
 
   async function showVariation(v: Variation) {

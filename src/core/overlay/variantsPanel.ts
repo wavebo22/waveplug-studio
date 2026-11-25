@@ -15,12 +15,13 @@ export interface VariantsSections {
   items: VariantItem[];
 }
 
-export type VariantsAction = { kind: "show-variant"; layerId: number; groupId: number };
+/** 单击切换 a variation; 删除 one (the bin in a hovered thumbnail's corner) */
+export type VariantsAction = { kind: "show-variant" | "delete-variant"; layerId: number; groupId: number };
 
 export function parseVariantsAction(raw: unknown): VariantsAction | null {
   if (!raw || typeof raw !== "object") return null;
   const a = raw as Record<string, unknown>;
-  return a.kind === "show-variant" && Number.isInteger(a.groupId) && Number.isInteger(a.layerId)
+  return (a.kind === "show-variant" || a.kind === "delete-variant") && Number.isInteger(a.groupId) && Number.isInteger(a.layerId)
     && Number(a.groupId) > 0 && Number(a.layerId) > 0
-    ? { kind: "show-variant", groupId: Number(a.groupId), layerId: Number(a.layerId) } : null;
+    ? { kind: a.kind, groupId: Number(a.groupId), layerId: Number(a.layerId) } : null;
 }

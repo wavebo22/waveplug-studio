@@ -9,6 +9,7 @@ interface VariantPage {
   sections(): VariantsSections | null;
   canvasView(docId: number): Promise<CanvasView | null>;
   showVariant(layerId: number, groupId: number): void;
+  deleteVariant(layerId: number, groupId: number): void;
 }
 
 export function attachVariantsSurface(overlay: Overlay, page: VariantPage) {
@@ -32,7 +33,7 @@ export function attachVariantsSurface(overlay: Overlay, page: VariantPage) {
       return vis.shown && last ? last : { docId: -1, groupId: -1, name: "", items: [] };
     },
     parseAction: parseVariantsAction,
-    onAction: a => page.showVariant(a.layerId, a.groupId),
+    onAction: a => a.kind === "delete-variant" ? page.deleteVariant(a.layerId, a.groupId) : page.showVariant(a.layerId, a.groupId),
     onViewRequest: () => {
       const state = page.sections();
       if (state) void putUp(state);

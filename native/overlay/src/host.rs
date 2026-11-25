@@ -370,6 +370,7 @@ pub fn run() {
                 variant_shown: false,
                 variant_view: None,
                 variant_placed: false,
+                variant_made_size: None,
                 shelf: Shelf::new(),
                 shelf_shown: false,
                 shelf_view: None,
@@ -416,6 +417,9 @@ struct Host {
     variant_shown: bool,
     variant_view: Option<ScreenRect>,
     variant_placed: bool,
+    /// the size the rail's window was made with (Windows sizes it itself afterwards)
+    #[cfg_attr(not(windows), allow(dead_code))]
+    variant_made_size: Option<egui::Vec2>,
     /// the 编辑工作台 window (panel/shelf.rs)
     shelf: Shelf,
     shelf_shown: bool,
@@ -731,6 +735,8 @@ impl Host {
                     if panel == variants::ID {
                         self.variant_shown = false;
                         self.variant_placed = false;
+                        // its window goes with it; the next one is made at the size wanted then
+                        self.variant_made_size = None;
                         #[cfg(windows)]
                         crate::win::variant_hide();
                         continue;
@@ -1052,11 +1058,17 @@ impl Host {
         #[cfg(not(windows))]
         let max_height = 400.0;
         let height = natural_height.min(max_height).max(1.0);
+        // The size the window is made with, kept as it was: a builder whose size changes makes
+        // egui resize the window too, every frame, fighting win.rs (variant_apply_size), which
+        // is the one place that sizes it on Windows.
+        #[cfg(windows)]
+        let made = *self.variant_made_size.get_or_insert(egui::vec2(width, height));
+        #[cfg(not(windows))]
+        let made = egui::vec2(width, height);
         let builder = egui::ViewportBuilder::default()
             .with_title(variants::TITLE)
-            .with_inner_size(egui::vec2(width, height))
-            .with_min_inner_size(egui::vec2(width, height.min(80.0)))
-            .with_max_inner_size(egui::vec2(width, height))
+            .with_inner_size(made)
+            .with_min_inner_size(egui::vec2(64.0, 40.0))
             .with_decorations(false)
             .with_taskbar(false)
             .with_resizable(true)
@@ -1084,6 +1096,9 @@ impl Host {
                 // only applied on creation. Enforce content/half-editor height on Windows.
                 crate::win::variant_sync_width(self.variant_rail.desired_width());
                 crate::win::variant_sync_height(self.variant_rail.content_height());
+                if crate::win::variant_apply_size() {
+                    ctx.request_repaint();
+                }
             }
         }
         for action in actions {

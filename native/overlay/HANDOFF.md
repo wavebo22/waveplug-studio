@@ -162,6 +162,7 @@ src/ui/app.ts  startOverlay()      生成页提供状态和     src/panel/genera
 
 - **完成提醒**（共用功能，不属于某个介面）：插件 `hub.toast(title, text, view)` → `{"type":"toast"}`；小程序用 egui 的第二个视窗（`host.rs` 的 `notice`，标题 `WavePlug 提示`）画黄色边框的提示，`win::place_toast` 放到画布右下角并设为 PS 的附属、不启用视窗；`ms` 到了或点一下就关。外置生成面板在 `generateSurface.ts` 里检测「运行中 → 结束且不是错误 / 取消」时发出。
 - **动画（2026-11-24 重做）**：展开 / 收起不再逐帧改窗口高度（以前每帧异步 `SetWindowPos`，GPU 画面跟着重建尺寸、内容从上往下排，所以底栏和内容一直跳）。现在窗口保持展开时的高度，收起时只用窗口区域（`win::clip_panel`，`SetWindowRgn`）露出底部的底栏；展开 / 收起在 `RESIZE_SECS`（0.16 秒）里缓动区域高度（`host.rs` 的 `fold_height`，有测试），过渡期间一直画展开的内容。被区域挡住的部分鼠标穿透到 PS，`cursor_in_panel_reveal_zone` 按露出的部分算。窗口真正改高度只在展开内容变高 / 变矮时（收藏夹展开等），一次同步改完。滑入滑出（`anim::slide`）每步用 `DwmFlush` 跟屏幕刷新走，不再固定睡 15 ms。
+- **变体栏尺寸与删除（2026-11-24）**：以前 egui 的视窗设置（每帧按内容变的 `with_inner_size` / `with_max_inner_size`）和 `win.rs` 的异步 `SetWindowPos` 同时改窗口大小、取整不同，加变体、拖缩略图滑杆时窗口一直抖。现在 egui 只在建窗口时给一次尺寸（`variant_made_size`），之后只有 `win::variant_apply_size` 在 UI 线程同步改尺寸：窗口立即取「现在露出的」和「目标」中较大的那个，用窗口区域（`clip_rail`）在 `RESIZE_SECS` 里缓动露出 / 收起差值（纯函数 `rail_size_at` / `rail_window_size`，有测试）。按住鼠标时窗口尺寸和上次设的不同 = 用户在拖底边，以用户的为准。悬停缩略图时右上角出现小垃圾桶，点了发 `{"kind":"delete-variant",layerId,groupId}`，插件用 `deleteVariation`（一步历史记录，删掉显示中的那个时最后一个顶上）；只剩一个变体时不显示。
 - **高度贴合内容**：`host.rs` 的 `fit` 量内容高度，`win::fit_height` 保持底边不动调整高度。
 - **数量控件（2026-11-05）**：数量框左侧的 × 是重置到 1 的按钮；鼠标悬停在数字输入框上滚轮，每格增减 1，范围固定 1–4；走原来的 `SetCount` 动作，UXP 保存并同步。
 - **参考图缩略图（2026-11-05）**：`GenerateSections.refs[].thumb` 为可选 PNG/JPEG data URL；`RefIn` 对旧消息兼容（thumb 缺省）。Rust 统一限制 URL 256 KB、解码后 192 KB、图片最大 512×512；缩略图拒绝与解码失败写入日志，纹理在同槽位且 URL 未变时复用。
