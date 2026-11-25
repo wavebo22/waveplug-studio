@@ -79,7 +79,7 @@ const PS_ICON: Record<string, string> = {
   eye: "psEye", lock: "psLock", link: "psLink", mask: "psMask", adjust: "psAdjust", folder: "psFolder", folderOpen: "psFolderOpen", trash: "psTrash", clip: "psClip", text: "psText",
   newLayer: "psNew", smart: "psSmart", image: "psImage", shape: "psShape", fill: "psFill", move: "psMove", brush: "psBrush", filters: "psFilters",
   copies: "psShared", single: "psSingle", external: "psExternal", vector: "psVector", layers: "psEditable",
-  checker: "psChecker", chainV: "psChainV",
+  checker: "psChecker", chainV: "psChainV", stamp: "psStamp",
 };
 /** 画板 frames: Photoshop's 图层颜色 labels; artboards without one take these in turn */
 const LABELS: [string, string, string][] = [["red", "红色", "#e5534b"], ["orange", "橙色", "#f0a04b"], ["yellowColor", "黄色", "#e3cf4a"], ["grain", "绿色", "#5cc26b"], ["blue", "蓝色", "#4f9cf0"], ["violet", "紫色", "#a77ff0"], ["gray", "灰色", "#a0a0a0"]];
@@ -256,6 +256,22 @@ export function createLayerTreeView(tree: LayerTree, status: Status, tools?: Lay
     };
     if (maskView) { exitMaskView(apply); return; }
     apply();
+  }
+  /** 合并图 (the bottom-right button), clicked: everything visible on the canvas as one new layer,
+   *  above the selected layer. No other layer changes. */
+  function stampVisible() {
+    const above = [...selected].filter(id => byId.has(id));
+    void run("stampVisible", above.slice(0, 1), JSON.stringify({ name: "画布合并图" }));
+  }
+  /** layers dropped on 合并图: one new layer of just them (copies merged; the originals stay) */
+  function stampLayers(dropped: number[]) {
+    const there = dropped.filter(id => byId.has(id));
+    if (!there.length) return;
+    const first = byId.get(there[0])!;
+    const single = there.length === 1 && first.kind !== "group";
+    const name = there.length === 1 ? `${first.name} 合并图` : `合并图（${there.length} 个图层）`;
+    log("info", "stamp layers", JSON.stringify({ ids: there, single }));
+    void run("stampSelected", there, JSON.stringify({ single, name }));
   }
   /** Bottom trash click. Keyboard deletion is intentionally disabled in WaveLayer. */
   let deleting = false;
@@ -2388,7 +2404,7 @@ export function createLayerTreeView(tree: LayerTree, status: Status, tools?: Lay
       const ok = tool === "duplicate" && (s.kind === "filter" || s.kind === "effect" && MULTI_EFFECTS.has(s.key));
       act = ok ? "在本图层复制一份" : s.kind === "effect" && tool === "duplicate" ? "这种效果一个图层只能有一个" : "不能放在这里";
       cls = ok ? " copy" : " no";
-    } else if (tool) act = tool === "duplicate" ? "复制图层" : tool === "groupLayers" ? "编组" : "";
+    } else if (tool) act = tool === "duplicate" ? "复制图层" : tool === "groupLayers" ? "编组" : tool === "stampSelected" ? "创建合并图" : "";
     else if (s?.kind === "mask" || s?.kind === "vmask" || s?.kind === "filterMask") {
       const dest = layers.find(l => l.id === d.ltarget);
       act = dest ? `${d.alt ? "复制" : "移"}到「${dest.name}」` : "不能放在这里（目标已带蒙版、被锁定或不支持）";
@@ -2451,8 +2467,8 @@ export function createLayerTreeView(tree: LayerTree, status: Status, tools?: Lay
       action = ok ? "在本图层复制一份" : s.kind === "effect" && tool === "duplicate" ? "这种效果一个图层只能有一个" : "不能放在这里";
       tone = ok ? "copy" : "invalid";
     } else if (tool) {
-      action = tool === "duplicate" ? "复制图层" : tool === "groupLayers" ? "编组" : "不能放在这里";
-      tone = tool === "duplicate" ? "copy" : tool === "groupLayers" ? "move" : "invalid";
+      action = tool === "duplicate" ? "复制图层" : tool === "groupLayers" ? "编组" : tool === "stampSelected" ? "创建合并图（原图层不变）" : "不能放在这里";
+      tone = tool === "duplicate" || tool === "stampSelected" ? "copy" : tool === "groupLayers" ? "move" : "invalid";
     } else if (s?.kind === "mask" || s?.kind === "vmask" || s?.kind === "filterMask") {
       const dest = layers.find(l => l.id === d.ltarget);
       action = dest ? (d.alt ? "复制" : "移动") + "到「" + dest.name + "」" : "不能放在这里（目标已带蒙版、被锁定或不支持）";
@@ -2983,6 +2999,7 @@ export function createLayerTreeView(tree: LayerTree, status: Status, tools?: Lay
       return;
     }
     if (action === "delete") { if (ended.canDelete) void run("delete", ended.ids); return; }
+    if (tool?.action === "stampSelected") { void stampLayers(ended.ids); return; }
     if (tool) { void run(tool.action, ended.ids); return; }
     // No geometry gate here: UXP's getBoundingClientRect() and clientX/clientY are known to
     // disagree. A valid live target exists only while the pointer region is "list".
@@ -3467,11 +3484,16 @@ export function createLayerTreeView(tree: LayerTree, status: Status, tools?: Lay
   /** new layers next to a selected AI result (a group in Photoshop) go above it, not into it */
   const outsideAi = (): RunOptions => { const top = selectedLayers()[0]; return top && isVariantLayer(top) ? { above: top.id } : {}; };
   const trashBtn = tool("trash", "单击删除所选图层或蒙版；也可以将图层、蒙版、效果拖到这里，或拖到列表左侧红色区域删除", () => deleteSelected());
+  // 合并图, at the bottom right: a click makes one new layer of everything visible (canvas size);
+  // layers dropped on it make one new layer of just them. Nothing else is changed (uxpLayers.ts).
+  const stampBtn = tool("stamp", "合并图：单击把画布上所有可见内容合成一张新图层；把图层拖到这里，把它们合成一张新图层。原来的图层都不改", () => void stampVisible());
+  stampBtn.classList.add("lt-stamp");
   const dropTools: { el: HTMLElement; action: LayerAction }[] = [
     { el: groupBtn, action: "groupLayers" }, { el: newBtn, action: "duplicate" }, { el: trashBtn, action: "delete" },
+    { el: stampBtn, action: "stampSelected" },
   ];
   // whether the pointer is over one of them while dragging is decided by locateDrag's geometry
-  const bar = h("div", { class: "lt-bar" }, linkBtn, fxBtn, maskBtn, adjBtn, groupBtn, newBtn, trashBtn);
+  const bar = h("div", { class: "lt-bar" }, linkBtn, fxBtn, maskBtn, adjBtn, groupBtn, newBtn, trashBtn, stampBtn);
 
   // ── the panel menu (☰, as the menu at the top right of Photoshop's Layers panel) ──
   const SHORTCUT_KEY = "wp.layers.shortcuts";
@@ -3723,7 +3745,7 @@ export function createLayerTreeView(tree: LayerTree, status: Status, tools?: Lay
       const ex = drag.external?.session;
       input.drag = {
         region: region === "delete" ? "trash" : region === "tool" ? "tool" : region === "workbench" ? "workbench" : region === "outside" ? "outside" : "list",
-        sub, tool: tool === "groupLayers" || tool === "duplicate" || tool === "delete" ? tool : null, canDelete: drag.canDelete,
+        sub, tool: tool === "groupLayers" || tool === "duplicate" || tool === "delete" || tool === "stampSelected" ? tool : null, canDelete: drag.canDelete,
         export: ex ? { done: ex.files.length, total: ex.layers.length, ready: ex.phase === "ready" || ex.phase === "handedOff" } : null,
       };
       input.keys = { ...heldKeys, alt: drag.alt };

@@ -715,7 +715,9 @@ export type LayerAction =
   | "moveMask" | "moveVectorMask" | "moveFilterMask"
   // Photoshop's own commands the panel passes on (uxpLayers.ts actionDescs / menu commands)
   | "mergeDown" | "mergeVisible" | "flatten" | "rasterizeStyle" | "smartViaCopy" | "embedLinked" | "convertToLinked" | "relink" | "linkToFile" | "updateModified" | "updateAllModified"
-  | "align" | "distribute" | "artboardFromLayers" | "newLayerDialog" | "quickExport" | "copyCSS" | "copySVG";
+  | "align" | "distribute" | "artboardFromLayers" | "newLayerDialog" | "quickExport" | "copyCSS" | "copySVG"
+  // 合并图 (the button at the bottom right): a new layer only, every other layer left as it is
+  | "stampVisible" | "stampSelected";
 
 /** 智能对象 tools offered in the menu (they act on the selection, like on the 工具 page) */
 export type SmartAction =

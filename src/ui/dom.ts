@@ -138,6 +138,7 @@ const PS_GLYPHS: Record<string, string> = {
   psNew: "M3 3h14v14H3zM4.5 4.5v11h11v-11zM9.25 6.5h1.5v2.75h2.75v1.5h-2.75v2.75h-1.5v-2.75H6.5v-1.5h2.75z", // 新建图层
   psTrash: "M3.5 5h13v1.5h-13zM7.5 3.2h5V5h-1.5v-.3h-2V5H7.5zM5 7.5h10l-.8 8.7a1 1 0 0 1-1 .8H6.8a1 1 0 0 1-1-.8zM8 9.5h1.2v5.5H8zM10.8 9.5H12v5.5h-1.2z", // 删除
   psImage: "M3 3h14v14H3zM4.5 4.5v11h11v-11zM4.5 15.5l4-5 3 3.5 2-2.2 2 2.5v1.2zM13 6a1.5 1.5 0 1 1 0 3 1.5 1.5 0 0 1 0-3z", // 像素图层
+  psStamp: "M7 2.5h10.5V13H16V4H7zM2.5 7H13v10.5H2.5zM4 8.5V16h7.5V8.5zM5.5 13l2-2.5 1.5 1.7 1-1.1 1 1.4V14.5h-5.5z", // 合并图（盖印）
   psText: "M4 3.5h12v3h-1.5V5h-3.75v10.5h1.75V17h-5v-1.5h1.75V5H5.5v1.5H4z", // 文字图层
   psShape: "M7 5.4h6v1.2H7zM7 13.4h6v1.2H7zM5.4 7h1.2v6H5.4zM13.4 7h1.2v6h-1.2zM3 3h4v4H3zM13 3h4v4h-4zM3 13h4v4H3zM13 13h4v4h-4z", // 形状图层
   psSmart: "M4 2h8l4 4v12H4zM5.5 3.5v13h9V7h-3.5V3.5zM9.5 10.5h5v5h-5z", // 智能对象

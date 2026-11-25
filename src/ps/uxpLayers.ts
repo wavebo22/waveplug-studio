@@ -1582,6 +1582,7 @@ const ACTION_NAMES: Partial<Record<LayerAction, string>> = {
   addVectorMask: "添加矢量蒙版", deleteVectorMask: "删除矢量蒙版", toggleVectorMask: "停用/启用矢量蒙版", targetVectorMask: "选择矢量蒙版",
   toggleMaskLink: "链接/取消链接蒙版", moveEffect: "移动图层效果", moveEffects: "移动图层样式", deleteEffect: "删除图层效果", moveFilters: "移动智能滤镜", deleteFilter: "删除智能滤镜", deleteFilters: "清除智能滤镜",
   targetLayer: "选择图层", targetFilterMask: "选择智能滤镜蒙版", deleteFilterMask: "删除智能滤镜蒙版", viewMask: "查看蒙版", editFilter: "编辑智能滤镜", showVariant: "切换变体", deleteVariant: "删除变体", setProps: "图层属性", setLock: "锁定/解锁图层", adjustment: "新建调整图层",
+  stampVisible: "创建画布合并图", stampSelected: "创建所选图层合并图",
   mergeDown: "向下合并", mergeVisible: "合并可见图层", flatten: "拼合图像", rasterizeStyle: "栅格化图层样式", smartViaCopy: "通过拷贝新建智能对象",
   embedLinked: "嵌入链接的智能对象", convertToLinked: "转换为链接对象", relink: "重新链接到文件", linkToFile: "链接到已有文件", updateModified: "更新修改的内容", updateAllModified: "更新所有修改的内容", align: "对齐图层", distribute: "分布图层",
   artboardFromLayers: "来自图层的画板", newLayerDialog: "新建图层", quickExport: "快速导出为 PNG", copyCSS: "复制 CSS", copySVG: "复制 SVG",
@@ -1811,6 +1812,9 @@ async function loadGroupSelection(docId: number, groupId: number, mode: string, 
   log("info", "load group selection", groupId, mode, layers.length, b?.selection ? JSON.stringify(b.selection).slice(0, 160) : "no selection");
 }
 
+/** names the layer just made (the selected one) after `arg`'s name */
+const nameIt = (arg?: string) => ({ _obj: "set", _target: [target], to: { _obj: "layer", name: String(JSON.parse(arg ?? "{}").name ?? "合并图") } });
+
 async function actionDescs(docId: number, action: LayerAction, ids: number[], arg?: string): Promise<object[]> {
   switch (action) {
     case "duplicate": return [{ _obj: "duplicate", _target: [target], version: 5 }];
@@ -1846,6 +1850,18 @@ async function actionDescs(docId: number, action: LayerAction, ids: number[], ar
     case "ungroup": return [{ _obj: "ungroupLayersEvent", _target: [target] }];
     case "merge": case "mergeDown": return [{ _obj: "mergeLayersNew" }];
     case "mergeVisible": return [{ _obj: "mergeVisible" }];
+    // 合并图: only a new layer is made, nothing else changes. Everything visible, canvas size
+    // (Photoshop's 盖印可见图层, Ctrl+Alt+Shift+E): above the selected layer.
+    case "stampVisible": return [{ _obj: "mergeVisible", duplicate: true }, nameIt(arg)];
+    // The dragged layers: copies of them, merged into one (above the topmost). Not 盖印所选
+    // (Ctrl+Alt+E): with one plain layer selected that merges it INTO the layer below. One layer
+    // that isn't a group: the copy is made a smart object and rasterized (its styles and filters
+    // become pixels); a group, or several layers: the copies are merged.
+    case "stampSelected": {
+      const { single } = JSON.parse(arg ?? "{}");
+      const flatten = single ? [{ _obj: "newPlacedLayer" }, { _obj: "rasterizeLayer", _target: [target] }] : [{ _obj: "mergeLayersNew" }];
+      return [{ _obj: "duplicate", _target: [target], version: 5 }, ...flatten, nameIt(arg)];
+    }
     case "flatten": return [{ _obj: "flattenImage" }];
     case "rasterizeStyle": return [{ _obj: "rasterizeLayer", _target: [target], what: { _enum: "rasterizeItem", _value: "layerStyle" } }];
     case "smartViaCopy": return [{ _obj: "placedLayerMakeCopy" }];

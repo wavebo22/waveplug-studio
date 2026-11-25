@@ -774,6 +774,9 @@ button, .ub { font: inherit; color: inherit; background: none; border: 0; paddin
 .lt-tool:hover { background: var(--c-hover); }
 .lt-tool.is-disabled { opacity: .35; }
 .lt-tool.drop-on { background: var(--c-accent-wash-max); outline: 1px solid var(--c-accent-hi); }
+/* 合并图: the last button, set apart from the trash so a drag doesn't land on the wrong one */
+.lt-tool.lt-stamp { margin-left: var(--sp-4); position: relative; color: var(--c-accent-hi); }
+.lt-tool.lt-stamp::before { content: ""; position: absolute; left: calc(-1 * var(--sp-2) - 1px); top: var(--sp-2); bottom: var(--sp-2); width: 1px; background: var(--c-line); }
 .lt-tool-fx { font-style: italic; font-weight: var(--fw-bold); font-size: var(--fs-l); }
 /* menus sit above the panel top (.lt-find is z 36) and below tooltips */
 .pm { position: absolute; z-index: 39; min-width: 170px; overflow-y: auto; padding: var(--sp-2); background: var(--c-pop); border: 1px solid var(--c-line-strong); border-radius: var(--r-l); }

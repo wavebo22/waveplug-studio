@@ -31,7 +31,7 @@ export interface HintInput {
     /** what is dragged instead of layers: "mask", "effects", "filter" … */
     sub?: string | null;
     /** the toolbar button under the pointer: what letting go there does */
-    tool?: "groupLayers" | "duplicate" | "delete" | null;
+    tool?: "groupLayers" | "duplicate" | "delete" | "stampSelected" | null;
     canDelete: boolean;
     /** files for other programs being prepared (done / total), or ready */
     export?: { done: number; total: number; ready: boolean } | null;
@@ -83,7 +83,7 @@ function dragItems(h: HintInput): HintItem[] {
   if (d.region === "trash") return d.canDelete ? [it(["松开"], `删除${what}`)] : [it(["松开"], `这些${what}不能删除`)];
   if (d.region === "workbench") return [it(["松开"], "加入工作台（原 PSD 不改）")];
   if (d.region === "tool") {
-    const label = d.tool === "groupLayers" ? "从图层新建组" : d.tool === "duplicate" ? "复制图层" : d.tool === "delete" ? (d.canDelete ? `删除${what}` : `这些${what}不能删除`) : "松开取消";
+    const label = d.tool === "groupLayers" ? "从图层新建组" : d.tool === "duplicate" ? "复制图层" : d.tool === "stampSelected" ? "创建合并图（原图层不变）" : d.tool === "delete" ? (d.canDelete ? `删除${what}` : `这些${what}不能删除`) : "松开取消";
     return [it(["松开"], label), it(["Esc"], "取消")];
   }
   if (d.region === "outside") {
@@ -131,7 +131,7 @@ function idleItems(h: HintInput): HintItem[] {
     case "variant": return [it(["双击"], "打开 / 收起变体栏")];
     case "twisty": return [it(["左键"], "展开 / 折叠组")];
     case "blank": return [it(["左键"], "取消全选"), it(["右键"], "图层菜单")];
-    case "tool": return [it(["左键"], "执行"), it(["拖图层到这里"], "新建组 / 复制 / 删除")];
+    case "tool": return [it(["左键"], "执行"), it(["拖图层到这里"], "新建组 / 复制 / 删除 / 合并图")];
     case "name": case "row":
       return [it(["左键"], "选中"), it(["Ctrl", "左键"], "加选 / 减选"), it(["Shift", "左键"], "连续选择"),
         it(["双击"], z === "name" ? "重命名" : "图层样式"), it(["右键"], "菜单"), it(["拖动"], "排序（拖出面板：其他软件）"), ...editing];
