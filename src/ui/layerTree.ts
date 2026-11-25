@@ -410,7 +410,6 @@ export function createLayerTreeView(tree: LayerTree, status: Status, tools?: Lay
   const RECT_ALPHA = "/w=="; // one covered pixel: the shape is the whole rect
   type Shape = { bounds: Rect; width: number; height: number; alpha: string } | null;
   const shapes = new Map<string, Shape>();
-  let tintLogged = 0;
   let tintTimer: ReturnType<typeof setTimeout> | null = null, tintReading = false, tintSent = "";
   const clearTint = () => {
     if (tintTimer) { clearTimeout(tintTimer); tintTimer = null; }
@@ -459,7 +458,6 @@ export function createLayerTreeView(tree: LayerTree, status: Status, tools?: Lay
       if (sent === tintSent) return;
       tintSent = sent;
       // the helper takes the frame away when the tint shows: both appear at the same moment
-      if (tintLogged < 12) { tintLogged++; log("info", "hover tint placed", JSON.stringify({ id, name: l.name, kind: l.kind, doc: shape.bounds, layer: whole, screen: rect, view: v })); }
       sendFrame(f);
       overlay.hoverTint({ rect, clip: v.view, width: shape.width, height: shape.height, alpha: shape.alpha });
     }, cached ? 0 : slow ? TINT_SLOW_DELAY : TINT_DELAY);

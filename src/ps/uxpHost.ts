@@ -120,6 +120,8 @@ function info(d: any): DocInfo {
 
 /** when "canvas view display scale unavailable" was last logged */
 let viewLogged = false;
+/** a Photoshop document window's scrollbar, logical px (Windows) */
+const SCROLLBAR_PX = 15;
 let viewWarnedAt = 0;
 export function findLayer(layers: any[], id: number): any | null {
   for (const l of layers) {
@@ -349,8 +351,13 @@ export class UxpHost implements PsHost {
       }
     }
 
+    // globalBounds take in the document window's scrollbars (right and bottom, 15 px at 100 %:
+    // 11-25, 22 screen px at 150 %), but `center` is the middle of the canvas between them: taken
+    // as the middle of the whole area, everything drawn on the canvas sat half a scrollbar right
+    // and low. The scrollbar is sized by the monitor's scale, so this holds on every display.
+    const bar = /win/i.test(navigator.platform) ? Math.round(SCROLLBAR_PX * centerScale) : 0;
     return {
-      view: { left: b.left, top: b.top, right: b.right, bottom: b.bottom },
+      view: { left: b.left, top: b.top, right: b.right - bar, bottom: b.bottom - bar },
       center: { x: h * centerScale, y: v * centerScale },
       zoom,
     };
