@@ -26,14 +26,16 @@ use std::time::Duration;
 
 use eframe::egui::Vec2;
 use windows_sys::Win32::Foundation::{CloseHandle, HWND, LPARAM, LRESULT, POINT, RECT, WPARAM};
-use windows_sys::Win32::Graphics::Gdi::{ClientToScreen, GetMonitorInfoW, MonitorFromPoint, MONITORINFO};
+use windows_sys::Win32::Graphics::Gdi::{
+    ClientToScreen, CreateRectRgn, DeleteObject, GetMonitorInfoW, MonitorFromPoint, SetWindowRgn, MONITORINFO,
+};
 use windows_sys::Win32::System::Threading::{
     OpenProcess, QueryFullProcessImageNameW, WaitForSingleObject,
 };
 use windows_sys::Win32::UI::HiDpi::GetDpiForMonitor;
 use windows_sys::Win32::UI::WindowsAndMessaging::{
     CallWindowProcW, DefWindowProcW, EnumWindows, FindWindowW, GetAncestor,
-    GetCursorPos, GetForegroundWindow, GetWindow, GetWindowLongPtrW, GetWindowRect,
+    GetClientRect, GetCursorPos, GetForegroundWindow, GetWindow, GetWindowLongPtrW, GetWindowRect,
     GetWindowThreadProcessId, IsIconic, IsWindow, IsWindowVisible, PostMessageW,
     SetForegroundWindow, SetWindowLongPtrW, SetWindowPos, WindowFromPoint, WNDPROC,
 };
@@ -1272,11 +1274,75 @@ pub fn cursor_in_panel_reveal_zone(logical_height: f32) -> bool {
         return false;
     }
     let hwnd = own_window();
-    let Some(panel) = window_rect(hwnd) else { return false };
+    let Some(panel) = visible_rect(hwnd) else { return false };
     let Some((x, y)) = cursor_screen() else { return false };
     let scale = dpi_at(POINT { x, y }) / 96.0;
     let reveal_height = (logical_height.max(0.0) as f64 * scale).ceil() as i32;
     point_in_panel_reveal_zone(POINT { x, y }, panel, reveal_height)
+}
+
+// ── 展开 / 收起: the generate panel's window keeps its open height; folding shows only its
+// bottom part through a window region (the bar). Growing / shrinking the region costs nothing,
+// while resizing the window every frame made its GPU surface rebuild and the content jump.
+
+/// physical px of the panel shown from its bottom edge; -1: all of it (no region)
+static CLIP_PX: AtomicI32 = AtomicI32::new(-1);
+/// the client height the region was made for
+static CLIP_BOTTOM: AtomicI32 = AtomicI32::new(0);
+
+/// The part of the panel on screen: its window, less what the region hides at the top.
+fn visible_rect(h: HWND) -> Option<RECT> {
+    let mut r = window_rect(h)?;
+    let clip = CLIP_PX.load(Ordering::SeqCst);
+    if clip >= 0 {
+        r.top = r.top.max(r.bottom - clip);
+    }
+    Some(r)
+}
+
+/// Shows only the bottom `visible` logical px of the panel (None: all of it). Called from the
+/// UI thread every frame of a fold / unfold; does nothing when the answer is the same.
+pub fn clip_panel(visible: Option<f32>) {
+    let me = own_window();
+    if me.is_null() {
+        return;
+    }
+    let mut c = RECT { left: 0, top: 0, right: 0, bottom: 0 };
+    if unsafe { GetClientRect(me, &mut c) } == 0 {
+        return;
+    }
+    let Some(v) = visible else {
+        if CLIP_PX.swap(-1, Ordering::SeqCst) != -1 {
+            unsafe { SetWindowRgn(me, null_mut(), 1) };
+        }
+        return;
+    };
+    let k = window_rect(me).map(|r| dpi_at(POINT { x: r.left, y: r.bottom - 1 }) / 96.0).unwrap_or(1.0);
+    let px = ((v as f64 * k).round() as i32).clamp(1, c.bottom.max(1));
+    if px >= c.bottom {
+        // all of it shows: no region (and none to keep in sync with the window's size)
+        if CLIP_PX.swap(-1, Ordering::SeqCst) != -1 {
+            unsafe { SetWindowRgn(me, null_mut(), 1) };
+        }
+        return;
+    }
+    // the region is in client coordinates from the top: a new window height needs a new one too
+    let same_px = CLIP_PX.swap(px, Ordering::SeqCst) == px;
+    if CLIP_BOTTOM.swap(c.bottom, Ordering::SeqCst) == c.bottom && same_px {
+        return;
+    }
+    unsafe {
+        let rgn = CreateRectRgn(0, c.bottom - px, c.right, c.bottom);
+        // the system owns the region once it is set
+        if SetWindowRgn(me, rgn, 1) == 0 {
+            DeleteObject(rgn);
+        }
+    }
+}
+
+/// The panel's window is on the desktop (not parked, not hidden): a fold there can be seen.
+pub fn panel_on_screen() -> bool {
+    SHOWN.load(Ordering::SeqCst) && !PARKED.load(Ordering::SeqCst)
 }
 
 /// The host window's client origin in screen px, while it is on screen: where the drag engine's
@@ -1461,7 +1527,8 @@ pub fn fit_height(height: f32) {
             target.1,
             target.2,
             target.3,
-            SWP_NOZORDER | SWP_NOACTIVATE | SWP_ASYNCWINDOWPOS,
+            // from the window's own (UI) thread: done before the next frame is drawn at the new size
+            SWP_NOZORDER | SWP_NOACTIVATE,
         );
     }
 }

@@ -31,7 +31,7 @@ pub const SLIDE_OUT_MS: u32 = 110;
 #[cfg_attr(not(windows), allow(dead_code))]
 pub const SLIDE_PX: i32 = 22;
 /// The generate panel between collapsed and expanded, in seconds.
-pub const RESIZE_SECS: f32 = 0.14;
+pub const RESIZE_SECS: f32 = 0.16;
 
 #[cfg(windows)]
 pub use imp::{slide, Place};
@@ -43,6 +43,7 @@ mod imp {
     use std::time::{Duration, Instant};
 
     use windows_sys::Win32::Foundation::HWND;
+    use windows_sys::Win32::Graphics::Dwm::DwmFlush;
     use windows_sys::Win32::UI::WindowsAndMessaging::SetWindowPos;
 
     use super::offset_at;
@@ -94,7 +95,11 @@ mod imp {
                 if t >= 1.0 {
                     break;
                 }
-                thread::sleep(Duration::from_millis(15));
+                // one step per frame the screen shows (a fixed sleep drifts against the display's
+                // refresh and moves the window unevenly); a 16 ms sleep when composition is off
+                if unsafe { DwmFlush() } < 0 {
+                    thread::sleep(Duration::from_millis(16));
+                }
             }
             if generation.load(Ordering::SeqCst) == mine {
                 if let Some(done) = done {

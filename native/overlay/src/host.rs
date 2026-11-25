@@ -39,6 +39,16 @@ const COLLAPSE_GRACE: Duration = Duration::from_millis(500);
 /// Room at the bar's right end for the corner grip (drawn over it while the panel is open).
 const GRIP_ROOM: f32 = 24.0;
 
+/// The visible height `since` a fold from `from` to `to` began, and whether it has arrived.
+fn fold_height(from: f32, to: f32, since: Instant, now: Instant) -> (f32, bool) {
+    let t = now.saturating_duration_since(since).as_secs_f32() / crate::anim::RESIZE_SECS;
+    if t >= 1.0 {
+        (to, true)
+    } else {
+        (crate::anim::tween(from, to, t).round(), false)
+    }
+}
+
 /// Whether the panel is folded this frame. `open_until`: it was last wanted until then (the
 /// grace after the pointer left). Pure, so the hover rules are tested without a window.
 fn fold_now(wanted: bool, now: Instant, open_until: &mut Option<Instant>) -> bool {
@@ -346,8 +356,10 @@ pub fn run() {
                 dragging: false,
                 typing: false,
                 height: 0.0,
-                target_height: 0.0,
-                resize_from: None,
+                open_h: 0.0,
+                vis: 0.0,
+                vis_to: 0.0,
+                fold: None,
                 collapsed: true,
                 open_until: None,
                 // WAVEPLUG_HOST_OPEN: start 固定 open (with WAVEPLUG_HOST_SHOT, a picture of the open panel)
@@ -382,11 +394,15 @@ struct Host {
     /// a text box has the keyboard (the window took it from Photoshop for that)
     #[cfg_attr(not(windows), allow(dead_code))]
     typing: bool,
-    /// the window height last fitted to the content
+    /// the window's height (logical px): the open panel's, also while it is folded (Windows)
     height: f32,
-    /// the height the content asks for, and the tween towards it while it runs (anim.rs)
-    target_height: f32,
-    resize_from: Option<(f32, Instant)>,
+    /// the open panel's height as last drawn (0 until it has been open once)
+    open_h: f32,
+    /// how much of the window shows from its bottom edge now, and where that is going
+    vis: f32,
+    vis_to: f32,
+    /// a fold / unfold under way: (from, to, since)
+    fold: Option<(f32, f32, Instant)>,
     /// collapsed while idle; expanded on hover, active input/work, or a drag entering its reveal zone
     collapsed: bool,
     /// the panel stays open until then although nothing wants it (COLLAPSE_GRACE)
@@ -435,6 +451,17 @@ mod tests {
         assert!(!fold_now(false, t0 + Duration::from_millis(700), &mut until), "grace counts from the last hover");
         assert!(fold_now(false, t0 + Duration::from_millis(900), &mut until), "away long enough: folded");
         assert!(until.is_none());
+    }
+
+    #[test]
+    fn a_fold_eases_to_its_height_and_ends_exactly_there() {
+        let t0 = Instant::now();
+        assert_eq!(fold_height(36.0, 520.0, t0, t0), (36.0, false));
+        let (mid, done) = fold_height(36.0, 520.0, t0, t0 + Duration::from_millis(60));
+        assert!(!done && mid > 36.0 && mid < 520.0);
+        assert_eq!(fold_height(36.0, 520.0, t0, t0 + Duration::from_millis(400)), (520.0, true));
+        let (down, _) = fold_height(520.0, 36.0, t0, t0 + Duration::from_millis(60));
+        assert!(down < 520.0 && down > 36.0);
     }
 
     #[test]
@@ -797,45 +824,57 @@ impl Host {
         }
     }
 
-    /// The window follows the surface's content height (no empty space under it); on Windows its
-    /// bottom edge stays put (win.rs `fit_height`).
-    fn fit(&mut self, ctx: &egui::Context, content: f32) {
-        // the 1 px border above and below (the margins are part of the content now)
-        let chrome = 2.0;
-        let want = (content + chrome).round();
-        // a new height (the bar ↔ the whole panel, a section opening): go there over a moment
-        // instead of jumping (anim.rs). The very first fit has nothing to come from.
-        if (want - self.target_height).abs() >= 1.0 {
-            self.resize_from = (self.height > 0.0).then(|| (self.height, Instant::now()));
-            self.target_height = want;
-            CONTENT_H.store(want.to_bits(), Ordering::SeqCst);
+    /// The window's height and how much of it shows. `open`: the open panel's content height when
+    /// it was drawn this frame. On Windows the window keeps the open height and folding only
+    /// changes the window region (win.rs `clip_panel`), eased over RESIZE_SECS: resizing the
+    /// window every frame rebuilt its GPU surface and made the bar and the content jump. Elsewhere
+    /// (the Mac, for trying things) the window just takes the new height.
+    fn fit(&mut self, ctx: &egui::Context, open: Option<f32>) {
+        let bar_h = COLLAPSED_BAR_HEIGHT + 2.0;
+        if let Some(c) = open {
+            self.open_h = (c + 2.0).round();
         }
-        let now = match self.resize_from {
-            Some((from, since)) => {
-                let t = since.elapsed().as_secs_f32() / crate::anim::RESIZE_SECS;
-                if t >= 1.0 {
-                    self.resize_from = None;
-                    want
-                } else {
-                    ctx.request_repaint();
-                    crate::anim::tween(from, want, t).round()
-                }
-            }
-            None => want,
-        };
-        if (now - self.height).abs() < 1.0 {
-            return;
-        }
-        let want = now;
-        self.height = want;
+        let open_h = if self.open_h > 0.0 { self.open_h } else { bar_h };
+        let now = Instant::now();
         #[cfg(windows)]
-        crate::win::fit_height(want);
+        {
+            if (open_h - self.height).abs() >= 1.0 {
+                self.height = open_h;
+                CONTENT_H.store(open_h.to_bits(), Ordering::SeqCst);
+                crate::win::fit_height(open_h);
+            }
+            let target = if self.collapsed { bar_h } else { open_h };
+            if (target - self.vis_to).abs() >= 1.0 {
+                self.fold = (self.vis > 0.0 && crate::win::panel_on_screen()).then(|| (self.vis, target, now));
+                self.vis_to = target;
+            }
+            self.vis = match self.fold {
+                Some((from, to, since)) => {
+                    let (h, done) = fold_height(from, to, since, now);
+                    if done {
+                        self.fold = None;
+                    } else {
+                        ctx.request_repaint();
+                    }
+                    h
+                }
+                None => target,
+            };
+            crate::win::clip_panel((self.vis < self.height - 0.5).then_some(self.vis));
+        }
         #[cfg(not(windows))]
-        ctx.send_viewport_cmd(ViewportCommand::InnerSize(egui::vec2(
-            ctx.screen_rect().width(),
-            want,
-        )));
-        let _ = ctx;
+        {
+            let want = if self.collapsed { bar_h } else { open_h };
+            self.fold = None;
+            self.vis = want;
+            self.vis_to = want;
+            if (want - self.height).abs() >= 1.0 {
+                self.height = want;
+                CONTENT_H.store(want.to_bits(), Ordering::SeqCst);
+                ctx.send_viewport_cmd(ViewportCommand::InnerSize(egui::vec2(ctx.screen_rect().width(), want)));
+            }
+        }
+        let _ = (ctx, now);
     }
 
     /// 卡死保护 (hang.rs): Photoshop stopped answering. Its own window in the middle of Photoshop's,
@@ -1296,14 +1335,17 @@ impl eframe::App for Host {
 
         let mut sent: Vec<(&'static str, serde_json::Value)> = Vec::new();
         let mut content: Option<f32> = None;
-        let collapsed = self.collapsed;
+        // the open panel is drawn while it is open and while it folds / unfolds (the region
+        // uncovers or covers it from the top); only once folded is it the bar alone
+        // (decided before the fold of this frame starts: the frame a fold begins still shows the
+        // open panel, so the bar layout never flashes into the full window)
+        let collapsed = self.collapsed && self.vis <= COLLAPSED_BAR_HEIGHT + 2.5;
         let mut pin_clicked = false;
         egui::CentralPanel::default()
             .frame(
                 Frame::new()
                     .fill(theme::BG)
-                    .stroke(Stroke::new(1.0_f32, theme::LINE))
-                    .inner_margin(Margin::ZERO),
+                    .inner_margin(Margin::same(1)),
             )
             .show(ctx, |ui| {
                 let Some(i) = self.current else {
@@ -1322,6 +1364,14 @@ impl eframe::App for Host {
                     .scroll_bar_visibility(egui::scroll_area::ScrollBarVisibility::AlwaysHidden)
                     .show(ui, |ui| {
                         ui.spacing_mut().item_spacing.y = 0.0;
+                        if collapsed {
+                            // the window may still have the open height (Windows): the bar at its
+                            // bottom, where the region shows it
+                            let gap = ui.ctx().screen_rect().height() - 2.0 - COLLAPSED_BAR_HEIGHT;
+                            if gap > 0.0 {
+                                ui.add_space(gap);
+                            }
+                        }
                         if !collapsed {
                             Frame::new()
                                 .inner_margin(Margin { left: 8, right: 8, top: 8, bottom: 2 })
@@ -1342,8 +1392,18 @@ impl eframe::App for Host {
                                 });
                         }
                     });
-                content = Some(out.content_size.y);
+                if !collapsed {
+                    content = Some(out.content_size.y);
+                }
             });
+        // the border, around the part that shows
+        if self.current.is_some() {
+            let screen = ctx.screen_rect();
+            let top = (screen.bottom() - self.vis.max(1.0)).max(screen.top());
+            let shown = egui::Rect::from_min_max(egui::pos2(screen.left(), top), screen.max);
+            ctx.layer_painter(egui::LayerId::new(egui::Order::Foreground, Id::new("panel-border")))
+                .rect_stroke(shown, egui::CornerRadius::ZERO, Stroke::new(1.0_f32, theme::LINE), egui::StrokeKind::Inside);
+        }
         if pin_clicked {
             self.pinned = !self.pinned;
             if self.pinned {
@@ -1351,8 +1411,8 @@ impl eframe::App for Host {
             }
             crate::log::line(format!("generate panel pinned {}", self.pinned));
         }
-        if let Some(h) = content {
-            self.fit(ctx, h);
+        if self.current.is_some() {
+            self.fit(ctx, content);
         }
         if !self.collapsed {
             self.grip(ctx);
