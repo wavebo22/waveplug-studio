@@ -56,6 +56,7 @@ export async function modal<T>(name: string, fn: (ctx: any) => Promise<T>, opts:
   // every Photoshop command the plugin runs, for the report (not the constant thumbnail / selection ones)
   if (!/缩略图|选择图层/.test(name)) crumb("PS：" + name.replace(/^WavePlug\s*/, ""));
   // how long it waited for Photoshop and how long it held it: the panels stall while one runs
+  probeStalls();
   const t0 = Date.now();
   let started = 0;
   try { return await ps().core.executeAsModal((ctx: any) => { started = Date.now(); return fn(ctx); }, { commandName: name, ...opts }); }
@@ -63,6 +64,44 @@ export async function modal<T>(name: string, fn: (ctx: any) => Promise<T>, opts:
     const end = Date.now();
     if (end - t0 > 250) log("info", "modal slow", name, JSON.stringify({ waitMs: (started || end) - t0, runMs: started ? end - started : 0 }));
     for (const cb of modalDone) { try { cb(name); } catch (e) { log("warn", "modal done", e); } }
+  }
+}
+
+/** Runs a command that may not need a modal scope (selecting layers) straight away, without
+ *  waiting for Photoshop to hand one out: on 11-24 a selection waited 2–7 s for its modal scope
+ *  while running 20–110 ms. If Photoshop refuses it outside a modal scope, it runs in one from
+ *  then on. The modal-done listeners hear it either way. */
+let directRefused = false;
+
+// 面板卡顿探针: a timer due every 100 ms that comes late means this plugin's own script was busy
+// (or Photoshop didn't run it) for that long; logged with the slow commands to tell the two apart.
+let stallProbe = false, stallLines = 0;
+function probeStalls(): void {
+  if (stallProbe) return;
+  stallProbe = true;
+  let last = Date.now();
+  const t: any = setInterval(() => {
+    const now = Date.now(), late = now - last - 100;
+    last = now;
+    if (late > 300 && stallLines < 60) { stallLines++; log("info", "panel stalled", late, "ms"); }
+  }, 100);
+  t?.unref?.(); // never keeps a test run alive
+}
+export async function direct<T>(name: string, fn: () => Promise<T>): Promise<T> {
+  probeStalls();
+  if (directRefused) return modal(name, fn);
+  const t0 = Date.now();
+  try {
+    const r = await fn();
+    if (Date.now() - t0 > 250) log("info", "direct slow", name, Date.now() - t0, "ms");
+    for (const cb of modalDone) { try { cb(name); } catch (e) { log("warn", "modal done", e); } }
+    return r;
+  } catch (e) {
+    const m = String((e as Error)?.message ?? e);
+    if (!/modal/i.test(m)) throw e;
+    directRefused = true;
+    log("info", "direct command refused outside modal: using modal", name, m.slice(0, 200));
+    return modal(name, fn);
   }
 }
 

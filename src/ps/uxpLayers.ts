@@ -9,7 +9,7 @@ import type { ToolResult } from "../core/layers/smart.ts";
 import { type LayerAction, type MoveStep, type RawLayer, buildTree, ALIGNS, DISTRIBUTES, nextLayerAfterDelete, planLayerDeletion, effectsOf, EFFECTS, rawProblem } from "../core/layers/tree.ts";
 import { addEffect, effectItem, hasEffects, removeEffect } from "../core/layers/effects.ts";
 import { type LayerDeleteResult, type LayerTree, type MoveOptions, type RunOptions, type TargetPart, ADJUSTMENTS } from "./host.ts";
-import { docById, findLayer, modal, onModalDone, play, step } from "./uxpHost.ts";
+import { direct, docById, findLayer, modal, onModalDone, play, step } from "./uxpHost.ts";
 import { act, selectLayers, UxpTools } from "./uxpTools.ts";
 import { type MaskKind, maskTransferDescriptors } from "./maskTransfer.ts";
 import { type StagedLayer, snapName } from "../core/layers/workbench.ts";
@@ -514,7 +514,7 @@ export class UxpLayerTree implements LayerTree {
     requireActiveDoc(_docId);
     if (ids.length) {
       const t0 = Date.now();
-      await modal(SELECT, async () => { requireActiveDoc(_docId); await selectLayers(ids); });
+      await direct(SELECT, async () => { requireActiveDoc(_docId); await selectLayers(ids); });
       const ms = Date.now() - t0;
       if (ms > 200) log("info", "layer select slow", JSON.stringify({ ids: ids.slice(0, 4), n: ids.length, ms }));
       return;
