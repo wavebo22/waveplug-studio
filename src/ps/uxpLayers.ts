@@ -724,8 +724,14 @@ export class UxpLayerTree implements LayerTree {
         const d = r?.imageData, sb = r?.sourceBounds;
         if (!d || !sb) return null;
         const k = Number.isFinite(Number(r.level)) ? 2 ** Number(r.level) : 1;
-        const bounds = { left: Number(sb.left) * k, top: Number(sb.top) * k, right: Number(sb.right) * k, bottom: Number(sb.bottom) * k };
+        let bounds = { left: Number(sb.left) * k, top: Number(sb.top) * k, right: Number(sb.right) * k, bottom: Number(sb.bottom) * k };
         if (![bounds.left, bounds.top, bounds.right, bounds.bottom].every(Number.isFinite) || bounds.right <= bounds.left || bounds.bottom <= bounds.top) return null;
+        // sourceBounds come in the scaled-down copy's whole pixels: times 2^level they can be off by
+        // up to that many document px (a 5648 px layer read at 256 px: tens of px, the tint shifted
+        // from the layer). The layer's own bounds are exact: used when they are the same area.
+        const exact = { left: Number(b?.left), top: Number(b?.top), right: Number(b?.right), bottom: Number(b?.bottom) };
+        const near = (a: number, c: number) => Number.isFinite(c) && Math.abs(a - c) <= k + 1;
+        if (near(bounds.left, exact.left) && near(bounds.top, exact.top) && near(bounds.right, exact.right) && near(bounds.bottom, exact.bottom)) bounds = exact;
         const alpha = shapeAlpha(new Uint8Array(await d.getData({ chunky: true })), d.width, d.height, d.components);
         return alpha ? { bounds, width: d.width, height: d.height, alpha } : null;
       } finally { r?.imageData?.dispose?.(); }

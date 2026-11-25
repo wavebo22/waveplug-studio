@@ -402,7 +402,9 @@ export function createLayerTreeView(tree: LayerTree, status: Status, tools?: Lay
   // the canvas. A read holds Photoshop in a modal moment: it waits TINT_DELAY, longer in a document
   // where one took more than TINT_SLOW_MS; a shape already read shows at once. Groups (Photoshop
   // reads no pixels of a group) and layers it can't read show their bounds as the shape.
-  const TINT_DELAY = 350, TINT_SLOW_DELAY = 900, TINT_SLOW_MS = 200, TINT_CACHE = 48;
+  // The outline and its fill come together: a layer that gets a tint shows no bounds rectangle
+  // first (it came 300 ms before the fill); only one with no shape to show falls back to it.
+  const TINT_DELAY = 150, TINT_SLOW_DELAY = 600, TINT_SLOW_MS = 200, TINT_CACHE = 48;
   /** documents where a shape read was slow: when, so that their reads wait longer for a while */
   const slowDocs = new Map<number, number>();
   const RECT_ALPHA = "/w=="; // one covered pixel: the shape is the whole rect
@@ -413,10 +415,17 @@ export function createLayerTreeView(tree: LayerTree, status: Status, tools?: Lay
     if (tintTimer) { clearTimeout(tintTimer); tintTimer = null; }
     if (tintSent) { tintSent = ""; overlay?.hoverTint(null); }
   };
-  const tintAt = (id: number, d: number, v: CanvasView) => {
+  /** the layer gets a tint (its outline and fill) instead of the bounds rectangle */
+  const tints = (id: number) => {
+    const l = byId.get(id);
+    return !!overlay?.tintReady && !!tree.shape && !!l && !l.artboard && l.kind !== "adjustment";
+  };
+  /** `f`: the bounds frame, shown instead when there is no shape after all */
+  const tintAt = (id: number, d: number, v: CanvasView, f: NonNullable<ReturnType<typeof frameOnScreen>>) => {
     if (tintTimer) clearTimeout(tintTimer);
-    if (!overlay?.tintReady || !tree.shape) return;
-    const cached = shapes.has(`${d}:${id}:${docVersion?.(d) ?? ""}`);
+    if (!overlay?.tintReady || !tree.shape) { sendFrame(f); return; }
+    const key0 = `${d}:${id}:${docVersion?.(d) ?? ""}`;
+    const cached = shapes.has(key0) || byId.get(id)?.kind === "group";
     const slow = Date.now() - (slowDocs.get(d) ?? 0) < 60_000;
     tintTimer = setTimeout(async () => {
       tintTimer = null;
@@ -428,7 +437,7 @@ export function createLayerTreeView(tree: LayerTree, status: Status, tools?: Lay
       const whole = layerFrame(l);
       if (shape === undefined && l.kind === "group") shape = whole && { bounds: whole, width: 1, height: 1, alpha: RECT_ALPHA };
       if (shape === undefined) {
-        if (tintReading) return; // the read in flight finishes first; the next rest asks again
+        if (tintReading) { sendFrame(f); return; } // a read in flight: the bounds now, the next rest asks again
         tintReading = true;
         const t0 = Date.now();
         try {
@@ -443,10 +452,13 @@ export function createLayerTreeView(tree: LayerTree, status: Status, tools?: Lay
         shapes.set(key, shape);
         while (shapes.size > TINT_CACHE) shapes.delete(shapes.keys().next().value!);
       }
-      if (!shape || frameId !== id || docId !== d || drag) return;
+      if (frameId !== id || docId !== d || drag) return;
+      if (!shape) { sendFrame(f); return; }
       const rect = docToScreen(shape.bounds, v), sent = key + frameKey({ rect, clip: v.view });
       if (sent === tintSent) return;
       tintSent = sent;
+      // the helper takes the frame away when the tint shows: both appear at the same moment
+      sendFrame(f);
       overlay.hoverTint({ rect, clip: v.view, width: shape.width, height: shape.height, alpha: shape.alpha });
     }, cached ? 0 : slow ? TINT_SLOW_DELAY : TINT_DELAY);
   };
@@ -477,8 +489,11 @@ export function createLayerTreeView(tree: LayerTree, status: Status, tools?: Lay
     const f = v ? frameOnScreen(area, v) : null;
     // the frame moved to another layer: its tint goes with it (the helper drops it too)
     if (frameKey(f) !== frameSent) tintSent = "";
-    sendFrame(f);
-    if (f && v) tintAt(id, d, v); else clearTint();
+    if (f && v && tints(id)) {
+      // the last layer's outline goes now; this one's outline and fill come together
+      if (frameKey(f) !== frameSent) { clearTint(); sendFrame(null); }
+      tintAt(id, d, v, f);
+    } else { clearTint(); sendFrame(f); }
   };
   /** when the pointer last really moved over the list (a row sliding under a still pointer, as the
    *  list scrolls, fires mouseover too: that is no hover) */
