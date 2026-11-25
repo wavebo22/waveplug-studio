@@ -124,18 +124,6 @@ fn should_clear_typing_focus(typing: bool, foreground: &str) -> bool {
 
 /// An unowned window must rise only when the user is working in Photoshop.
 /// A focused prompt field is the one exception: it is allowed to stay in front while typing.
-fn needs_overlay_topmost(shown: bool, foreground: &str, typing: bool) -> bool {
-    shown
-        && (foreground == "photoshop"
-            || foreground == "variants"
-            || (foreground == "overlay" && typing))
-}
-
-/// Logical Photoshop attachment: only surface the overlay when its Photoshop window exists,
-/// is visible and not minimised, and the user is currently working there.
-fn linked_surface_active(shown: bool, owner_ready: bool, foreground: &str, typing: bool) -> bool {
-    owner_ready && needs_overlay_topmost(shown, foreground, typing)
-}
 
 fn bottom_anchored_top(old_top: i32, old_height: i32, new_height: i32) -> i32 {
     old_top + old_height - new_height
@@ -219,12 +207,27 @@ mod activation_tests {
     }
 
     #[test]
-    fn independent_overlay_only_tops_photoshop_when_active() {
-        assert!(needs_overlay_topmost(true, "photoshop", false));
-        assert!(needs_overlay_topmost(true, "overlay", true));
-        assert!(!needs_overlay_topmost(true, "overlay", false));
-        assert!(!needs_overlay_topmost(true, "other", false));
-        assert!(!needs_overlay_topmost(false, "photoshop", false));
+    fn every_window_follows_one_photoshop_rule() {
+        // Photoshop or a window that goes with it in front, and Photoshop not minimised
+        for front in ["photoshop", "overlay", "variants", "workbench"] {
+            assert!(present_now(true, front), "{front}");
+        }
+        assert!(!present_now(true, "other"));
+        assert!(!present_now(false, "photoshop"), "minimised / closed");
+        // the helper's own windows and "no foreground" are resolved by steady_front first
+        assert!(!present_now(true, steady_front("helper", "other")));
+        assert!(present_now(true, steady_front("helper", "photoshop")));
+    }
+
+    #[test]
+    fn presence_comes_back_at_once_and_goes_after_staying_away() {
+        let ticks = AtomicU32::new(0);
+        assert!(next_presence(false, true, &ticks));
+        assert!(next_presence(true, false, &ticks), "one tick away: a blink");
+        assert!(!next_presence(true, false, &ticks), "two ticks away: gone");
+        assert!(!next_presence(false, false, &ticks));
+        assert!(next_presence(false, true, &ticks), "back: at once");
+        assert!(next_presence(true, false, &ticks), "the count started again");
     }
 
     #[test]
@@ -236,15 +239,6 @@ mod activation_tests {
         assert!(!needs_noactivate_style(true, WS_EX_APPWINDOW));
     }
 
-    #[test]
-    fn linked_visibility_requires_photoshop_foreground_and_not_minimised() {
-        assert!(linked_surface_active(true, true, "photoshop", false));
-        assert!(linked_surface_active(true, true, "overlay", true));
-        assert!(!linked_surface_active(true, true, "other", false));
-        assert!(!linked_surface_active(true, true, "overlay", false));
-        assert!(!linked_surface_active(true, false, "photoshop", false));
-        assert!(!linked_surface_active(false, true, "photoshop", false));
-    }
 
     #[test]
     fn editing_area_half_height_obeys_actual_dpi() {
@@ -583,10 +577,41 @@ fn steady_front(now: &'static str, before: &'static str) -> &'static str {
 /// row (250 ms each): a dialog opening, a click on the taskbar's edge or a progress window
 /// taking the foreground for an instant must not flash the panels off and on.
 const PARK_AFTER_TICKS: u32 = 2;
-static LINKED_IDLE_TICKS: AtomicU32 = AtomicU32::new(0);
-static VARIANT_IDLE_TICKS: AtomicU32 = AtomicU32::new(0);
+
+// ── 跟随 Photoshop: one rule for every window that goes with Photoshop ──
+// The generate panel, the variant rail, the workbench and the bottom status bar (monitor.rs) all
+// ask `photoshop_present()`; `watch()` works it out once per tick. Before 11-24 each had its own
+// rule (the status bar counted the helper's own windows as Photoshop, the panel didn't count the
+// workbench …), so some stayed up over other programs while the rest went.
+
+/// Photoshop is the window being worked in: its main window is up (not minimised), and the
+/// foreground (`steady_front`) is Photoshop or one of the windows that go with it.
+fn present_now(ps_ready: bool, front: &str) -> bool {
+    ps_ready && matches!(front, "photoshop" | "overlay" | "variants" | "workbench")
+}
+
+/// The debounced answer: back at once, away only after PARK_AFTER_TICKS ticks in a row.
+fn next_presence(was: bool, now: bool, away_ticks: &AtomicU32) -> bool {
+    if now {
+        away_ticks.store(0, Ordering::SeqCst);
+        true
+    } else if !was {
+        false
+    } else {
+        !idle_long_enough(away_ticks)
+    }
+}
+
+static PS_PRESENT: AtomicBool = AtomicBool::new(false);
+static PS_AWAY_TICKS: AtomicU32 = AtomicU32::new(0);
+
+/// Whether the windows that go with Photoshop should be on screen now (see above).
+pub fn photoshop_present() -> bool {
+    PS_PRESENT.load(Ordering::SeqCst)
+}
 /// Counts one more check without Photoshop in front; true once it has been long enough to park.
 fn idle_long_enough(ticks: &AtomicU32) -> bool {
+    // counts the ticks away; true once there have been enough
     ticks.fetch_add(1, Ordering::SeqCst) + 1 >= PARK_AFTER_TICKS
 }
 
@@ -726,24 +751,6 @@ fn find_photoshop_main_window() -> HWND {
 
 // ── for the 性能监视 box (monitor.rs): where Photoshop is, without any surface being up ──
 static MONITOR_PS: AtomicIsize = AtomicIsize::new(0);
-
-/// Whether Photoshop has the foreground, as monitor.rs should see it.
-pub enum PsFront {
-    /// Photoshop, or one of the helper's own windows over it
-    Front,
-    /// another program
-    Away,
-    /// no foreground window right now (activation is moving)
-    Unsure,
-}
-
-pub fn photoshop_front() -> PsFront {
-    match who(unsafe { GetForegroundWindow() }) {
-        "none" => PsFront::Unsure,
-        "other" => PsFront::Away,
-        _ => PsFront::Front,
-    }
-}
 
 fn monitor_photoshop() -> HWND {
     let cached = MONITOR_PS.load(Ordering::SeqCst) as HWND;
@@ -1174,7 +1181,7 @@ pub fn variant_hide() {
 
 /// Sync independent variant viewport with Photoshop foreground/minimise state,
 /// without changing the root generator HWND's focus or parking state.
-fn watch_variant(foreground: &str) {
+fn watch_variant(foreground: &str, present: bool) {
     if !VARIANT_SHOWN.load(Ordering::SeqCst) {
         return;
     }
@@ -1210,12 +1217,8 @@ fn watch_variant(foreground: &str) {
         let view = VARIANT_VIEW.lock().ok().and_then(|v| *v);
         align_variant_to_canvas_top(owner, view, false);
     }
-    let active =
-        photoshop_window_ready(owner) && matches!(foreground, "photoshop" | "variants" | "overlay" | "workbench");
+    let active = present && photoshop_window_ready(owner);
     if !active {
-        if !VARIANT_PARKED.load(Ordering::SeqCst) && !idle_long_enough(&VARIANT_IDLE_TICKS) {
-            return;
-        }
         if !VARIANT_PARKED.load(Ordering::SeqCst) {
             // Record the resized dimensions before parking; never save the -32000 location.
             if let Some(r) = window_rect(hwnd) {
@@ -1230,7 +1233,6 @@ fn watch_variant(foreground: &str) {
         }
         return;
     }
-    VARIANT_IDLE_TICKS.store(0, Ordering::SeqCst);
     if VARIANT_PARKED.load(Ordering::SeqCst) {
         variant_restore(hwnd);
     } else if let Some(r) = window_rect(hwnd) {
@@ -1624,12 +1626,10 @@ pub fn show(panel: &str, view: Option<ScreenRect>, size: Vec2) {
     }
     VIEW_REQUESTED.store(false, Ordering::SeqCst);
     SHOWN.store(true, Ordering::SeqCst);
-    let active = linked_surface_active(
-        true,
-        photoshop_window_ready(OWNER.load(Ordering::SeqCst) as HWND),
-        who(unsafe { GetForegroundWindow() }),
-        TYPING.load(Ordering::SeqCst),
-    );
+    // the same rule as watch(); a show arriving before its first tick looks at the foreground itself
+    let ready = photoshop_window_ready(OWNER.load(Ordering::SeqCst) as HWND);
+    let active = ready
+        && (photoshop_present() || present_now(true, steady_front(who(unsafe { GetForegroundWindow() }), "")));
     if active {
         restore_parked(me);
     } else {
@@ -1894,21 +1894,26 @@ pub fn watch() {
                 log::line(format!("keyboard: {now_front}"));
                 front = now_front;
             }
+            // the one answer every window that goes with Photoshop follows
+            let was = PS_PRESENT.load(Ordering::SeqCst);
+            let present = next_presence(
+                was,
+                present_now(photoshop_window_ready(monitor_photoshop()), linked_front),
+                &PS_AWAY_TICKS,
+            );
+            if present != was {
+                PS_PRESENT.store(present, Ordering::SeqCst);
+                log::line(format!("photoshop present {present}: foreground={now_front}"));
+            }
             // Independent viewports follow Photoshop even when the generate surface is hidden.
-            watch_variant(now_front);
-            watch_shelf(now_front);
+            watch_variant(now_front, present);
+            watch_shelf(now_front, present);
             if !SHOWN.load(Ordering::SeqCst) {
                 continue;
             }
             let owner = OWNER.load(Ordering::SeqCst) as HWND;
-            let active = linked_surface_active(
-                true,
-                photoshop_window_ready(owner),
-                linked_front,
-                TYPING.load(Ordering::SeqCst),
-            );
+            let active = present && photoshop_window_ready(owner);
             if active {
-                LINKED_IDLE_TICKS.store(0, Ordering::SeqCst);
                 let has_placement = PLACED.lock().ok().is_some_and(|p| p.is_some());
                 if !has_placement {
                     // If the EXE started while Photoshop was minimised, no valid canvas rect
@@ -1927,12 +1932,8 @@ pub fn watch() {
                     set_topmost(me, true);
                 }
             } else {
-                // A real logical attachment: another application, minimised Photoshop, or a
-                // closed Photoshop window must remove this panel from the visible desktop —
-                // once that has lasted (PARK_AFTER_TICKS), not for a foreground blink.
-                if !PARKED.load(Ordering::SeqCst) && !idle_long_enough(&LINKED_IDLE_TICKS) {
-                    continue;
-                }
+                // Another application, minimised Photoshop, or a closed Photoshop window removes
+                // this panel from the desktop (`present` already waited out a foreground blink).
                 if !PARKED.load(Ordering::SeqCst) {
                     set_topmost(me, false);
                     park(me);
@@ -1973,7 +1974,6 @@ static SHELF_VIEW: Mutex<Option<ScreenRect>> = Mutex::new(None);
 static SHELF_OWNER: AtomicIsize = AtomicIsize::new(0);
 /// logical size the content asks for
 static SHELF_SIZE: Mutex<(f32, f32)> = Mutex::new((crate::panel::shelf::WIDTH, 200.0));
-static SHELF_IDLE_TICKS: AtomicU32 = AtomicU32::new(0);
 static SHELF_GUARD_HWND: AtomicIsize = AtomicIsize::new(0);
 static SHELF_ORIGINAL_WNDPROC: AtomicIsize = AtomicIsize::new(0);
 
@@ -2112,7 +2112,7 @@ pub fn cursor_pos() -> (i32, i32) {
 }
 
 /// Follow Photoshop: on screen while it (or one of our windows) is in front, parked otherwise.
-fn watch_shelf(foreground: &str) {
+fn watch_shelf(foreground: &str, present: bool) {
     if !SHELF_SHOWN.load(Ordering::SeqCst) {
         return;
     }
@@ -2127,15 +2127,14 @@ fn watch_shelf(foreground: &str) {
     }
     install_shelf_guard(h);
     let owner = SHELF_OWNER.load(Ordering::SeqCst) as HWND;
-    let active = photoshop_window_ready(owner) && matches!(foreground, "photoshop" | "variants" | "overlay" | "workbench" | "helper");
+    let active = present && photoshop_window_ready(owner);
     if !active {
-        if !SHELF_PARKED.load(Ordering::SeqCst) && idle_long_enough(&SHELF_IDLE_TICKS) {
+        if !SHELF_PARKED.load(Ordering::SeqCst) {
             shelf_park(h);
             log::line(format!("workbench parked: foreground={foreground}"));
         }
         return;
     }
-    SHELF_IDLE_TICKS.store(0, Ordering::SeqCst);
     if SHELF_PARKED.load(Ordering::SeqCst) {
         shelf_put(h);
     }

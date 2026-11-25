@@ -155,6 +155,7 @@ src/ui/app.ts  startOverlay()      生成页提供状态和     src/panel/genera
 - **移动**：只能用右下角角标（`host.rs` 的 `grip`）拖动。不要使用 `ViewportCommand::StartDrag`；当前窗口必须保持 `WS_EX_NOACTIVATE`，由 `win::move_by` 在拖动期间使用同步 `SetWindowPos(... SWP_NOACTIVATE)` 逐帧移动，松开时 `drag_finished` 将物理位移写入 `OFFSET`。角标命中区 20 px，视觉仍为三条短斜线。这样避免原生非客户区拖动与 no-activate 冲突，不影响 Photoshop 快捷键。
 - **键盘一直留在 PS**：面板视窗带 `WS_EX_NOACTIVATE`（点按钮不会启用视窗，像屏幕键盘、绘图软件的工具浮窗）。只有提示词框 / 数量框要打字时（`ctx.wants_keyboard_input()`，`host.rs` 的 `track_typing`）才去掉这个样式并拿键盘（`win::set_typing(true)`），不打字了立刻恢复并还给 PS。11-04 历史：第一版点过面板后 Alt 缩放失效；第二版「事后还键盘」后，画布上大部分移动快捷键仍失效，所以改成根本不拿键盘。
 - **日志**：`reports/overlay_runtime.log`（`log.rs`）：启动、show / hide 位置、typing 开关、键盘在谁手上（photoshop / overlay / other）每次变化都记一行；角标拖动记录 drag started / finished 坐标、delta 与累计 OFFSET。
+- **跟随 Photoshop 统一一套规则（2026-11-24）**：生成面板、变体栏、编辑工作台、底部状态栏（`monitor.rs`）都只看 `win::photoshop_present()`。`watch()` 每 250 ms 算一次：PS 主窗口在且没最小化，并且前台（经 `steady_front`：helper 自己的菜单 / 提示 / WavePlug 窗口、短暂无前台都沿用上一次）是 photoshop / overlay / variants / workbench 之一；回来立即显示，离开要连续 `PARK_AFTER_TICKS`（2 次）才隐藏（纯函数 `present_now` / `next_presence`，有测试）。以前各窗口各有一套：状态栏把 helper 自己的窗口也算作 PS 在前台，所以切到别的软件后它常留在屏幕上。日志 `photoshop present true/false: foreground=…`。
 - **跟随 PS**：每 250 ms 看一次 PS 主视窗位置，变了就发 `view-request`，插件重新算画布再发 `show`。
 - **「隐藏」= 停在画面外**（`PARK`，-32000），不真的隐藏：11-04 第一版用 `ShowWindowAsync` 真隐藏 / 显示，但 egui 在第一次画面时会照它自己记的「隐藏」再藏一次，结果有时选区时不出现、取消选区时反而出现。现在视窗对 egui 来说一直是开着的，只是位置在画面外。启动时设为工具视窗（不在工作列、不在 Alt+Tab）。
 - 从伺服器线程直接移动视窗，用非同步呼叫（`SWP_ASYNCWINDOWPOS`）。视窗靠唯一标题 `WavePlug 外置生成面板`（`host::TITLE`）找到。

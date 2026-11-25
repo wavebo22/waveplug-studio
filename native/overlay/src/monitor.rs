@@ -9,7 +9,7 @@
 // Like the hover frame (frame.rs): its own plain Win32 window on its own thread — no egui, no
 // GPU, drawn with GDI. Layered + transparent + no-activate + tool window, so it never takes the
 // mouse, the wheel, the keyboard or the foreground: everything goes to Photoshop under it. It is
-// shown only while Photoshop (or one of the helper's own windows) is in front and not minimised;
+// shown under the same rule as the other windows that go with Photoshop (win.rs photoshop_present);
 // nothing is measured while it is away.
 //
 // Where the numbers come from (all read-only, nothing is installed or changed):
@@ -264,7 +264,6 @@ mod imp {
     use super::{area, bar_rect, comfy_vram, cpu_usage, meter_frac, meters, summary, warnings, Bar, Level, Px, Scratch, Stats};
     use crate::log;
     use crate::protocol::ScreenRect;
-    use crate::win::PsFront;
 
     const WS_POPUP: u32 = 0x8000_0000;
     const WS_EX_TOPMOST: u32 = 0x0000_0008;
@@ -341,13 +340,10 @@ mod imp {
     const SAMPLE_MS: u64 = 1000;
     /// samples kept for the meters' graphs (one 2-px column each)
     const HISTORY: usize = 20;
-    /// Photoshop must be away for this many ticks in a row before the bar goes (see win.rs PARK_AFTER_TICKS)
-    const AWAY_TICKS: u32 = 2;
 
     /// the meters are on (性能监视)
     static ON: AtomicBool = AtomicBool::new(false);
     static VISIBLE: AtomicBool = AtomicBool::new(false);
-    static AWAY: AtomicU32 = AtomicU32::new(0);
     /// display scale × 100 the bar was last laid out at (for painting)
     static SCALE: AtomicU32 = AtomicU32::new(100);
     /// its height on screen while up, 0 when not (the completion notice goes above it)
@@ -455,15 +451,10 @@ mod imp {
             hide(h);
             return;
         }
-        match crate::win::photoshop_front() {
-            PsFront::Front => AWAY.store(0, Ordering::SeqCst),
-            PsFront::Unsure => return, // activation is moving: whatever was true still is
-            PsFront::Away => {
-                if AWAY.fetch_add(1, Ordering::SeqCst) + 1 >= AWAY_TICKS {
-                    hide(h);
-                }
-                return;
-            }
+        // the same rule as the generate panel, the variant rail and the workbench (win.rs)
+        if !crate::win::photoshop_present() {
+            hide(h);
+            return;
         }
         let Some(ps) = crate::win::photoshop_main_rect() else {
             hide(h); // minimised or gone
