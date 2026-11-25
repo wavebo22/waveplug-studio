@@ -598,6 +598,36 @@ export function mountPanel(root: HTMLElement, deps: PanelDeps) {
     c: ["copy", "已复制到剪贴板"], x: ["cut", "已剪切"], v: ["paste", "已粘贴"],
     f: ["pasteFront", "已贴在前面"], b: ["pasteBack", "已贴在后面"],
   };
+  /** a clipboard shortcut, passed on to Illustrator's menu (true: it was one) */
+  function clipboardKey(e: KeyboardEvent): boolean {
+    const k = e.key.toLowerCase(), ctrl = e.ctrlKey || e.metaKey;
+    if (!ctrl) return false;
+    let pick: [string, string] | undefined;
+    if (e.altKey) pick = e.shiftKey && k === "v" ? ["pasteAllArtboards", "已在所有画板上粘贴"] : undefined;
+    else if (e.shiftKey) pick = k === "v" ? ["pasteInPlace", "已就地粘贴"] : undefined;
+    else pick = CLIPBOARD_KEYS[k];
+    if (!pick) return false;
+    e.preventDefault();
+    void menuCmd(pick[0], pick[1]);
+    return true;
+  }
+  // the same anywhere else in the panel (a button, a filter chip, the empty space…): only text
+  // fields keep their own Ctrl+C / V (the search box, renaming)
+  document.addEventListener("keydown", e => {
+    if (e.defaultPrevented || renaming) return;
+    const t = e.target as HTMLElement | null;
+    if (t && (t.tagName === "INPUT" || t.tagName === "TEXTAREA" || t.isContentEditable)) return;
+    if (t && list.contains(t)) return; // the list's own handler below
+    clipboardKey(e);
+  });
+  // leaving the panel gives the keyboard back to Illustrator (a focused panel element otherwise
+  // keeps it, and Illustrator's shortcuts then do nothing), unless something is being typed
+  root.addEventListener("mouseleave", () => {
+    const a = document.activeElement as HTMLElement | null;
+    if (!a || a === document.body || renaming) return;
+    if ((a.tagName === "INPUT" || a.tagName === "TEXTAREA") && a !== document.body) return;
+    a.blur();
+  });
   list.addEventListener("keydown", e => {
     if (renaming) return;
     const k = e.key, ctrl = e.ctrlKey || e.metaKey;
@@ -616,11 +646,7 @@ export function mountPanel(root: HTMLElement, deps: PanelDeps) {
     // 复制 / 粘贴: while the panel has the keyboard (any click on a row gives it), Illustrator gets
     // none of its shortcuts — Ctrl+C / X / V / F / B did nothing at all. Passed on as its own
     // 编辑 menu commands, so they act exactly as in Illustrator (Ctrl+F used to focus the search box).
-    else if (ctrl && !e.altKey && CLIPBOARD_KEYS[k.toLowerCase()] && !(e.shiftKey && k.toLowerCase() !== "v")) {
-      e.preventDefault();
-      const [cmd, done] = e.shiftKey ? ["pasteInPlace", "已就地粘贴"] : CLIPBOARD_KEYS[k.toLowerCase()];
-      void menuCmd(cmd, done);
-    } else if (ctrl && e.altKey && e.shiftKey && k.toLowerCase() === "v") { e.preventDefault(); void menuCmd("pasteAllArtboards", "已在所有画板上粘贴"); }
+    else if (clipboardKey(e)) { /* done */ }
     // the panel has the keyboard: Illustrator's own Ctrl+Z wouldn't reach it
     else if (ctrl && k.toLowerCase() === "z") { e.preventDefault(); void act(e.shiftKey ? "redo" : "undo", {}, e.shiftKey ? "已重做" : "已撤销"); }
     else if (ctrl && k.toLowerCase() === "y") { e.preventDefault(); void act("redo", {}, "已重做"); }
