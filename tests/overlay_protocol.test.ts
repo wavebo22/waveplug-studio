@@ -2,7 +2,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { docToScreen, parseOverlayEvent, selectionKey } from "../src/core/overlay/protocol.ts";
 import { changedSections } from "../src/core/overlay/sections.ts";
-import { type GenerateSections, parseGenerateAction as parsePanelAction } from "../src/core/overlay/generatePanel.ts";
+import { type GenerateSections, modeBeforeAction, parseGenerateAction as parsePanelAction, shownPanelMode } from "../src/core/overlay/generatePanel.ts";
 
 const panelWanted = (docId: number | null, sel: unknown) => docId !== null && !!sel;
 type PanelSections = GenerateSections;
@@ -29,10 +29,10 @@ test("外附介面：只发变化的区块，重连后全部重发", () => {
   const base: PanelSections = {
     mode: "blend", prompt: "", hint: "可选", favorites: ["a"], refs: [{ slot: 1, tag: null, name: null }], count: 1,
     action: "融图", blocked: null, params: [{ kind: "toggle", key: "fullRun", label: "完整运行", value: false, tip: "" }],
-    run: null, status: { tone: "info", text: "就绪" },
+    run: null, status: { tone: "info", text: "就绪" }, note: null,
   };
   const sent = new Map<string, string>();
-  assert.deepEqual(Object.keys(changedSections(sent, base)!).sort(), ["action", "blocked", "count", "favorites", "hint", "mode", "params", "prompt", "refs", "run", "status"]);
+  assert.deepEqual(Object.keys(changedSections(sent, base)!).sort(), ["action", "blocked", "count", "favorites", "hint", "mode", "note", "params", "prompt", "refs", "run", "status"]);
   assert.equal(changedSections(sent, base), null);
   assert.deepEqual(changedSections(sent, { ...base, prompt: "杯子", count: 2 }), { prompt: "杯子", count: 2 });
   const refsSent = new Map<string, string>();
@@ -42,7 +42,7 @@ test("外附介面：只发变化的区块，重连后全部重发", () => {
     refs: [{ slot: 1, tag: "图2", name: "ref.png", thumb: "data:image/png;base64,AAAA" }],
   }), { refs: [{ slot: 1, tag: "图2", name: "ref.png", thumb: "data:image/png;base64,AAAA" }] });
   assert.deepEqual(changedSections(sent, { ...base, prompt: "杯子", count: 2, run: { stage: "生成中", progress: 0.5 } }), { run: { stage: "生成中", progress: 0.5 } });
-  assert.equal(Object.keys(changedSections(new Map(), base)!).length, 11);
+  assert.equal(Object.keys(changedSections(new Map(), base)!).length, 12);
 });
 
 test("外附介面：只接受格式正确的消息；操作由各介面自己检查", () => {
@@ -147,4 +147,23 @@ test("卡死保护：文档键是路径才发路径，没保存过的为空", as
     { name: "b.psd", path: "/Users/x/b.psd" },
   ]);
   assert.equal(helperOutdated("0.13.0", HANG_HELPER_VERSION), true);
+});
+
+test("外置生成面板：只显示、只运行自己的四个模式，放大 / 扩图不会被误用", () => {
+  assert.equal(shownPanelMode("blend", "inpaint"), "blend");
+  // 插件停在放大（用过放大，或选中了放大结果）：面板仍是上次在面板里的模式
+  assert.equal(shownPanelMode("upscale", "extract"), "extract");
+  assert.equal(shownPanelMode("outpaint", undefined), "inpaint");
+  assert.equal(shownPanelMode("upscale", "upscale"), "inpaint");
+  // 面板里的操作先把插件切回面板显示的模式
+  assert.equal(modeBeforeAction("upscale", "inpaint", { kind: "generate" }), "inpaint");
+  assert.equal(modeBeforeAction("upscale", "inpaint", { kind: "set-prompt", text: "猫" }), "inpaint");
+  assert.equal(modeBeforeAction("inpaint", "inpaint", { kind: "generate" }), null);
+  // 「开始」带着点击时显示的模式：插件刚自动切走、面板还没收到新状态时，照面板显示的跑
+  assert.equal(modeBeforeAction("blend", "blend", { kind: "generate", mode: "inpaint" }), "inpaint");
+  assert.equal(modeBeforeAction("upscale", "inpaint", { kind: "cancel" }), null);
+  assert.equal(modeBeforeAction("upscale", "inpaint", { kind: "set-mode", mode: "blend" }), null);
+  assert.deepEqual(parsePanelAction({ kind: "generate", mode: "blend" }), { kind: "generate", mode: "blend" });
+  assert.deepEqual(parsePanelAction({ kind: "generate" }), { kind: "generate" });
+  assert.equal(parsePanelAction({ kind: "generate", mode: "upscale" }), null);
 });

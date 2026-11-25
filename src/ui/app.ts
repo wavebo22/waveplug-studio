@@ -25,7 +25,7 @@ import { BLEND_PREFIX, EXPAND_PREFIX, EXTRACT_PREFIX, FILL_PREFIX, GENERATE_PREF
 import { RATIOS, createExpandEditor } from "./expandEditor.ts";
 import { createToolsView } from "./tools.ts";
 import { type Overlay, connectOverlay } from "../app/overlay.ts";
-import type { PanelParam } from "../core/overlay/generatePanel.ts";
+import { type GenerateSections, type PanelMode, type PanelParam, isPanelMode, shownPanelMode } from "../core/overlay/generatePanel.ts";
 import { OPEN_APP_HELPER_VERSION, appSettingsOf, hangDocs } from "../core/overlay/protocol.ts";
 import { attachGenerateSurface } from "./generateSurface.ts";
 import { attachIllustratorBridge } from "../app/illustratorBridge.ts";
@@ -808,6 +808,28 @@ export function mountApp(root: HTMLElement, svc: Services) {
     finally { hangSyncing = false; }
   }
 
+  /** The external panel while the plugin is in a mode it has no tab for (扩图 / 放大): it keeps
+   *  showing its own mode, with that mode's saved prompt and count, and says that acting here
+   *  switches the plugin back (generateSurface.ts does the switch before any action). */
+  function standbyPanelSections(shown: PanelMode): GenerateSections {
+    const p = pickFor(shown), ps = p ? store.state(p.id) : null;
+    const label = (m: string) => MODES.find(([k]) => k === m)?.[1] ?? m;
+    return {
+      mode: shown,
+      prompt: ps?.prompt ?? "",
+      hint: "描述要生成的内容",
+      favorites: [...(favorites[shown] ?? [])],
+      refs: [],
+      count: normalizeVariationCount(ps?.count),
+      action: shown === "blend" ? "融图" : shown === "extract" ? "抠图" : "生成",
+      blocked: run ? null : p ? null : `请先在插件面板里导入${label(shown)}工作流`,
+      params: [],
+      run: run ? { stage: run.stage + (run.detail ? " · " + run.detail : ""), progress: run.progress ?? 0 } : null,
+      status: { tone: status.kind, text: status.text },
+      note: run ? `插件正在「${label(mode)}」` : `插件面板现在是「${label(mode)}」；在这里操作会切回「${label(shown)}」`,
+    };
+  }
+
   function startOverlay() {
     overlay = connectOverlay({
       launch: svc.launchOverlay,
@@ -882,8 +904,11 @@ export function mountApp(root: HTMLElement, svc: Services) {
       }
     });
     genSurface = attachGenerateSurface(overlay, {
-      sections: () => ({
-        mode,
+      sections: () => {
+        const shown = shownPanelMode(mode, settings.panelMode);
+        if (shown !== mode) return standbyPanelSections(shown);
+        return {
+        mode: shown,
         prompt: prompt.value,
         hint: promptHint.textContent ?? "",
         favorites: [...(favorites[favKey()] ?? [])],
@@ -899,10 +924,14 @@ export function mountApp(root: HTMLElement, svc: Services) {
         params: panelParams(),
         run: run ? { stage: run.stage + (run.detail ? " · " + run.detail : ""), progress: run.progress ?? 0 } : null,
         status: { tone: status.kind, text: status.text },
-      }),
+        note: null,
+        };
+      },
       where: () => ({ docId: doc?.id ?? null, sel }),
+      pluginMode: () => mode,
+      panelMode: () => shownPanelMode(mode, settings.panelMode),
       canvasView: id => svc.host.canvasView?.(id) ?? Promise.resolve(null),
-      setMode: m => { if (MODES.some(([x]) => x === m)) setMode(m as TaskType); },
+      setMode: m => { if (isPanelMode(m)) setMode(m); },
       setPrompt: text => setPromptText(text),
       setCount: n => { countInput.value = String(n); saveCount(n); renderAction(); },
       setNumber: (key, value) => setParam((_, ps) => { const l = loraSlotOf(ps, key); if (l) l.strength = Math.max(LORA_MIN, Math.min(LORA_MAX, value)); else ps.params[key] = value; }),
@@ -981,7 +1010,9 @@ export function mountApp(root: HTMLElement, svc: Services) {
     if (source === "user") modeIntentRevision++;
     if (m === mode) return;
     const previous = mode;
-    mode = m; settings.mode = m; store.saveSettings(settings);
+    mode = m; settings.mode = m;
+    if (isPanelMode(m)) settings.panelMode = m;
+    store.saveSettings(settings);
     log("info", "generate mode changed", JSON.stringify({ from: previous, to: m, source, selectedGroup: lastGroupKey }));
     profile = pickFor(m);
     pstate = profile ? store.state(profile.id) : null;

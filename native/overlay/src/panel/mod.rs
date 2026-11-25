@@ -32,6 +32,27 @@ pub struct ExternalLayerDrag {
     pub total_count: usize,
 }
 
+/// What a surface's bar says (the strip it folds into, also its footer while open).
+#[derive(Clone, Debug, PartialEq)]
+pub struct BarInfo {
+    /// the mode / subject, drawn after the title
+    pub mode: String,
+    /// what is going on, right-aligned and cut to fit
+    pub text: String,
+    pub tone: BarTone,
+    /// a run's progress (0–1): drawn as a thin line along the bar
+    pub progress: Option<f32>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum BarTone {
+    Ok,
+    Quiet,
+    Busy,
+    Warn,
+    Error,
+}
+
 pub trait Surface {
     /// the `panel` name in every message (the same string as the plugin's surface id)
     fn id(&self) -> &'static str;
@@ -46,6 +67,10 @@ pub trait Surface {
     /// (the same hit test that drew the card decided it, drag/session.rs)
     fn external_drop(&mut self, _target: u32, _reference: &crate::drag::Reference) -> Vec<Value> {
         Vec::new()
+    }
+    /// what its bar says; None: the surface has no bar
+    fn bar(&self) -> Option<BarInfo> {
+        None
     }
     /// keep a temporarily collapsed surface expanded while it has ongoing work or local UI state
     fn keep_expanded(&self) -> bool {

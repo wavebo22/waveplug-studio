@@ -26,8 +26,34 @@ pub const TOAST_TITLE: &str = "WavePlug 提示";
 pub const HANG_TITLE: &str = "WavePlug · Photoshop 没有响应";
 const HANG_SIZE: egui::Vec2 = egui::vec2(440.0, 236.0);
 const TOAST_SIZE: egui::Vec2 = egui::vec2(300.0, 70.0);
-const COLLAPSED_BAR_HEIGHT: f32 = 12.0;
+/// The bar the generate panel folds into (and its footer while open): its height, and the gap
+/// around it inside the window's border. Big enough to hit without aiming.
+const BAR_HEIGHT: f32 = 26.0;
+const BAR_PAD: f32 = 4.0;
+/// the folded window's content: the bar and the gap around it
+const COLLAPSED_BAR_HEIGHT: f32 = BAR_HEIGHT + 2.0 * BAR_PAD;
 const DRAG_REVEAL_ZONE_HEIGHT: f32 = 72.0;
+/// How long the panel stays open after the pointer leaves it: crossing its edge on the way to a
+/// button, or slipping off for a moment, must not fold it under the cursor.
+const COLLAPSE_GRACE: Duration = Duration::from_millis(500);
+/// Room at the bar's right end for the corner grip (drawn over it while the panel is open).
+const GRIP_ROOM: f32 = 24.0;
+
+/// Whether the panel is folded this frame. `open_until`: it was last wanted until then (the
+/// grace after the pointer left). Pure, so the hover rules are tested without a window.
+fn fold_now(wanted: bool, now: Instant, open_until: &mut Option<Instant>) -> bool {
+    if wanted {
+        *open_until = Some(now + COLLAPSE_GRACE);
+        return false;
+    }
+    match *open_until {
+        Some(t) if now < t => false,
+        _ => {
+            *open_until = None;
+            true
+        }
+    }
+}
 
 fn should_expand_generate_panel(
     pointer_inside: bool,
@@ -323,6 +349,9 @@ pub fn run() {
                 target_height: 0.0,
                 resize_from: None,
                 collapsed: true,
+                open_until: None,
+                // WAVEPLUG_HOST_OPEN: start 固定 open (with WAVEPLUG_HOST_SHOT, a picture of the open panel)
+                pinned: std::env::var_os("WAVEPLUG_HOST_OPEN").is_some(),
                 toast: None,
                 hang_placed: false,
                 variant_rail: VariantRail::new(),
@@ -360,6 +389,10 @@ struct Host {
     resize_from: Option<(f32, Instant)>,
     /// collapsed while idle; expanded on hover, active input/work, or a drag entering its reveal zone
     collapsed: bool,
+    /// the panel stays open until then although nothing wants it (COLLAPSE_GRACE)
+    open_until: Option<Instant>,
+    /// 固定: the user keeps the panel open (the button on its bar), for this run of the helper
+    pinned: bool,
     toast: Option<Toast>,
     /// 卡死保护's dialog window has been put in the middle of Photoshop
     hang_placed: bool,
@@ -389,6 +422,31 @@ mod tests {
         assert!(should_expand_generate_panel(false, true, false, false));
         assert!(should_expand_generate_panel(false, false, true, false));
         assert!(should_expand_generate_panel(false, false, false, true));
+    }
+
+    #[test]
+    fn the_panel_folds_only_after_the_pointer_has_been_away_for_the_grace() {
+        let t0 = Instant::now();
+        let mut until = None;
+        assert!(fold_now(false, t0, &mut until), "nothing wants it: folded");
+        assert!(!fold_now(true, t0, &mut until), "hovered: open at once");
+        assert!(!fold_now(false, t0 + Duration::from_millis(200), &mut until), "just left: still open");
+        assert!(!fold_now(true, t0 + Duration::from_millis(300), &mut until), "came back: open");
+        assert!(!fold_now(false, t0 + Duration::from_millis(700), &mut until), "grace counts from the last hover");
+        assert!(fold_now(false, t0 + Duration::from_millis(900), &mut until), "away long enough: folded");
+        assert!(until.is_none());
+    }
+
+    #[test]
+    fn bar_text_is_cut_to_fit_with_an_ellipsis() {
+        let ctx = egui::Context::default();
+        let _ = ctx.run(egui::RawInput::default(), |ctx| {
+            let font = theme::font(theme::FS_S);
+            let long = "请先导入融图工作流（含融图 LoRA）。「导入工作流」里有 WavePlug 内置工作流";
+            let cut = fit_text(ctx, long, &font, 80.0);
+            assert!(cut.ends_with('…') && cut.chars().count() < long.chars().count());
+            assert_eq!(fit_text(ctx, "就绪", &font, 80.0), "就绪");
+        });
     }
 }
 
@@ -615,6 +673,7 @@ impl Host {
                     }
                     self.current = next;
                     self.collapsed = true;
+                    self.open_until = None;
                     if !cfg!(windows) {
                         ctx.send_viewport_cmd(ViewportCommand::Visible(true));
                     }
@@ -652,6 +711,7 @@ impl Host {
                     if self.current.is_some() && self.current == self.index(&panel) {
                         self.current = None;
                         self.collapsed = true;
+                        self.open_until = None;
                         self.typing = false;
                         ctx.memory_mut(|mem| mem.stop_text_input());
                         if !cfg!(windows) {
@@ -739,9 +799,9 @@ impl Host {
 
     /// The window follows the surface's content height (no empty space under it); on Windows its
     /// bottom edge stays put (win.rs `fit_height`).
-    fn fit(&mut self, ctx: &egui::Context, content: f32, collapsed: bool) {
-        // Expanded: 8 px margin above/below + 1 px border. Collapsed: border only.
-        let chrome = if collapsed { 2.0 } else { 18.0 };
+    fn fit(&mut self, ctx: &egui::Context, content: f32) {
+        // the 1 px border above and below (the margins are part of the content now)
+        let chrome = 2.0;
         let want = (content + chrome).round();
         // a new height (the bar ↔ the whole panel, a section opening): go there over a moment
         // instead of jumping (anim.rs). The very first fit has nothing to come from.
@@ -1064,14 +1124,146 @@ impl Host {
     }
 }
 
+/// `text` cut to `max` wide (points) with an ellipsis, as `font` draws it.
+fn fit_text(ctx: &egui::Context, text: &str, font: &egui::FontId, max: f32) -> String {
+    let width = |t: &str| ctx.fonts(|f| f.layout_no_wrap(t.to_string(), font.clone(), egui::Color32::WHITE).size().x);
+    if width(text) <= max {
+        return text.to_string();
+    }
+    let mut chars: Vec<char> = text.chars().collect();
+    while !chars.is_empty() {
+        chars.pop();
+        let cut: String = chars.iter().collect::<String>() + "…";
+        if width(&cut) <= max {
+            return cut;
+        }
+    }
+    "…".to_string()
+}
+
+/// The generate panel's bar: ✦ 生图 · <mode> on the left; folded, what is going on on the right
+/// (and a run's progress along its bottom edge); open, the 固定 button (and room for the grip).
+/// Returns whether 固定 was clicked.
+fn bar(ui: &mut egui::Ui, info: &crate::panel::BarInfo, collapsed: bool, pinned: bool) -> bool {
+    use crate::panel::BarTone;
+    use egui::{pos2, vec2, Align2, CornerRadius, Rect};
+    let (rect, resp) = ui.allocate_exact_size(vec2(ui.available_width(), BAR_HEIGHT), Sense::hover());
+    let hovered = resp.hovered();
+    let p = ui.painter().clone();
+    let fill = if collapsed && hovered { theme::HOVER } else { theme::SURFACE };
+    p.rect_filled(rect, CornerRadius::same(theme::R), fill);
+    p.rect_stroke(
+        rect,
+        CornerRadius::same(theme::R),
+        Stroke::new(1.0_f32, if collapsed && hovered { theme::LINE } else { theme::LINE_SOFT }),
+        egui::StrokeKind::Inside,
+    );
+    // ✦ 生图 · 局部重绘
+    let mut x = rect.left() + 10.0;
+    let cy = rect.center().y;
+    spark_icon(&p, pos2(x + 5.0, cy), 5.0, theme::ACCENT_HI);
+    x += 16.0;
+    let title = p.layout_no_wrap("生图".into(), theme::font_bold(theme::FS), theme::TEXT);
+    let tw = title.size().x;
+    p.galley(pos2(x, cy - title.size().y / 2.0), title, theme::TEXT);
+    x += tw + 6.0;
+    p.circle_filled(pos2(x, cy), 1.5, theme::TEXT_3);
+    x += 6.0;
+    let mode = p.layout_no_wrap(info.mode.clone(), theme::font(theme::FS), theme::ACCENT_HI);
+    let mw = mode.size().x;
+    p.galley(pos2(x, cy - mode.size().y / 2.0), mode, theme::ACCENT_HI);
+    x += mw + 12.0;
+
+    let mut pin_clicked = false;
+    if collapsed {
+        // what is going on, right-aligned and cut to the room that is left
+        let color = match info.tone {
+            BarTone::Ok => theme::TEXT_3,
+            BarTone::Quiet => theme::TEXT_3,
+            BarTone::Busy => theme::ACCENT_HI,
+            BarTone::Warn => theme::WARN,
+            BarTone::Error => theme::ERR,
+        };
+        let dot = match info.tone {
+            BarTone::Ok => Some(theme::OK),
+            BarTone::Busy => Some(theme::ACCENT_HI),
+            BarTone::Warn => Some(theme::WARN),
+            BarTone::Error => Some(theme::ERR),
+            BarTone::Quiet => None,
+        };
+        let right = rect.right() - 10.0;
+        let room = right - x - if dot.is_some() { 10.0 } else { 0.0 };
+        if room > 16.0 {
+            let font = theme::font(theme::FS_S);
+            let text = fit_text(ui.ctx(), &info.text, &font, room);
+            let g = p.layout_no_wrap(text, font, color);
+            let left = right - g.size().x;
+            if let Some(c) = dot {
+                p.circle_filled(pos2(left - 7.0, cy), 3.0, c);
+            }
+            p.galley(pos2(left, cy - g.size().y / 2.0), g, color);
+        }
+        if info.text.chars().count() > 0 {
+            resp.clone().on_hover_text(&info.text);
+        }
+        if let Some(r) = info.progress {
+            let line = Rect::from_min_size(
+                pos2(rect.left() + 2.0, rect.bottom() - 3.0),
+                vec2((rect.width() - 4.0) * r.clamp(0.0, 1.0), 2.0),
+            );
+            p.rect_filled(line, CornerRadius::same(1), theme::ACCENT);
+            ui.ctx().request_repaint_after(Duration::from_millis(200));
+        }
+    } else {
+        // 固定 / 已固定, left of the grip's corner
+        let label = if pinned { "已固定" } else { "固定" };
+        let g = p.layout_no_wrap(label.into(), theme::font(theme::FS_S), theme::TEXT);
+        let w = g.size().x + 16.0;
+        let btn = Rect::from_min_size(
+            pos2(rect.right() - GRIP_ROOM - w, rect.top() + 3.0),
+            vec2(w, BAR_HEIGHT - 6.0),
+        );
+        let r = ui.interact(btn, ui.id().with("pin"), Sense::click());
+        let (bg, ink, line) = if pinned {
+            (theme::ACCENT_WASH, theme::ACCENT_HI, theme::ACCENT)
+        } else if r.hovered() {
+            (theme::HOVER, theme::TEXT, theme::LINE)
+        } else {
+            (egui::Color32::TRANSPARENT, theme::TEXT_2, theme::LINE)
+        };
+        p.rect_filled(btn, CornerRadius::same(theme::R), bg);
+        p.rect_stroke(btn, CornerRadius::same(theme::R), Stroke::new(1.0_f32, line), egui::StrokeKind::Inside);
+        p.text(btn.center(), Align2::CENTER_CENTER, label, theme::font(theme::FS_S), ink);
+        pin_clicked = r.clicked();
+        r.on_hover_text(if pinned { "取消固定：鼠标移开后收起" } else { "固定展开：鼠标移开也不收起" });
+    }
+    pin_clicked
+}
+
+/// ✦ (the same star as the 开始 button)
+fn spark_icon(p: &egui::Painter, c: egui::Pos2, r: f32, color: egui::Color32) {
+    let s = Stroke::new(1.5_f32, color);
+    for (dx, dy) in [(0.0f32, 1.0f32), (1.0, 0.0), (0.7, 0.7), (0.7, -0.7)] {
+        p.line_segment([egui::pos2(c.x - dx * r, c.y - dy * r), egui::pos2(c.x - dx * r * 0.35, c.y - dy * r * 0.35)], s);
+        p.line_segment([egui::pos2(c.x + dx * r * 0.35, c.y + dy * r * 0.35), egui::pos2(c.x + dx * r, c.y + dy * r)], s);
+    }
+}
+
 impl eframe::App for Host {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         self.take_commands(ctx);
         self.take_drag_events();
+        // egui's hover, and on Windows the real cursor over the window too: a window that never
+        // takes the foreground can miss the first move into it, and the bar must open on that
+        #[cfg(windows)]
+        let pointer_inside = ctx.input(|i| i.pointer.hover_pos().is_some())
+            || crate::win::cursor_in_panel_reveal_zone(0.0);
+        #[cfg(not(windows))]
         let pointer_inside = ctx.input(|i| i.pointer.hover_pos().is_some());
         let pointer_down = ctx.input(|i| i.pointer.any_down());
         let keep_open = self.typing
             || self.dragging
+            || self.pinned
             || self.current.map(|i| self.surfaces[i].keep_expanded()).unwrap_or(false);
         // Any WaveLayer drag (groups and effects too) opens the bar when it nears the panel.
         let external_drag = crate::drag::active();
@@ -1080,8 +1272,19 @@ impl eframe::App for Host {
             && crate::win::cursor_in_panel_reveal_zone(DRAG_REVEAL_ZONE_HEIGHT);
         #[cfg(not(windows))]
         let dragging_over_reveal_zone = external_drag && pointer_inside;
-        self.collapsed = self.current.is_none()
-            || !should_expand_generate_panel(pointer_inside, pointer_down, keep_open, dragging_over_reveal_zone);
+        let wanted = self.current.is_some()
+            && should_expand_generate_panel(pointer_inside, pointer_down, keep_open, dragging_over_reveal_zone);
+        let now = Instant::now();
+        self.collapsed = self.current.is_none() || fold_now(wanted, now, &mut self.open_until);
+        if !self.collapsed && !wanted {
+            // the grace is running: look again when it is over (nothing else may come)
+            if let Some(t) = self.open_until {
+                ctx.request_repaint_after(t.saturating_duration_since(now) + Duration::from_millis(10));
+            }
+        } else if !self.collapsed && pointer_inside {
+            // keep watching the cursor (the Windows check above has no event of its own)
+            ctx.request_repaint_after(Duration::from_millis(120));
+        }
         if self.collapsed {
             // a collapsed or hidden panel has no slots on screen to drop on
             crate::drag::targets::publish("generate", Vec::new());
@@ -1093,40 +1296,23 @@ impl eframe::App for Host {
 
         let mut sent: Vec<(&'static str, serde_json::Value)> = Vec::new();
         let mut content: Option<f32> = None;
+        let collapsed = self.collapsed;
+        let mut pin_clicked = false;
         egui::CentralPanel::default()
             .frame(
                 Frame::new()
                     .fill(theme::BG)
                     .stroke(Stroke::new(1.0_f32, theme::LINE))
-                    .inner_margin(Margin::same(if self.collapsed { 0 } else { 8 })),
+                    .inner_margin(Margin::ZERO),
             )
             .show(ctx, |ui| {
                 let Some(i) = self.current else {
                     ui.label(egui::RichText::new("等待插件…").color(theme::TEXT_3));
                     return;
                 };
-                if self.collapsed {
-                    let (rect, response) = ui.allocate_exact_size(
-                        egui::vec2(ui.available_width(), COLLAPSED_BAR_HEIGHT),
-                        Sense::hover(),
-                    );
-                    ui.painter().rect_filled(
-                        rect,
-                        egui::CornerRadius::same(2),
-                        egui::Color32::from_rgb(0x0b, 0x0b, 0x0b),
-                    );
-                    ui.painter().rect_stroke(
-                        rect,
-                        egui::CornerRadius::same(2),
-                        Stroke::new(1.0_f32, egui::Color32::from_rgb(0x58, 0x58, 0x58)),
-                        egui::StrokeKind::Inside,
-                    );
-                    response.on_hover_text("悬停展开外置生图面板");
-                    content = Some(COLLAPSED_BAR_HEIGHT);
-                    return;
-                }
                 let surface = &mut self.surfaces[i];
                 let id = surface.id();
+                let pinned = self.pinned;
                 // The panel sizes itself to its content. Keep ScrollArea only for its
                 // content-size measurement: no scrollbars and no parent wheel handling, so
                 // the count field can consume the wheel without moving the whole surface.
@@ -1135,14 +1321,38 @@ impl eframe::App for Host {
                     .enable_scrolling(false)
                     .scroll_bar_visibility(egui::scroll_area::ScrollBarVisibility::AlwaysHidden)
                     .show(ui, |ui| {
-                        for a in surface.ui(ui) {
-                            sent.push((id, a));
+                        ui.spacing_mut().item_spacing.y = 0.0;
+                        if !collapsed {
+                            Frame::new()
+                                .inner_margin(Margin { left: 8, right: 8, top: 8, bottom: 2 })
+                                .show(ui, |ui| {
+                                    ui.spacing_mut().item_spacing.y = 4.0;
+                                    for a in surface.ui(ui) {
+                                        sent.push((id, a));
+                                    }
+                                });
+                        }
+                        // the bar: all there is while folded, the footer while open — the same
+                        // strip in the same place, so the pointer that opened it is still on it
+                        if let Some(info) = surface.bar() {
+                            Frame::new()
+                                .inner_margin(Margin::same(BAR_PAD as i8))
+                                .show(ui, |ui| {
+                                    pin_clicked = bar(ui, &info, collapsed, pinned);
+                                });
                         }
                     });
                 content = Some(out.content_size.y);
             });
+        if pin_clicked {
+            self.pinned = !self.pinned;
+            if self.pinned {
+                self.open_until = None;
+            }
+            crate::log::line(format!("generate panel pinned {}", self.pinned));
+        }
         if let Some(h) = content {
-            self.fit(ctx, h, self.collapsed);
+            self.fit(ctx, h);
         }
         if !self.collapsed {
             self.grip(ctx);

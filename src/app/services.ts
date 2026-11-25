@@ -70,6 +70,8 @@ export interface Settings {
   view?: "generate" | "tools";
   /** panel mode and the workflow last used in each mode */
   mode?: TaskType;
+  /** the mode the external generate panel (外置生成面板) last showed: one of its four tabs */
+  panelMode?: string;
   activeByMode?: Partial<Record<TaskType, string>>;
   /** text-to-image size: "跟随" (selection / canvas aspect) or "w:h", and the long side in px */
   t2iRatio?: string;

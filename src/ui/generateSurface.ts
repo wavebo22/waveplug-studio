@@ -7,7 +7,7 @@
 import { log } from "../app/log.ts";
 import type { Overlay } from "../app/overlay.ts";
 import type { Rect } from "../core/image/region.ts";
-import { GENERATE_PANEL, type GenerateAction, type GenerateSections, parseGenerateAction } from "../core/overlay/generatePanel.ts";
+import { GENERATE_PANEL, type GenerateAction, type GenerateSections, type PanelMode, modeBeforeAction, parseGenerateAction } from "../core/overlay/generatePanel.ts";
 import type { CanvasView } from "../core/overlay/protocol.ts";
 import { NOT_SHOWN, type Shown, decide } from "../core/overlay/visibility.ts";
 
@@ -20,6 +20,9 @@ export interface GeneratePage {
   /** the active document and its selection (null when none) */
   where(): { docId: number | null; sel: Rect | null };
   canvasView(docId: number): Promise<CanvasView | null>;
+  /** the plugin's current mode, and the one the panel shows (shownPanelMode) */
+  pluginMode(): string;
+  panelMode(): PanelMode;
   setMode(mode: string): void;
   setPrompt(text: string): void;
   setCount(n: number): void;
@@ -81,6 +84,18 @@ export function attachGenerateSurface(overlay: Overlay, page: GeneratePage) {
     sections,
     parseAction: parseGenerateAction,
     onAction(a) {
+      // what runs is what the panel showed: the plugin may have been left in 放大 / 扩图, or have
+      // followed a selected AI layer of another kind since the panel's last state
+      const switchTo = modeBeforeAction(page.pluginMode(), page.panelMode(), a);
+      if (switchTo) {
+        log("info", "overlay panel action switches the mode first", JSON.stringify({ action: a.kind, from: page.pluginMode(), to: switchTo }));
+        page.setMode(switchTo);
+        if (page.pluginMode() !== switchTo) {
+          // setMode refuses while a run is going: never let a panel click run the wrong mode
+          log("warn", "overlay panel action dropped: the mode could not be switched", a.kind, page.pluginMode());
+          return;
+        }
+      }
       switch (a.kind) {
         case "set-mode": return page.setMode(a.mode);
         case "set-prompt": return page.setPrompt(a.text);

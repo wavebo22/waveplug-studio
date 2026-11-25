@@ -52,6 +52,7 @@ impl PanelState {
             params: Vec::new(),
             running: None,
             status: None,
+            note: None,
             fav_open: false,
             adv_open: false,
             ref_menu: None,
@@ -138,6 +139,24 @@ impl Surface for GenerateSurface {
             layers: reference.layers.clone(),
             total_count: reference.total_count,
         })]
+    }
+
+    fn bar(&self) -> Option<super::BarInfo> {
+        let s = &self.s;
+        let mode = s.mode.map(|m| m.label()).unwrap_or("生图").to_string();
+        let (text, tone, progress) = if let Some(run) = &s.running {
+            let pct = (run.progress.clamp(0.0, 1.0) * 100.0).round() as u32;
+            (format!("{} {pct}%", run.stage), super::BarTone::Busy, Some(run.progress.clamp(0.0, 1.0)))
+        } else if let Some((Tone::Error, text)) = &s.status {
+            (text.clone(), super::BarTone::Error, None)
+        } else if let Some(why) = &s.blocked {
+            (why.clone(), super::BarTone::Quiet, None)
+        } else if let Some(note) = &s.note {
+            (note.clone(), super::BarTone::Warn, None)
+        } else {
+            ("就绪".to_string(), super::BarTone::Ok, None)
+        };
+        Some(super::BarInfo { mode, text, tone, progress })
     }
 
     fn keep_expanded(&self) -> bool {
@@ -273,6 +292,9 @@ impl Surface for GenerateSurface {
                 progress: r.progress,
             });
         }
+        if sections.contains_key("note") {
+            s.note = get(sections, "note");
+        }
         if let Some(st) = get::<StatusIn>(sections, "status") {
             let tone = match st.tone.as_str() {
                 "ok" => Tone::Ok,
@@ -347,7 +369,8 @@ fn action_json(a: &Action) -> Value {
             json!({ "kind": "set-seed", "random": random, "value": value })
         }
         Action::NewSeed => json!({ "kind": "new-seed" }),
-        Action::Generate => json!({ "kind": "generate" }),
+        Action::Generate(Some(m)) => json!({ "kind": "generate", "mode": m.key() }),
+        Action::Generate(None) => json!({ "kind": "generate" }),
         Action::Cancel => json!({ "kind": "cancel" }),
     }
 }
@@ -388,6 +411,34 @@ mod tests {
         // a mode without a tab here
         g.apply(&serde_json::from_str(r#"{"mode":"upscale"}"#).unwrap());
         assert_eq!(g.s.mode, None);
+        g.apply(&serde_json::from_str(r#"{"note":"插件面板现在是「放大」"}"#).unwrap());
+        assert_eq!(g.s.note.as_deref(), Some("插件面板现在是「放大」"));
+        g.apply(&serde_json::from_str(r#"{"note":null}"#).unwrap());
+        assert_eq!(g.s.note, None);
+    }
+
+    #[test]
+    fn start_names_the_mode_its_tab_showed() {
+        assert_eq!(
+            action_json(&Action::Generate(Some(Mode::Inpaint))),
+            json!({ "kind": "generate", "mode": "inpaint" })
+        );
+        assert_eq!(action_json(&Action::Generate(None)), json!({ "kind": "generate" }));
+    }
+
+    #[test]
+    fn bar_says_mode_and_what_is_going_on() {
+        let mut g = GenerateSurface::new();
+        g.apply(&serde_json::from_str(r#"{"mode":"blend","blocked":null,"status":{"tone":"info","text":"就绪"}}"#).unwrap());
+        let b = g.bar().unwrap();
+        assert_eq!(b.mode, "融图");
+        assert_eq!(b.progress, None);
+        g.apply(&serde_json::from_str(r#"{"run":{"stage":"生成中","progress":0.4}}"#).unwrap());
+        let b = g.bar().unwrap();
+        assert_eq!(b.progress, Some(0.4));
+        assert!(b.text.contains("40%"));
+        g.apply(&serde_json::from_str(r#"{"run":null,"blocked":"请先建立选区"}"#).unwrap());
+        assert_eq!(g.bar().unwrap().text, "请先建立选区");
     }
 
     #[test]

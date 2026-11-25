@@ -5,14 +5,35 @@ import { MAX_REFERENCES } from "../workflow/references.ts";
 
 export const GENERATE_PANEL = "generate";
 
+/** The modes the external panel has tabs for. 扩图 / 放大 live only in the plugin panel. */
+export const PANEL_MODES = ["inpaint", "blend", "extract", "txt2img"] as const;
+export type PanelMode = typeof PANEL_MODES[number];
+export const isPanelMode = (m: unknown): m is PanelMode => (PANEL_MODES as readonly unknown[]).includes(m);
+
+/** The mode the panel shows: the plugin's own when the panel has a tab for it, else the one last
+ *  used here. The panel never shows (or runs) 扩图 / 放大: after the plugin was left in one of
+ *  them (used there, or followed a selected 放大 result), the panel stays on its own mode. */
+export function shownPanelMode(pluginMode: string, remembered: string | undefined): PanelMode {
+  return isPanelMode(pluginMode) ? pluginMode : isPanelMode(remembered) ? remembered : "inpaint";
+}
+
+/** Before the plugin acts on something done in the panel: the mode it has to switch to first,
+ *  so what runs is what the panel showed (null: it is in that mode already). `generate` names
+ *  the mode its tab showed when it was clicked, which wins over a state the panel hadn't got yet. */
+export function modeBeforeAction(pluginMode: string, shown: PanelMode, a: GenerateAction): PanelMode | null {
+  if (a.kind === "set-mode" || a.kind === "cancel" || a.kind === "finish-layer-drag") return null;
+  const want = a.kind === "generate" && a.mode ? a.mode : shown;
+  return pluginMode === want ? null : want;
+}
+
 export type PanelParam =
   | { kind: "number"; key: string; label: string; value: number; base: number; min: number; max: number; int: boolean }
   | { kind: "toggle"; key: string; label: string; value: boolean; tip: string }
   | { kind: "seed"; random: boolean; value: number };
 
 export interface GenerateSections {
-  /** inpaint / blend / extract / txt2img / outpaint / upscale */
-  mode: string;
+  /** always one of PANEL_MODES (shownPanelMode) */
+  mode: PanelMode;
   prompt: string;
   /** the grey hint inside the prompt box */
   hint: string;
@@ -26,6 +47,8 @@ export interface GenerateSections {
   params: PanelParam[];
   run: { stage: string; progress: number } | null;
   status: { tone: "info" | "ok" | "error"; text: string };
+  /** a line under the button about what the panel will do (the plugin is in another mode …); null: none */
+  note: string | null;
 }
 
 export type GenerateAction =
@@ -45,7 +68,7 @@ export type GenerateAction =
   | { kind: "drop-refs"; slot: number; docId: number; layers: { layerId: number; name: string }[]; totalCount: number }
   | { kind: "finish-layer-drag" }
   | { kind: "remove-ref"; slot: number }
-  | { kind: "generate" }
+  | { kind: "generate"; mode?: PanelMode }
   | { kind: "cancel" };
 
 const str = (v: unknown): v is string => typeof v === "string";
@@ -76,7 +99,10 @@ export function parseGenerateAction(a: any): GenerateAction | null {
     }
     case "finish-layer-drag": return { kind: a.kind };
     case "remove-ref": return num(a.slot) ? { kind: a.kind, slot: a.slot } : null;
-    case "new-seed": case "toggle-favorite": case "generate": case "cancel": return { kind: a.kind };
+    case "generate":
+      if (a.mode === undefined) return { kind: a.kind };
+      return isPanelMode(a.mode) ? { kind: a.kind, mode: a.mode } : null;
+    case "new-seed": case "toggle-favorite": case "cancel": return { kind: a.kind };
     default: return null;
   }
 }

@@ -68,6 +68,7 @@ impl Demo {
                 count: 1,
                 action: String::new(),
                 blocked: None,
+                note: None,
                 params: vec![
                     Param::Number {
                         key: "12.strength".into(),
@@ -152,7 +153,7 @@ impl Demo {
         }
         d.derive();
         if open.contains("run") {
-            d.apply(Action::Generate);
+            d.apply(Action::Generate(None));
         }
         d
     }
@@ -316,7 +317,7 @@ impl Demo {
                     }
                 }
             }
-            Action::Generate => {
+            Action::Generate(_) => {
                 s.running = Some(Run {
                     stage: "准备中…".into(),
                     progress: 0.0,

@@ -141,6 +141,13 @@ src/ui/app.ts  startOverlay()      生成页提供状态和     src/panel/genera
 - **操作怎么执行**：调用生成页原有的函数（`setMode`、`setPromptText`、数量写回、参数设置、`generate`、`cancel`、☆ 收藏按钮本身的 `click()`）。参考图 `add-ref` / `remove-ref` 已接到 UXP 的 `addReferenceFromSurface` / `removeRef`：当前图层取 PS 当前选中普通图层，文件走 `svc.pickImage`，剪贴板走 `pasteReference`；原始文件字节留在 UXP，仅把 128 px PNG 缩略图 data URL 发给 Rust。Rust 按槽位缓存纹理，点击 × 删除后仍调用同一个 UXP 数组移除函数。
 - **同步点**：`renderAction`、`renderFav`、`renderRefs`、`renderAdvanced`、`renderStatus` 开头调用 `outSync()`。
 
+### 5.1 模式只认面板自己的四个，折叠成底栏（2026-11-24 重做，未在 PS 实测）
+
+- **问题**：插件和外置面板共用一个模式。插件里用过放大 / 扩图，或选中放大结果时插件自动跟随成「放大」，面板四个标签都不亮、按钮仍写「开始」，点了就跑放大。
+- **现在**：面板只显示 / 只运行 `PANEL_MODES`（局部重绘 / 融图 / 抠图 / 文生图）。`shownPanelMode()`：插件模式在四个里就照它，否则用面板上次的模式（`settings.panelMode`，`setMode` 切到这四个之一时记下）。插件停在放大 / 扩图时，`app.ts` 的 `standbyPanelSections()` 发那个模式保存的提示词和数量，`note` 区块说明「在这里操作会切回…」。面板的任何操作（除切模式 / 取消）先经 `modeBeforeAction()` 把插件切回面板显示的模式再执行；`generate` 带上点击时标签显示的 `mode`，以它为准；运行中切不过去就丢弃这次操作并写日志。纯函数在 `generatePanel.ts`，测试在 `tests/overlay_protocol.test.ts`。
+- **底栏**（`host.rs` 的 `bar()`）：折叠时整个窗口是一条 26 px 的底栏（原来是 12 px 黑条），左边「✦ 生图 · 模式」，右边是状态（运行进度 / 错误 / 不能生成的原因 / 提示 / 就绪），运行时底边有进度线；展开时同一条栏留在最下面当页脚（鼠标还在它上面，不会一展开就移出去），右边是「固定」按钮和角标。内容由 `Surface::bar()` 提供。
+- **展开 / 收起**：悬停立即展开；Windows 上除了 egui 的悬停，还直接比对光标和窗口范围（`cursor_in_panel_reveal_zone(0.0)`），不怕漏掉第一次移入。鼠标离开后等 `COLLAPSE_GRACE`（500 ms）才收起（纯函数 `fold_now`，有测试）。「固定」后一直展开（本次运行有效）。截图自检：主程序加 `WAVEPLUG_HOST_OPEN=1` 以固定展开状态启动；假插件加 `WAVEPLUG_FAKE_IDLE=1` 发空闲 + 提示的状态。
+
 ## 6. Windows 部分（`src/win.rs`）
 
 - **逻辑附属视窗（2026-11-05）**：主生成面板是独立顶层窗口，**禁止设置 `GWLP_HWNDPARENT` 指向 Photoshop**；实测跨进程真实 owner 会破坏 PS 画布快捷键。保留 `WS_EX_NOACTIVATE`（启动后 eframe 可能覆盖样式，`watch()` 会恢复），在 Photoshop 前台且主窗口未最小化时临时置顶；切换其他程序、最小化或关闭 Photoshop 时移到 `PARK` 屏幕外，返回后由 `PLACED` 缓存的坐标和尺寸还原。不是用 `ShowWindow` 真隐藏。初次从浏览器启动时通过枚举顶层视窗寻找后台 Photoshop；最小化期间不采用 UXP 的异常屏幕坐标。**不要恢复旧的跨进程拥有者绑定**。
@@ -177,7 +184,7 @@ src/ui/app.ts  startOverlay()      生成页提供状态和     src/panel/genera
 | 字体 | 系统微软雅黑（`msyh.ttc` / `msyhbd.ttc`），内存映射（`memmap2`）+ 借用，不拷贝。Mac 上实测约 35 MB（整份读入时 330 MB） |
 | 内容 | 照用户截图：4 个模式标签（局部重绘 / 融图 / 抠图 / 文生图）；扩图、放大暂不放（插件在这两个模式时面板没有标签亮起） |
 | 提示文字 | 放在提示词框内，开始输入即消失 |
-| 按钮文字 | 一律「开始」（`view.rs` 的 `START`），运行中「取消」 |
+| 按钮文字 | 一律「开始」（`view.rs` 的 `START`），运行中「取消」；面板标签是唯一的模式来源，「开始」带着它（11-24） |
 | 高级参数 | 外置面板不显示（`SHOW_ADVANCED = false`），在插件面板里调；状态仍照常同步 |
 | 位置 | 画布左下角，只能用右下角角标拖动 |
 | 完成提醒 | 画布右下角黄色框，8 秒或点击关闭 |

@@ -193,6 +193,10 @@ fn main_card(
     } else if let Some(why) = &s.blocked {
         ui.label(RichText::new(why).size(FS).color(TEXT_2));
     }
+    // what 开始 will do when the plugin panel was left in another mode
+    if let Some(note) = &s.note {
+        ui.label(RichText::new(note).size(FS_S).color(WARN));
+    }
 }
 
 fn favorites(ui: &mut Ui, s: &mut PanelState, out: &mut Vec<Action>) {
@@ -494,7 +498,7 @@ fn references(
 fn generate_button(ui: &mut Ui, s: &PanelState, out: &mut Vec<Action>) {
     let size = vec2(ui.available_width(), 34.0);
     let running = s.running.is_some();
-    let enabled = running || s.blocked.is_none();
+    let enabled = running || (s.blocked.is_none() && s.mode.is_some());
     let (rect, resp) = ui.allocate_exact_size(
         size,
         if enabled {
@@ -537,7 +541,7 @@ fn generate_button(ui: &mut Ui, s: &PanelState, out: &mut Vec<Action>) {
         out.push(if running {
             Action::Cancel
         } else {
-            Action::Generate
+            Action::Generate(s.mode)
         });
     }
     if let (false, Some(why)) = (enabled, &s.blocked) {

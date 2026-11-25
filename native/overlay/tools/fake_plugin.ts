@@ -2,10 +2,12 @@
 // a made-up generate page. Prints what the helper sends back. Run the helper first, then:
 //   node native/overlay/tools/fake_plugin.ts
 // With WAVEPLUG_HOST_SHOT=<file.bmp> set for the helper, it saves a picture of the panel and quits.
+// WAVEPLUG_FAKE_IDLE=1: nothing runs and the plugin is "left in 放大" (the folded bar, the note).
 import { createHub } from "../../../src/core/overlay/hub.ts";
 import { parseOverlayEvent } from "../../../src/core/overlay/protocol.ts";
 import { type GenerateSections, parseGenerateAction } from "../../../src/core/overlay/generatePanel.ts";
 
+const idle = !!process.env.WAVEPLUG_FAKE_IDLE;
 const state: GenerateSections = {
   mode: "extract", prompt: "白色运动鞋", hint: "可选：要抠的东西，例如 护肤品、红色价格牌；留空 = 抠选区里的主体",
   favorites: ["白色运动鞋", "红色价格牌", "透明玻璃瓶"], refs: [], count: 3, action: "抠图", blocked: null,
@@ -15,7 +17,8 @@ const state: GenerateSections = {
     { kind: "toggle", key: "keepDetail", label: "保留原图细节", value: true, tip: "" },
     { kind: "toggle", key: "fullRun", label: "每次完整运行（不使用 ComfyUI 缓存，较慢）", value: false, tip: "" },
   ],
-  run: { stage: "生成中 · 2/3", progress: 0.62 }, status: { tone: "info", text: "抠图中…" },
+  run: idle ? null : { stage: "生成中 · 2/3", progress: 0.62 }, status: { tone: "info", text: idle ? "就绪" : "抠图中…" },
+  note: idle ? "插件面板现在是「放大」；在这里操作会切回「抠图」" : null,
 };
 const ws = new WebSocket("ws://127.0.0.1:47821");
 const hub = createHub(m => ws.send(JSON.stringify(m)));

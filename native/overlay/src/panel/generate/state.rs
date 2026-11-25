@@ -131,7 +131,7 @@ pub enum Tone {
 
 #[derive(Clone)]
 pub struct PanelState {
-    /// None while the plugin is in a mode without a tab here (扩图 / 放大)
+    /// the tab that is lit; the plugin only ever sends one of the four (None before its first state)
     pub mode: Option<Mode>,
     pub prompt: String,
     /// the grey line under the prompt (the mode's / workflow's hint)
@@ -146,6 +146,8 @@ pub struct PanelState {
     pub params: Vec<Param>,
     pub running: Option<Run>,
     pub status: Option<(Tone, String)>,
+    /// a line under the button about what 开始 will do (the plugin panel is in 放大 / 扩图 …)
+    pub note: Option<String>,
     // ── panel-local, never sent back ──
     pub fav_open: bool,
     pub adv_open: bool,
@@ -182,7 +184,8 @@ pub enum Action {
     SetToggle { key: String, value: bool },
     SetSeed { random: bool, value: u64 },
     NewSeed,
-    Generate,
+    /// carries the mode its tab showed when 开始 was clicked: the plugin runs that one
+    Generate(Option<Mode>),
     Cancel,
 }
 
