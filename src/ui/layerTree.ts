@@ -5,6 +5,7 @@
 // thumbnails (queued in the background, cached per layer), so documents with thousands of layers
 // stay smooth.
 
+import { groupSelectionLayers } from "../core/layers/groupSelection.ts";
 import { crumb, log } from "../app/log.ts";
 import { resultText } from "../core/layers/smart.ts";
 import { ThumbCache, thumbRetryDelay } from "../core/layers/thumbs.ts";
@@ -957,8 +958,11 @@ export function createLayerTreeView(tree: LayerTree, status: Status, tools?: Lay
         downZone = null; lastDown = null;
         suppressClick = true;
         setTimeout(() => { suppressClick = false; }, 300);
-        // a shape layer: its shape (stored as its vector mask), as Photoshop does
-        loadSelection(r.id, layers.find(x => x.id === r.id)?.kind === "shape" ? "vector" : false, pressed);
+        // a shape layer: its shape (stored as its vector mask), as Photoshop does; a group: the pixels of
+        // the layers shown in it, leaving out fill and adjustment layers (core/layers/groupSelection.ts)
+        const kind = layers.find(x => x.id === r.id)?.kind;
+        if (kind === "group") loadSelection(r.id, false, pressed, groupSelectionLayers(layers, r.id));
+        else loadSelection(r.id, kind === "shape" ? "vector" : false, pressed);
         return;
       }
       // an artboard's row: a double-click anywhere but its name picks its frame colour
@@ -1361,10 +1365,11 @@ export function createLayerTreeView(tree: LayerTree, status: Status, tools?: Lay
     open();
   }
 
-  /** 载入选区: the layer's pixels (or its mask) as the selection; Shift adds, Alt subtracts, both intersect */
-  function loadSelection(id: number, mask: boolean | "vector" | "filter", m: MouseEvent) {
+  /** 载入选区: the layer's pixels (or its mask) as the selection; Shift adds, Alt subtracts, both intersect.
+   *  `group`: a group's row, the layers whose pixels together make its selection */
+  function loadSelection(id: number, mask: boolean | "vector" | "filter", m: MouseEvent, group?: number[]) {
     const mode = m.shiftKey && m.altKey ? "intersect" : m.shiftKey ? "add" : m.altKey ? "subtract" : "set";
-    const load = () => void run("loadSelection", [id], JSON.stringify({ mode, mask }));
+    const load = () => void run("loadSelection", [id], JSON.stringify(group ? { mode, mask, group } : { mode, mask }));
     if (maskView) { exitMaskView(load); return; }
     load();
   }

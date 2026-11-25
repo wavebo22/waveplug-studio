@@ -1055,6 +1055,8 @@ export class UxpLayerTree implements LayerTree {
       return;
     }
     if (action === "loadSelection") {
+      const g = JSON.parse(arg ?? "{}");
+      if (Array.isArray(g.group)) { await loadGroupSelection(docId, ids[0], g.mode, g.group.map(Number), label, target); return; }
       // Ctrl+click on a thumbnail. The layer is named by id (the layer selection stays); when Photoshop
       // refuses that, the layer is selected for a moment and named as the target. Each refusal is logged
       // with what was sent, and what came of it.
@@ -1761,6 +1763,54 @@ const ADJUSTMENT_TYPES: Record<string, object> = {
 };
 
 /** The batchPlay steps of a layer command, run on the selected layers. */
+/** 载入选区 for a group (Ctrl+click on its icon): the pixels of `layers` (core/layers/groupSelection.ts —
+ *  the layers shown in it, without fill / adjustment layers) put together, then combined with the
+ *  selection as `mode` says. One history step. A layer Photoshop won't name by id is selected for a
+ *  moment and named as the target, as for a single layer. */
+async function loadGroupSelection(docId: number, groupId: number, mode: string, layers: number[], label: string, target: object) {
+  const sel = { _ref: "channel", _property: "selection" };
+  const src = (layer: object) => ({ _ref: [{ _ref: "channel", _enum: "channel", _value: "transparencyEnum" }, layer] });
+  const none = { _obj: "set", _target: [sel], to: { _enum: "ordinal", _value: "none" } };
+  const TMP = "WavePlug 组选区";
+  const [t] = await play([{ _obj: "get", _target: [{ _property: "targetLayersIDs" }, { _ref: "document", _id: docId }] }]);
+  const keep: number[] = (t?.targetLayersIDs ?? []).map((x: any) => Number(x._id));
+  const [before] = await play([{ _obj: "get", _target: [{ _property: "selection" }, { _ref: "document", _id: docId }] }]);
+  const had = before?.selection?.left !== undefined;
+  let moved = false;
+  /** one layer's pixels into the selection: `op` "set" | "add" | "subtract" */
+  const put = async (id: number, op: string) => {
+    const d = (layer: object) => op === "set" ? { _obj: "set", _target: [sel], to: src(layer) }
+      : op === "add" ? { _obj: "add", null: src(layer), to: sel } : { _obj: "subtract", null: src(layer), from: sel };
+    try { await act(d({ _ref: "layer", _id: id })); }
+    catch (e) {
+      log("warn", "group selection by id", id, op, String((e as Error).message ?? e));
+      await selectLayers([id]); moved = true;
+      await act(d(target));
+    }
+  };
+  await whenFree(() => step("WavePlug " + label, docId, async () => {
+    try {
+      if (mode === "subtract") { for (const id of layers) await put(id, "subtract"); return; }
+      if (mode === "add") { for (const id of layers) await put(id, "add"); return; }
+      // set / intersect: the group's pixels on their own first (intersect keeps the old selection in a
+      // channel for the moment and cuts the group's down to it)
+      if (mode === "intersect" && had) await act({ _obj: "duplicate", _target: [sel], name: TMP });
+      try {
+        if (!layers.length || (mode === "intersect" && !had)) { await act(none); return; }
+        await put(layers[0], "set");
+        for (const id of layers.slice(1)) await put(id, "add");
+        if (mode === "intersect") await act({ _obj: "intersectWith", null: { _ref: "channel", _name: TMP }, with: sel });
+      } finally {
+        if (mode === "intersect" && had) await act({ _obj: "delete", _target: [{ _ref: "channel", _name: TMP }] }).catch(e => log("warn", "group selection temp channel", e));
+      }
+    } finally {
+      if (moved && keep.length) await selectLayers(keep).catch(x => log("warn", "reselect", x));
+    }
+  }));
+  const [b] = await play([{ _obj: "get", _target: [{ _property: "selection" }, { _ref: "document", _id: docId }] }]);
+  log("info", "load group selection", groupId, mode, layers.length, b?.selection ? JSON.stringify(b.selection).slice(0, 160) : "no selection");
+}
+
 async function actionDescs(docId: number, action: LayerAction, ids: number[], arg?: string): Promise<object[]> {
   switch (action) {
     case "duplicate": return [{ _obj: "duplicate", _target: [target], version: 5 }];
