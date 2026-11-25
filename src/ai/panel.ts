@@ -30,6 +30,8 @@ export interface PanelDeps {
 interface Settings { follow: boolean; swatches: boolean; dense: boolean; autoSync: boolean; keepPlace: boolean; /** 发送 as pixels (else a vector smart object) */ sendPixels: boolean; /** 画板 → Photoshop: the new document's resolution */ boardPpi: number }
 const SETTINGS_KEY = "wl.ai.settings";
 const POLL_MS = 700, FULL_MS = 4000;
+/** the panel keeps reading Illustrator this long after the pointer left it (see poll) */
+const POLL_AFTER_LEAVE_MS = 1500;
 
 /** Illustrator's own layer colours */
 const LAYER_COLORS: [string, string][] = [["#4f80ff", "浅蓝色"], ["#ff4f4f", "红色"], ["#4fff4f", "绿色"], ["#4f4fff", "蓝色"], ["#ffff4f", "黄色"],
@@ -236,6 +238,11 @@ export function mountPanel(root: HTMLElement, deps: PanelDeps) {
   let seenSig = "", quietUntil = 0;
   async function poll() {
     if (document.hidden || host.busy || renaming || drag?.active || paint || Date.now() < quietUntil) return;
+    // Only while the pointer is over the panel (and a moment after it left). A script running in
+    // Illustrator every 0.7 s while the user works on the artboard broke Illustrator's own copy /
+    // paste (11-25: Ctrl+C worked once after starting Illustrator, then did nothing) — the same as
+    // other panels that poll. The panel reads everything again as soon as the pointer comes back.
+    if (!pointerIn && Date.now() - leftAt > POLL_AFTER_LEAVE_MS) return;
     try {
       const s = await host.call<string>("sig");
       if (s !== lastSig && s !== seenSig) { seenSig = s; return; }
@@ -245,9 +252,9 @@ export function mountPanel(root: HTMLElement, deps: PanelDeps) {
     } catch { quietUntil = Date.now() + 3000; /* Illustrator busy (a dialog, an error): leave it alone for a while */ }
   }
   setInterval(() => { void poll(); }, POLL_MS);
-  let pointerIn = false;
+  let pointerIn = false, leftAt = 0;
   root.addEventListener("mouseenter", () => { pointerIn = true; void refresh(); });
-  root.addEventListener("mouseleave", () => { pointerIn = false; });
+  root.addEventListener("mouseleave", () => { pointerIn = false; leftAt = Date.now(); });
 
   async function revealSelection(loud: boolean) {
     try {
@@ -833,7 +840,7 @@ export function mountPanel(root: HTMLElement, deps: PanelDeps) {
       check("紧凑行", "dense", "行高变小，一屏显示更多"),
       check("发送时保留在画板上的位置", "keepPlace", "发送到 Photoshop 的智能对象以整个画板为页面：Photoshop 文档和画板一样大时，放进去就在同样的位置（智能对象会包含画板的空白部分）"),
       boardPpiRow(),
-      check("自动同步到 Photoshop", "autoSync", "发送过的对象（有 PS 标记）在 Illustrator 里改了以后，停手 2 秒就自动更新 Photoshop 里对应的智能对象"),
+      check("自动同步到 Photoshop", "autoSync", "发送过的对象（有 PS 标记）在 Illustrator 里改了以后，停手 2 秒就自动更新 Photoshop 里对应的智能对象。打开后面板每 2 秒在 Illustrator 里检查一次，可能让 Illustrator 的复制粘贴失灵；不需要时请关掉"),
       h("button", { class: "btn", onClick: () => openCleanup() }, "整理文档…"),
       h("div", { class: "group-label" }, "快捷键（列表有焦点时）"),
       ...([["Delete", "删除"], ["F2 / 连点两下", "改名"], ["↑ ↓", "上一行 / 下一行"], ["← →", "折叠 / 展开"], ["Ctrl+G / Ctrl+Shift+G", "编组 / 取消编组"],
