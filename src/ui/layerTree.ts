@@ -162,6 +162,17 @@ interface RowEl { index: number; el: HTMLElement; eye: HTMLElement; twisty: HTML
 
 /** The list fills the height it is given (the whole WavePlug 图层 panel); `tools` adds the 智能对象
  *  tools to the right-click menu. */
+/** the last value handed to the returned function, given to `fn` at most every `ms` */
+function coalesce<T>(ms: number, fn: (v: T) => void): ((v: T) => void) & { cancel(): void } {
+  let last: T, timer: ReturnType<typeof setTimeout> | null = null;
+  const f = ((v: T) => {
+    last = v;
+    if (timer === null) timer = setTimeout(() => { timer = null; fn(last); }, ms);
+  }) as ((v: T) => void) & { cancel(): void };
+  f.cancel = () => { if (timer !== null) { clearTimeout(timer); timer = null; } };
+  return f;
+}
+
 export function createLayerTreeView(tree: LayerTree, status: Status, tools?: LayerTools, overlay?: Overlay, canvasView?: (docId: number) => Promise<CanvasView | null>, exportLayerPng?: PsHost["exportLayerPng"], docVersion?: PsHost["docVersion"], layerDragInfo?: PsHost["layerDragInfo"], illustrator?: { ready(): boolean; push(docId: number, ids: number[]): Promise<number>; pushBoard(docId: number, layers: readonly TreeLayer[], selected: readonly number[]): Promise<{ count: number; name: string; notes: string[] }>; linkOf(docId: number, layerId: number): string | null; ask(kind: "update" | "reveal", link: string): void }, hintBar?: HintBar) {
   let docId: number | null = null, layers: TreeLayer[] = [], users = new Map<string, number>(), canvas = { width: 0, height: 0 };
   /** the layers by id (kept with `layers`): lookups in drawing and dragging, which run for every row */
@@ -270,6 +281,7 @@ export function createLayerTreeView(tree: LayerTree, status: Status, tools?: Lay
   // pointerIn: the pointer is over this panel (a click on the canvas never reaches this document,
   // so only this tells the panel is still the one being used)
   let panelActive = false, pointerIn = false;
+  let hintOverCancel: (() => void) | null = null;
   const typing = (t: Element | null) => !!t && (t.tagName === "INPUT" || t.tagName === "TEXTAREA" || (t as HTMLElement).isContentEditable);
   // After a Photoshop command UXP still reports the section as focused while Photoshop has the
   // keys (only the first Delete arrived): blur first, so focus() really asks for the keyboard again.
@@ -858,7 +870,17 @@ export function createLayerTreeView(tree: LayerTree, status: Status, tools?: Lay
   const sbar = h("div", { class: "lt-sbar" }, sthumb);
   const empty = h("div", { class: "lt-empty muted" });
   list.append(inner, empty, sbar);
-  list.addEventListener("mouseleave", () => { hideFrame(); frameView = null; hoverEl?.classList.remove("hover"); hoverEl = null; });
+  // UXP sends mouseover about as often as mousemove (11-25: ~220 a second with a fast mouse), and
+  // handling each one (classes, the frame, the hints) kept the plugin's timers and Photoshop
+  // commands waiting for seconds: a mouseover only notes the row, handled at most every 30 ms.
+  const rowOver = coalesce<RowEl>(30, r => {
+    if (paint) paintTo(r.index);
+    // hover drawn by a class: UXP keeps :hover on rows a drag went over
+    if (hoverEl !== r.el) { hoverEl?.classList.remove("hover"); hoverEl = r.el; }
+    r.el.classList.add("hover");
+    frameAt(r.id);
+  });
+  list.addEventListener("mouseleave", () => { rowOver.cancel(); hideFrame(); frameView = null; hoverEl?.classList.remove("hover"); hoverEl = null; });
   // a real pointer move over the list: the row under it may be framed (frameAt)
   // A fast mouse sends hundreds of moves a second: this does almost nothing for most of them (the
   // row lookup at most every 40 ms), or the moves crowd out the panel's timers and Photoshop's
@@ -903,12 +925,7 @@ export function createLayerTreeView(tree: LayerTree, status: Status, tools?: Lay
       paintTo(r.index);
     });
     // anywhere on a row: the pointer may leave the column a little while dragging
-    el.addEventListener("mouseover", () => {
-      if (paint) paintTo(r.index);
-      // hover drawn by a class: UXP keeps :hover on rows a drag went over
-      if (hoverEl !== el) { hoverEl?.classList.remove("hover"); hoverEl = el; }
-      el.classList.add("hover");
-    });
+    el.addEventListener("mouseover", costed(() => rowOver(r)));
     twisty.addEventListener("click", e => { e.stopPropagation(); toggleGroup(r.id); });
     for (const x of [eye, twisty]) x.addEventListener("mousedown", e => e.stopPropagation());
     // A double-click is told from two presses on the same part of the row (the first click re-draws
@@ -958,7 +975,6 @@ export function createLayerTreeView(tree: LayerTree, status: Status, tools?: Lay
         startDrag(r.id, m, { what: { kind: "effects", layerId: r.id }, row: r.index });
       }
     });
-    el.addEventListener("mouseover", () => frameAt(r.id));
     el.addEventListener("contextmenu", e => e.preventDefault());
     el.addEventListener("click", e => {
       if (suppressClick) return;
@@ -3108,7 +3124,7 @@ export function createLayerTreeView(tree: LayerTree, status: Status, tools?: Lay
   el.append(ghost);
   el.addEventListener("mouseenter", () => { pointerIn = true; refocus("hover"); });
   // no drag state here: UXP fires leave/enter spuriously mid-drag; locateDrag owns the region
-  el.addEventListener("mouseleave", () => { pointerIn = false; if (!drag?.active) { hintZone = "none"; hintLayer = null; updateHints(); } });
+  el.addEventListener("mouseleave", () => { hintOverCancel?.(); pointerIn = false; if (!drag?.active) { hintZone = "none"; hintLayer = null; updateHints(); } });
   const popup = createPopup(el);
   /** y (px from the panel section's top) just below row `idx` */
   const rowBottom = (idx: number) => list.offsetTop + yOf(idx + 1);
@@ -3704,14 +3720,15 @@ export function createLayerTreeView(tree: LayerTree, status: Status, tools?: Lay
     hintBar.onAction(a => { if (a === "clearFilters") { resetFilters(); render(); } });
     // the zone changes only where the pointer enters another element: mouseover, not every move
     // (a drag updates its own hints as it moves)
-    listen(window, "mouseover", costed((e: Event) => {
+    const hintOver = coalesce<{ t: Element | null; k: HeldKeys }>(30, ({ t, k }) => {
       if (drag?.active) return;
-      const z = zoneAt(e.target as Element | null);
-      const k = keysOf(e);
+      const z = zoneAt(t);
       if (z.zone === hintZone && z.id === hintLayer && k.ctrl === heldKeys.ctrl && k.shift === heldKeys.shift && k.alt === heldKeys.alt) return;
       hintZone = z.zone; hintLayer = z.id; heldKeys = k;
       updateHints();
-    }), true);
+    });
+    hintOverCancel = hintOver.cancel;
+    listen(window, "mouseover", costed((e: Event) => hintOver({ t: e.target as Element | null, k: keysOf(e) })), true);
     for (const type of ["keydown", "keyup"]) listen(document, type, e => {
       const k = keysOf(e);
       if (k.ctrl === heldKeys.ctrl && k.shift === heldKeys.shift && k.alt === heldKeys.alt) return;
