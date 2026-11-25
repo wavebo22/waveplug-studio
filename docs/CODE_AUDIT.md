@@ -55,3 +55,26 @@
 - 图层命令：`act()` 失败即抛错，`step()` 回滚；`run()` 的 `deleting` 在 finally 里复位。
 - 新的「合并图」：`stampVisible` 没有选中图层时不改选择，用 PS 当前的选择。
 - Rust 的 `lock().unwrap()`：`panic = "abort"` 下锁不会中毒，不会因此 panic；字符串切片的下标都来自 `find` / `rfind`，落在字符边界上（上面第 5 条除外）。
+
+## 2026-11-25 第三轮：实际使用的日志
+
+来源：Windows 开发机 `G:\waveplug\studio\reports\` 的 `uxp_errors.log`（11-12 起）、`uxp_runtime.log`（18 MB）、`overlay_runtime.log`、`comfy_runtime.log`，截至 11-25 08:58。
+
+### Bug（日志里有证据）
+
+7. **双击智能对象会触发好几次「编辑智能对象内容」**：583 次打开里有 139 次（约 1/4）紧跟着一条「当前文档已切换，已取消操作以防误删其他 PSD」，面板状态栏显示「操作失败」（11-12 到 11-25 每天都有，共 144 条）。PNG 智能对象还会出现「无法读取智能对象内容格式，已停止打开」（19 条）：第一次正在把 PNG 转成 PSB，后面几次同时去读格式。原因：`layerTree.ts` 的自定义双击检测和原生 `dblclick` 只靠 `DOUBLE_CLICK_DEDUPE`（180 ms）去重，打开文档时面板线程被模态占住，第二、三次事件处理时已超过 180 ms；几次 `run("editContents")` 一起排队，第一次打开新文档后其余的被 `requireActiveDoc` 拦下。应按「同一图层的 editContents 正在进行就忽略」去重；被我们自己打开文档拦下的那几次不要报错。
+8. **只有一个图层的文档里「合并图」按钮没用**（11-25 08:30 实测 3 次）：在智能对象打开的「图层 3.psb」（只有一层）里点，PS 回「命令“合并可见图层”当前不可用」（-25920）；切到别的文档就成功了。PS 的盖印可见图层要至少两个可见图层。只有一个可见图层时应改用 `stampSelected` 单图层那条路（复制 → 转智能对象 → 栅格化）。
+9. **变体图层没有蒙版时，每次刷新都报错并重做一次模态读取**（11-23 10:46–10:54，12 次）：`uxpHost.ts` `groupInfo` 里 `getLayerMask` 返回的结果没有 `imageData`，`grayInto` 访问 `d.width` 和 finally 里的 `r.imageData.dispose()` 抛 `Cannot read properties of undefined (reading 'dispose')`。退回图层范围没问题，但失败的结果不缓存，下一次刷新又开一次「WavePlug 读取填充范围」模态。应在 `grayInto` 里处理没有 `imageData` 的情况（当作没有蒙版），并缓存退回的范围。
+
+### 只是噪音（建议降级或改说明）
+
+- `canvas view display scale unavailable`（371 条，最多的一类）：都是 PS 最小化时（Windows 把窗口放到 -32000，`cx ≈ -30084`），已经每分钟只记一次。可降为 info。
+- `refresh failed` / `tools inspect` / `workbench open docs` 的 `Cannot read properties of undefined (reading 'activeDocument' | 'documents')`（约 30 条）：发生在 PS 正在退出、`require("photoshop").app` 已经没了的时候（之前都有 `overlay disconnected`）。不影响使用，但 `log.ts` 把它归为「插件自身的错误（代码缺陷），请把这份报告发给开发者」，有误导。
+- 「命令“删除 / 移动 / 选择 / 变换”当前不可用」（各十几条，最后在 11-23）：PS 正处于别的模态或编辑状态，插件已按失败处理并提示。
+- `active fill group unreadable … AI 填充图层组里没有变体`（约 60 条）：用户把变体删光后的 AI 组，预期行为。
+
+### 外置框架、ComfyUI
+
+- `overlay_runtime.log`（0.17.0 → 0.28.0，8 次启动）：没有任何 panic、错误或失败记录。
+- `comfy_runtime.log`：每次启动都报「人脸自动矫正」节点 `DLL load failed while importing _dlib_pybind11`（121 次）。是 WavePlug ComfyUI 包缺 dlib 的 DLL，节点用不了，不影响内置工作流。
+- 8 条 `/prompt` 的 `JSONDecodeError`（带 BOM、键名没引号）连着出现，不是插件发的格式（插件用 `JSON.stringify`），像是手动用 PowerShell 测试留下的，不用管。
