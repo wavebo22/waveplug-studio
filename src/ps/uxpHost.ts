@@ -85,7 +85,7 @@ let directRefused = false;
 let stallProbe = false, stallLines = 0;
 const inflight = new Map<number, { name: string; at: number }>();
 let inflightSeq = 0;
-const seen = { move: 0, wheel: 0, down: 0, key: 0 };
+const seen = { move: 0, wheel: 0, down: 0, key: 0 }; // move: mouseovers
 function track(name: string): () => void {
   const id = ++inflightSeq;
   inflight.set(id, { name, at: Date.now() });
@@ -96,7 +96,8 @@ function probeStalls(): void {
   stallProbe = true;
   try {
     const w: any = typeof window !== "undefined" ? window : null;
-    w?.addEventListener?.("mousemove", () => { seen.move++; }, true);
+    // not mousemove: a listener on every move is what crowded the plugin out (11-25)
+    w?.addEventListener?.("mouseover", () => { seen.move++; }, true);
     w?.addEventListener?.("wheel", () => { seen.wheel++; }, true);
     w?.addEventListener?.("mousedown", () => { seen.down++; }, true);
     w?.addEventListener?.("keydown", () => { seen.key++; }, true);

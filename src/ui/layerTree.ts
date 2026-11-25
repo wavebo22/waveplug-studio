@@ -29,7 +29,7 @@ import { type ExternalDragSession, MAX_EXTERNAL_LAYERS, beginExternalExport, cap
 import { TINT_SIZE, bytesToBase64, frameKey, frameOnScreen, layerFrame } from "../core/overlay/hoverFrame.ts";
 import { docToScreen } from "../core/overlay/protocol.ts";
 import { NATIVE_COMMANDS_KEY } from "../core/layers/nativeCommands.ts";
-import { every, h, icon, isShown, listen, replace, setShown } from "./dom.ts";
+import { every, h, icon, isShown, listen, movesWhile, replace, setShown } from "./dom.ts";
 import { type PopItem, createPopup } from "./popupMenu.ts";
 import { selectMenu, selectSet } from "../core/layers/selectSets.ts";
 import { contextMenu } from "../core/layers/contextMenu.ts";
@@ -863,16 +863,14 @@ export function createLayerTreeView(tree: LayerTree, status: Status, tools?: Lay
   // A fast mouse sends hundreds of moves a second: this does almost nothing for most of them (the
   // row lookup at most every 40 ms), or the moves crowd out the panel's timers and Photoshop's
   // commands (11-25: seconds-long stalls with nothing else running).
-  let rowLookAt = 0;
-  list.addEventListener("mousemove", costed(e => {
-    const t = Date.now();
-    pointerMovedAt = t;
-    if (frameId !== null || t - rowLookAt < 40) return;
-    rowLookAt = t;
-    // after a scroll, the row under a pointer that starts moving again is framed at once
-    const row = (e.target as HTMLElement | null)?.closest?.(".lt-row");
-    if (row) { const r = pool.find(p => p.el === row); if (r && !r.sub) frameAt(r.id); }
-  }));
+  // Not on every move: the pointer entering another element (mouseover) at another spot is a real
+  // move; a row sliding under a still pointer (the list scrolling) comes at the same spot.
+  let overX = NaN, overY = NaN;
+  list.addEventListener("mouseover", costed(e => {
+    const m = e as MouseEvent;
+    if (m.clientX !== overX || m.clientY !== overY) pointerMovedAt = Date.now();
+    overX = m.clientX; overY = m.clientY;
+  }), true);
   const pool: RowEl[] = [];
 
   function makeRow(): RowEl {
@@ -1627,7 +1625,7 @@ export function createLayerTreeView(tree: LayerTree, status: Status, tools?: Lay
     scroller.by((w.deltaY > 0 ? 1 : -1) * Math.max(1, Math.min(10, Math.round(Math.abs(w.deltaY) / 40)) || 3));
   });
   let thumbDrag: { y0: number; f0: number } | null = null;
-  sthumb.addEventListener("mousedown", e => { e.stopPropagation(); hideFrame(); thumbDrag = { y0: (e as MouseEvent).clientY, f0: firstRow }; });
+  sthumb.addEventListener("mousedown", e => { e.stopPropagation(); hideFrame(); thumbDrag = { y0: (e as MouseEvent).clientY, f0: firstRow }; armThumbMoves(); });
   sbar.addEventListener("mousedown", e => {
     // a press beside the thumb pages up / down
     if (e.target !== sbar) return;
@@ -1636,11 +1634,11 @@ export function createLayerTreeView(tree: LayerTree, status: Status, tools?: Lay
     hideFrame();
     scroller.by((typeof m.offsetY === "number" && m.offsetY < sthumb.offsetTop ? -1 : 1) * fits());
   });
-  listen(document, "mousemove", e => {
+  const armThumbMoves = movesWhile(document, e => {
     if (!thumbDrag) return;
     const H = list.clientHeight || 1, th = sthumb.offsetHeight, room = Math.max(1, H - th);
     scroller.to(thumbDrag.f0 + Math.round(((e as MouseEvent).clientY - thumbDrag.y0) / room * maxFirst()));
-  });
+  }, () => !!thumbDrag);
   listen(document, "mouseup", () => { thumbDrag = null; });
 
 
@@ -2250,6 +2248,7 @@ export function createLayerTreeView(tree: LayerTree, status: Status, tools?: Lay
       hover: null, overTool: null, hoverTimer: null, scroller: null,
       canDelete: canDropToDelete(layers, ids, sub?.what), overLeftDelete: false, trash: false, trashed: false,
       overWorkbench: false, pointerX: e.clientX, pointerY: e.clientY, external: null };
+    armDragMoves();
   }
 
   /** Where all the filters / an effect / the whole style would go at row `idx`: onto that row's layer
@@ -2698,7 +2697,7 @@ export function createLayerTreeView(tree: LayerTree, status: Status, tools?: Lay
 
   // Capture phase is deliberate: a child row, chip, native overlay, or UXP widget cannot swallow
   // the move/release before the drag controller sees it.
-  listen(window, "mousemove", costed(handleDragMove), true);
+  const armDragMoves = movesWhile(window, costed(handleDragMove), () => !!drag, true);
 
   // The helper saw the drag card over another program with nothing prepared: this panel never saw
   // the pointer leave (a quick throw out of Photoshop sends it no move outside the list), so the

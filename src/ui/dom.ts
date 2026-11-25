@@ -225,3 +225,25 @@ export function every(fn: () => void, ms: number) {
 export function disposeGlobals() {
   for (const off of globals.splice(0)) { try { off(); } catch { /* host gone */ } }
 }
+
+/** A mouse-move listener attached only while a press is being dragged: `arm()` it when the press
+ *  starts (after setting the state `on()` reads); it takes itself off after the release, or on the
+ *  first move once `on()` is false. A fast mouse sends hundreds of moves a second, and a listener
+ *  always on kept the plugin's timers and Photoshop commands from running (11-25). */
+export function movesWhile(target: Document | Window, fn: (e: Event) => void, on: () => boolean, capture = false): () => void {
+  let attached = false;
+  const move = (e: Event) => { if (!on()) { off(); return; } fn(e); };
+  const up = () => { setTimeout(() => { if (!on()) off(); }, 0); };
+  function off() {
+    if (!attached) return;
+    attached = false;
+    target.removeEventListener("mousemove", move, capture);
+    target.removeEventListener("mouseup", up, true);
+  }
+  return () => {
+    if (attached) return;
+    attached = true;
+    target.addEventListener("mousemove", move, capture);
+    target.addEventListener("mouseup", up, true);
+  };
+}
