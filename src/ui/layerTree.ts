@@ -63,7 +63,8 @@ const isShort = (r: Row) => isCompactRow(r);
 const heightOf = (r: Row) => isShort(r) ? SHORT : ROW;
 /** px per level of the tree (one box of connecting lines, .lt-guide) */
 const INDENT = 18;
-/** rows inside an open group get a darker base the deeper they sit (d1…d5 in styles.css; deeper stays at d5) */
+/** rows inside an open group sit in a darker block that starts under the group's arrow, one step further in
+ *  and darker per level (d1…d5 in styles.css; deeper stays at d5); a layer's own sub rows share its level */
 const depthClass = (depth: number) => depth > 0 ? " d" + Math.min(depth, 5) : "";
 /** px from the row's left edge to where the indent starts: colour stripe, eye, padding */
 const LEAD = 4 + 22 + 2;
@@ -1006,7 +1007,7 @@ export function createLayerTreeView(tree: LayerTree, status: Status, tools?: Lay
     const gk = key + "#" + guideKey(guides[index]);
     if (gk === r.key) return;
     r.key = gk; r.id = l.id; r.sub = f;
-    r.el.className = "lt-row lt-filter-row" + (fx ? " lt-effects-row" : "") + depthClass(l.depth + 1) + (sel ? " on" : "") + (f.enabled ? "" : " off") + (moving ? " moving" : "") + (r.el === hoverEl ? " hover" : "");
+    r.el.className = "lt-row lt-filter-row" + (fx ? " lt-effects-row" : "") + depthClass(l.depth) + (sel ? " on" : "") + (f.enabled ? "" : " off") + (moving ? " moving" : "") + (r.el === hoverEl ? " hover" : "");
     (r.el.firstChild as HTMLElement).className = "lt-stripe";
     replace(r.eye, !fx && f.enabled && !more ? ic("eye", "m") : null);
     r.eye.className = "lt-eye" + (more || fx ? " none" : f.enabled ? "" : " hidden");
@@ -1134,7 +1135,7 @@ export function createLayerTreeView(tree: LayerTree, status: Status, tools?: Lay
     const gk = key + "#" + guideKey(guides[index]);
     if (gk === r.key) return;
     r.key = gk; r.id = l.id; r.sub = f;
-    r.el.className = "lt-row lt-filter-row lt-variant-row" + depthClass(l.depth + 1) + (sel ? " on" : "") + (r.el === hoverEl ? " hover" : "");
+    r.el.className = "lt-row lt-filter-row lt-variant-row" + depthClass(l.depth) + (sel ? " on" : "") + (r.el === hoverEl ? " hover" : "");
     (r.el.firstChild as HTMLElement).className = "lt-stripe";
     replace(r.eye); r.eye.className = "lt-eye none"; r.eye.title = ""; r.eye.style.backgroundColor = "";
     replace(r.body, guideEl(index),

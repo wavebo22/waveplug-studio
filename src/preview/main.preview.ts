@@ -180,6 +180,7 @@ class MockLayerTree implements LayerTree {
         { key: "outerGlow", multi: -1, name: "外发光", enabled: true }, { key: "dropShadow", multi: -1, name: "投影", enabled: true }] }), L(22, "徽章 拷贝", 5, { contentId: "a", file: "徽章.psb" }),
       L(23, "内层", 7), L(24, "徽章 拷贝 2", 5, { contentId: "a", file: "徽章.psb", mask: true }), L(25, "LOGO", 5, { contentId: "l", linked: true, file: "logo.ai" }), end(),
       end(),
+      L(60, "场景", 7), L(61, "天空", 1), L(62, "人物", 7), L(63, "身体", 1), L(64, "头部", 7), L(65, "眼睛", 1), L(66, "头发", 1), end(), L(67, "衣服", 1), end(), L(68, "地面", 1), end(),
       L(31, "色彩平衡 1", 2, { clipped: true }), L(33, "阴影", 1, { clipped: true, mask: true, maskOn: false, maskLinked: false }),
       L(30, "产品图", 5, { contentId: "b", file: "产品.png", filters: [{ name: "表面模糊", enabled: true }, { name: "亮度/对比度", enabled: false }], filtersOn: true, filterMask: true }), L(34, "空白图层", 1, { width: 0, height: 0, mask: true }), L(32, "形状 1", 4, { locked: true, lockPosition: true, links: [1], vmask: true }), L(35, "带矢量蒙版", 1, { vmask: true, mask: true }),
       L(40, "碎片（3000 个图层）", 7, { artboard: true, color: "violet" }), ...many, end(),
