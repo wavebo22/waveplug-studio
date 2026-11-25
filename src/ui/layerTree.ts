@@ -125,6 +125,8 @@ const RENAME_DOUBLE_CLICK = 400;
 const DOUBLE_CLICK_SLOP = 4;
 /** The custom press detector runs before the native dblclick event; ignore only that duplicate. */
 const DOUBLE_CLICK_DEDUPE = 180;
+/** after 编辑智能对象内容 ran, further double-click events on that layer are taken as the same one */
+const EDIT_CONTENTS_QUIET = 800;
 /** width of a variation chip (picture and number) in a variant layer's row */
 const VCHIP_W = 78;
 /** how long the mouse rests on a row before its layer is framed on the canvas (a quick sweep frames nothing) */
@@ -388,9 +390,24 @@ export function createLayerTreeView(tree: LayerTree, status: Status, tools?: Lay
     else if (zone === "thumb" && l.artboard) setTimeout(() => openColorMenu(id), 0);
     // Photoshop convention: double-click smart-object thumbnail or smart badge.
     // The host automatically converts PNG content to PSB before opening it.
-    else if (zone === "status" || (zone === "thumb" && l.kind === "smartObject")) void run("editContents", [id]);
+    else if (zone === "status" || (zone === "thumb" && l.kind === "smartObject")) openContents(id);
     // A regular layer thumbnail intentionally has no double-click action.
   };
+  /** 编辑智能对象内容 from a double-click, once. The press detector and the native dblclick (and a
+   *  third event) used to each start one: the timing dedupe above misses them because the panel is
+   *  held while Photoshop opens the document, so they arrive late. The first opened the contents,
+   *  the others then failed (「当前文档已切换」 ¼ of the time, logs 11-12…11-25; a PNG being converted
+   *  to PSB: 「无法读取智能对象内容格式」). Now: one per layer while it runs, and just after. */
+  const opening = new Map<number, number>();
+  function openContents(id: number) {
+    const at = opening.get(id);
+    if (at !== undefined && (at === 0 || Date.now() - at < EDIT_CONTENTS_QUIET)) {
+      log("info", "edit contents: repeated double-click ignored", id);
+      return;
+    }
+    opening.set(id, 0);
+    void run("editContents", [id]).finally(() => opening.set(id, Date.now()));
+  }
   /** marks presses on `el` as `zone` and takes the native double-click there */
   const zoneOf = (el: HTMLElement, id: number, zone: Zone) => {
     // the innermost part pressed wins (✦ on a picture)
@@ -1913,7 +1930,13 @@ export function createLayerTreeView(tree: LayerTree, status: Status, tools?: Lay
     selectTail = job.catch(() => undefined);
     try {
       await job;
-    } catch (e) { log("warn", "layer tree select", e); status(`选择图层失败：${(e as Error).message ?? e}`, "error"); ownSelect = null; }
+    } catch (e) {
+      ownSelect = null;
+      // the document was left before the selection got there (编辑内容 opened another one): nothing
+      // to select any more, so nothing to tell the user
+      if ((e as Error)?.name === "DocSwitched") log("info", "layer tree select skipped: document switched", doc);
+      else { log("warn", "layer tree select", e); status(`选择图层失败：${(e as Error).message ?? e}`, "error"); }
+    }
     finally { selecting--; refocus(why); }
     // Photoshop has it now: one read brings the rest (shared contents, links …) up to date
     if (!selecting) void refresh();

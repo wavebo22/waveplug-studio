@@ -172,6 +172,10 @@ fn on_command(c: Command) {
         crate::keys::watch(on);
         return;
     }
+    if let Command::Hotkeys { on } = c {
+        crate::hotkey::set(on);
+        return;
+    }
     if let Command::WebCatch { on, client_x, client_y, left, top, width, height, folder } = c {
         crate::webdrop::set(on.then(|| crate::webdrop::CatchRequest { client: (client_x, client_y), area: (left, top, width, height), folder }));
         return;
@@ -245,6 +249,8 @@ fn on_command(c: Command) {
 /// The plugin went away: put everything away and forget its revisions.
 fn on_disconnect() {
     crate::app::plugin_gone();
+    // Ctrl+F goes back to Photoshop: nothing would do the paste
+    crate::hotkey::set(false);
     crate::frame::set(None, None);
     crate::menu::close(None);
     crate::monitor::set(false, None);
@@ -592,6 +598,7 @@ impl Host {
                 Command::HangGuard { .. } => {}  // hang.rs, on its own thread
                 Command::WebCatch { .. } => {}   // webdrop.rs, on its own thread
                 Command::WatchKeys { .. } => {}  // keys.rs, on its own thread
+                Command::Hotkeys { .. } => {}    // hotkey.rs, on its own thread
                 Command::StatusBar { .. } => {}  // monitor.rs, on its own thread
                 Command::AppSettings { .. } | Command::OpenApp { .. } => {} // app.rs
                 Command::ExternalDragPrepare { .. }

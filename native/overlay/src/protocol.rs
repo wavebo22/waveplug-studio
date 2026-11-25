@@ -289,6 +289,11 @@ pub enum Command {
     WatchKeys {
         on: bool,
     },
+    /// 快捷键 (hotkey.rs): while `on`, Ctrl+F in Photoshop is taken from Photoshop (its 上次滤镜
+    /// doesn't run) and sent to the plugin as `paste-in-place`.
+    Hotkeys {
+        on: bool,
+    },
     /// The drag ended in the plugin (or the export failed) before any system drag.
     ExternalDragCancel {
         #[serde(rename = "sessionId")]
@@ -359,6 +364,8 @@ pub enum Event {
     LayerDragTrashDrop,
     /// The drag card is over another program and no files were prepared: the plugin exports now.
     ExternalDragWanted,
+    /// Ctrl+F was pressed in Photoshop (hotkeys on): the plugin runs Photoshop's 原位粘贴.
+    PasteInPlace,
     /// Ctrl / Shift / Alt as held now (after watch-keys on; sent on each change and on start).
     Keys {
         ctrl: bool,
@@ -567,6 +574,8 @@ mod tests {
         }
         assert!(matches!(parse(r#"{"type":"web-catch","on":false}"#), Some(Command::WebCatch { on: false, .. })));
         assert!(matches!(parse(r#"{"type":"watch-keys","on":true}"#), Some(Command::WatchKeys { on: true })));
+        assert!(matches!(parse(r#"{"type":"hotkeys","on":true}"#), Some(Command::Hotkeys { on: true })));
+        assert_eq!(encode(&Event::PasteInPlace), r#"{"type":"paste-in-place"}"#);
         match parse(r#"{"type":"status-bar","on":true,"hints":[{"keys":["Ctrl","左键"],"label":"加选","on":true}],"state":[{"text":"已选 2 个图层","kind":"info"}],"message":{"text":"已删除","kind":"ok"}}"#) {
             Some(Command::StatusBar { on: true, hints, state, message: Some(m), mode: None, view: None }) => {
                 assert_eq!(hints[0].keys, ["Ctrl", "左键"]);

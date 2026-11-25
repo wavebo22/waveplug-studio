@@ -18,3 +18,7 @@ test("导出诊断信息：只接受 Windows 路径", () => {
   assert.deepEqual(parseOverlayEvent(JSON.stringify({ type: "plugin-report", folder: "E:\\User\\desktop\\WavePlug诊断" })), { type: "plugin-report", folder: "E:\\User\\desktop\\WavePlug诊断" });
   assert.equal(parseOverlayEvent(JSON.stringify({ type: "plugin-report", folder: "../x" })), null);
 });
+
+test("Ctrl+F from the helper (hotkey.rs) is read as paste-in-place", () => {
+  assert.deepEqual(parseOverlayEvent(JSON.stringify({ type: "paste-in-place" })), { type: "paste-in-place" });
+});

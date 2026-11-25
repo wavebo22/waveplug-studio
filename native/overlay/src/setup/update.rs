@@ -79,6 +79,14 @@ pub fn parse_latest(text: &str, from: &str) -> Result<Latest, String> {
         return Err("更新信息里缺少 version 或 url".into());
     }
     l.url = resolve(from, l.url.trim());
+    // the same rule as GitHub's digest (parse_digest): 64 hex digits, lowercase as file_sha256
+    // gives them; anything else is dropped (no download node then). Unchecked, a short value
+    // panicked at `&want[..12]` (the whole app exits: panic = "abort") and an uppercase one never
+    // matched, so every node failed.
+    l.sha256 = l.sha256.as_deref().and_then(|v| {
+        let v = v.trim();
+        parse_digest(v).or_else(|| parse_digest(&format!("sha256:{v}")))
+    });
     Ok(l)
 }
 
@@ -346,6 +354,15 @@ mod tests {
         assert_eq!(mirror_url("gh.dpik.top/", u).as_deref(), Some("https://gh.dpik.top/https://github.com/a/b/releases/download/v1/WavePlug_Setup_1.exe"));
         assert_eq!(mirror_url("gh.dpik.top", "https://example.com/x.exe"), None);
         assert_eq!(parse_digest("sha256:2E8F442241AB10FB2E62DBDD25B5B4BBA02ED5B41EED928A2EAD722C9FDB9CA6").as_deref(), Some("2e8f442241ab10fb2e62dbdd25b5b4bba02ed5b41eed928a2ead722c9fdb9ca6"));
+        // latest.json's own sha256: normalised the same way, or dropped
+        let up = parse_latest(r#"{"version":"1","url":"a.exe","sha256":"2E8F442241AB10FB2E62DBDD25B5B4BBA02ED5B41EED928A2EAD722C9FDB9CA6"}"#, "x").unwrap();
+        assert_eq!(up.sha256.as_deref(), Some("2e8f442241ab10fb2e62dbdd25b5b4bba02ed5b41eed928a2ead722c9fdb9ca6"));
+        let pre = parse_latest(r#"{"version":"1","url":"a.exe","sha256":"sha256:2e8f442241ab10fb2e62dbdd25b5b4bba02ed5b41eed928a2ead722c9fdb9ca6"}"#, "x").unwrap();
+        assert!(pre.sha256.is_some());
+        for bad in ["abc", "中文中文中文中文中文", ""] {
+            let l = parse_latest(&format!(r#"{{"version":"1","url":"a.exe","sha256":"{bad}"}}"#), "x").unwrap();
+            assert_eq!(l.sha256, None, "{bad}");
+        }
         assert_eq!(parse_digest("md5:abc"), None);
         assert_eq!(parse_digest("sha256:xyz"), None);
     }

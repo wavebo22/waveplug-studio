@@ -88,6 +88,9 @@ export type OverlayCommand =
   | { type: "hover-tint"; rect: ScreenRect | null; clip?: ScreenRect; width?: number; height?: number; alpha?: string }
   /** 按键 (helper ≥ KEYS_HELPER_VERSION): report Ctrl / Shift / Alt while on (renew within 3 s) */
   | { type: "watch-keys"; on: boolean }
+  /** 快捷键 (native/overlay/src/hotkey.rs): while on, Ctrl+F in Photoshop is taken from Photoshop
+   *  (its 上次滤镜 doesn't run) and comes here as paste-in-place. Sent on every connect. */
+  | { type: "hotkeys"; on: boolean }
   /** The settings for what the helper does (APP_SETTING_KEYS), for the WavePlug app window's
    *  功能设置: sent on connect and whenever one changes. Answered by app-settings-set. */
   | { type: "app-settings"; settings: Record<string, string | boolean> }
@@ -174,6 +177,8 @@ export type OverlayEvent =
   | { type: "external-drag-wanted" }
   /** Ctrl / Shift / Alt as held now (after watch-keys on) */
   | { type: "keys"; ctrl: boolean; shift: boolean; alt: boolean }
+  /** Ctrl+F was pressed in Photoshop (hotkeys on): run Photoshop's 原位粘贴 */
+  | { type: "paste-in-place" }
   /** 牵手 Illustrator: a message from the Illustrator panel */
   | { type: "bridge"; from: string; msg: unknown }
   /** 功能设置 changed in the WavePlug app window: apply and save these */
@@ -188,7 +193,7 @@ export type OverlayEvent =
 /** The helper build this plugin's protocol needs (native/overlay/Cargo.toml). Bump both together:
  *  an older helper still connects, but e.g. can't arbitrate drag verdicts (drag_target.rs), and
  *  without this check a stale exe looks exactly like a bug in new code. */
-export const EXPECTED_HELPER_VERSION = "0.15.0";
+export const EXPECTED_HELPER_VERSION = "0.29.0";
 /** the native 编辑工作台 window (panel/shelf.rs) needs at least this helper; older: the in-panel workbench */
 export const WORKBENCH_HELPER_VERSION = "0.11.0";
 /** the 外置删除区 (layer-drag-trash) needs at least this helper; older: the panel's left red rail */
@@ -293,6 +298,7 @@ export function parseOverlayEvent(text: string): OverlayEvent | null {
     return { type: "menu-result", menuId: m.menuId, item: m.item ?? null };
   }
   if (m?.type === "layer-drag-trash-drop") return { type: "layer-drag-trash-drop" };
+  if (m?.type === "paste-in-place") return { type: "paste-in-place" };
   if (m?.type === "external-drag-wanted") return { type: "external-drag-wanted" };
   if (m?.type === "keys") return { type: "keys", ctrl: m.ctrl === true, shift: m.shift === true, alt: m.alt === true };
   if (m?.type === "web-drop-leave") return { type: "web-drop-leave" };

@@ -32,6 +32,8 @@ export interface Overlay {
   showDragTrash(view: ScreenRect | null, enabled: boolean, action: string): boolean;
   /** the drag was let go over the 外置删除区 */
   onTrashDrop(cb: () => void): () => void;
+  /** Ctrl+F in Photoshop (the helper takes it from Photoshop, hotkey.rs): 原位粘贴 */
+  onPasteInPlace(cb: () => void): () => void;
   /** 悬停边框: frame `rect` (screen px) cut to `clip` on the canvas; null takes it away. */
   hoverFrame(frame: { rect: ScreenRect; clip: ScreenRect } | null): void;
   /** the canvas is somewhere else on screen now: every external window follows it */
@@ -115,6 +117,7 @@ export function connectOverlay(opts: { launch?: () => Promise<string | null>; au
   const comfyListeners = new Set<(status: ComfyManagerStatus) => void>();
   const externalDragListeners = new Set<(event: ExternalDragEvent) => void>();
   const trashListeners = new Set<() => void>();
+  const pasteListeners = new Set<() => void>();
   const keysListeners = new Set<(keys: { ctrl: boolean; shift: boolean; alt: boolean }) => void>();
   const wantedListeners = new Set<() => void>();
   const webDropListeners = new Set<(event: WebDropEvent) => void>();
@@ -179,6 +182,8 @@ export function connectOverlay(opts: { launch?: () => Promise<string | null>; au
       log("info", "overlay connected");
       hub.connected();
       if (monitor) send({ type: "monitor", ...monitor });
+      // Ctrl+F = 原位粘贴 while this plugin is connected (the helper turns it off when it goes)
+      send({ type: "hotkeys", on: true });
       barSent = "";
       if (hangGuard) send(hangGuard);
       if (appSettings) { appSettingsSent = JSON.stringify(appSettings); send({ type: "app-settings", settings: appSettings }); }
@@ -228,6 +233,9 @@ export function connectOverlay(opts: { launch?: () => Promise<string | null>; au
         webDropListeners.forEach(cb => { try { cb(m); } catch (err) { log("warn", "web drop listener", err); } });
         return;
       }
+      if (m?.type === "paste-in-place") {
+        pasteListeners.forEach(cb => { try { cb(); } catch (err) { log("warn", "paste in place listener", err); } });
+      }
       if (m?.type === "layer-drag-trash-drop") {
         trashListeners.forEach(cb => { try { cb(); } catch (err) { log("warn", "trash drop listener", err); } });
         return;
@@ -275,6 +283,7 @@ export function connectOverlay(opts: { launch?: () => Promise<string | null>; au
     comfyListeners.clear();
     externalDragListeners.clear();
     trashListeners.clear();
+    pasteListeners.clear();
     bridgeListeners.clear();
     peerListeners.clear();
   });
@@ -349,6 +358,10 @@ export function connectOverlay(opts: { launch?: () => Promise<string | null>; au
     onExternalWanted(cb) {
       wantedListeners.add(cb);
       return () => wantedListeners.delete(cb);
+    },
+    onPasteInPlace(cb) {
+      pasteListeners.add(cb);
+      return () => { pasteListeners.delete(cb); };
     },
     onTrashDrop(cb) {
       trashListeners.add(cb);

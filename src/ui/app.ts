@@ -18,7 +18,7 @@ import { type ProfileState, type Services, type Settings, store } from "../app/s
 import type { DocInfo, FillGroup, Pads, Variation } from "../ps/host.ts";
 import { crumb, diagnosticReport, log, withTimeout } from "../app/log.ts";
 import { openCalibration } from "./calibrate.ts";
-import { h, icon, listen, replace } from "./dom.ts";
+import { every, h, icon, listen, replace } from "./dom.ts";
 import { encodePng } from "../core/image/png.ts";
 import { downscale, onWhite } from "../core/image/compose.ts";
 import { BLEND_PREFIX, EXPAND_PREFIX, EXTRACT_PREFIX, FILL_PREFIX, GENERATE_PREFIX, UPSCALE_PREFIX } from "../ps/host.ts";
@@ -836,7 +836,7 @@ export function mountApp(root: HTMLElement, svc: Services) {
    *  external window follows at once (native/overlay/src/layout.rs). */
   function watchCanvas() {
     let busy = false, last = "";
-    setInterval(async () => {
+    every(async () => {
       if (busy || !overlay?.connected || !doc || !svc.host.viewBounds || !svc.host.canvasView) return;
       busy = true;
       try {
@@ -851,6 +851,23 @@ export function mountApp(root: HTMLElement, svc: Services) {
       } catch { /* Photoshop busy (a modal step): next time */ }
       finally { busy = false; }
     }, 200);
+  }
+
+  /** Ctrl+F in Photoshop (taken from Photoshop by the helper, so its 上次滤镜 doesn't run):
+   *  Photoshop's 原位粘贴 into the active document, above the selected layer */
+  let pasting = false;
+  async function pasteInPlace() {
+    if (pasting) return;
+    const active = svc.host.activeDoc();
+    if (!active) { setStatus("原位粘贴（Ctrl+F）：没有打开的文档", "error"); return; }
+    pasting = true;
+    try {
+      await svc.layers.run(active.id, "pasteInPlace", []);
+      log("info", "paste in place", active.id);
+    } catch (e) {
+      log("warn", "paste in place", e);
+      setStatus("原位粘贴（Ctrl+F）失败：" + ((e as Error)?.message ?? e), "error");
+    } finally { pasting = false; }
   }
 
   function startOverlay() {
@@ -871,6 +888,7 @@ export function mountApp(root: HTMLElement, svc: Services) {
     overlay.onConnected(() => {
       syncComfyManager(settings.comfyAutoStartWithPhotoshop !== false);
     });
+    overlay.onPasteInPlace(() => void pasteInPlace());
     // the WavePlug app window's 功能设置: the same settings, shown and edited there
     // 从开发文件夹加载代码 only where it applies (someone who ran from the development folder)
     const devLoadShown = () => !!svc.loadFrom && (svc.loadFrom.source === "dev" || (() => { try { return localStorage.getItem("wp.loadFrom") === "bundled"; } catch { return false; } })());
@@ -879,7 +897,7 @@ export function mountApp(root: HTMLElement, svc: Services) {
       ...(devLoadShown() ? { devLoad: svc.loadFrom!.source === "dev" } : {}),
     });
     shareAppSettings();
-    setInterval(shareAppSettings, 2000);
+    every(shareAppSettings, 2000);
     overlay.onAppSettingsSet(changes => {
       if (typeof changes.devLoad === "boolean") {
         const to = changes.devLoad ? "dev" : "bundled";

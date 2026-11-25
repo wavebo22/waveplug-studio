@@ -120,6 +120,12 @@ src/ui/app.ts  startOverlay()      生成页提供状态和     src/panel/genera
 - 被同角色新连接替换掉的旧连接，断开时不算「Photoshop 走了」，不触发 `on_disconnect`。
 - 纯函数 `route()` / `missing()` 有测试。
 
+### 3.6 快捷键 Ctrl+F = 原位粘贴（2026-11-25，0.29.0，未实测）
+
+`src/hotkey.rs`：独立线程上的 `WH_KEYBOARD_LL` 键盘钩子（钩子要求所在线程有消息循环）。插件每次连上发 `{"type":"hotkeys","on":true}`，断开时 `on_disconnect` 关掉。打开期间，Photoshop 进程的窗口在前台时按 Ctrl+F（不带 Shift / Alt / Win）：这次按键被吞掉（PS 自己的「上次滤镜」不会执行），发 `{"type":"paste-in-place"}` 给插件；按住的重复和抬起也吞掉，每按一次只发一次。其他程序、小程序自己的窗口、其他按键都不动。插件没连上时 Ctrl+F 照旧给 PS。判断是纯函数 `verdict()`，有测试。
+
+插件收到后执行 PS 自己菜单里的 编辑 › 选择性粘贴 › 原位粘贴（`uxpLayers.ts` 的 `MENU_COMMANDS.pasteInPlace`，按菜单标题找 id），所以从 Illustrator 复制来的内容照样弹 PS 的「粘贴为」对话框，结果放在所选图层上方。日志：小程序 `hotkey: on / keyboard hook installed / Ctrl+F → paste-in-place`，插件 `layer menu command run pasteInPlace`、`paste in place`。
+
 ## 4.0 外置窗口的位置：唯一标准（2026-11-24，用户要求以后都照这个）
 
 所有外置窗口的位置**只由 `src/layout.rs` 决定**，`win.rs` 只负责把它算出来的结果套到窗口上。不要在某个窗口自己的代码里另算位置。

@@ -5,6 +5,7 @@
 
 import { log } from "../app/log.ts";
 import { docById, findLayer, modal, play, step } from "./uxpHost.ts";
+import { act } from "./uxpTools.ts";
 import { type BoardNode, psBlendOf } from "../core/overlay/bridge.ts";
 
 declare const require: (m: string) => any;
@@ -57,16 +58,18 @@ export async function placeFromIllustrator(fileName: string, name: string, pixel
   const doc = app.activeDocument;
   const token = uxp().storage.localFileSystem.createSessionToken(entry);
   return step("WavePlug 置入 Illustrator 对象", doc.id, async () => {
-    await play([{
+    // act(): a refused place throws (and the step is undone). With play() the layer selected before
+    // was taken for the placed one: renamed to the object, rasterized, linked to Illustrator.
+    const before = doc.activeLayers?.[0]?.id ?? null;
+    await act({
       _obj: "placeEvent", null: { _path: token, _kind: "local" },
       freeTransformCenterState: { _enum: "quadCenterState", _value: "QCSAverage" },
       offset: { _obj: "offset", horizontal: { _unit: "pixelsUnit", _value: 0 }, vertical: { _unit: "pixelsUnit", _value: 0 } },
-      _options: DONT,
-    }]);
+    });
     const layer = doc.activeLayers[0];
-    if (!layer) throw new Error("Photoshop 没有置入这个文件");
+    if (!layer || layer.id === before) throw new Error("Photoshop 没有置入这个文件");
     try { layer.name = name; } catch { /* keeps the file name */ }
-    if (pixels) await play([{ _obj: "rasterizeLayer", _target: [{ _ref: "layer", _id: layer.id }], what: { _enum: "rasterizeItem", _value: "placed" }, _options: DONT }]);
+    if (pixels) await act({ _obj: "rasterizeLayer", _target: [{ _ref: "layer", _id: layer.id }], what: { _enum: "rasterizeItem", _value: "placed" } });
     log("info", "bridge placed", JSON.stringify({ fileName, name, pixels, layerId: layer.id }));
     return { docId: doc.id, layerId: layer.id as number, docName: String(doc.title ?? doc.name) };
   });
@@ -90,8 +93,10 @@ export async function replaceFromIllustrator(docId: number, docName: string, lay
   await step("WavePlug 从 Illustrator 更新", doc.id, async () => {
     const { app } = ps();
     if (app.activeDocument?.id !== doc.id) app.activeDocument = doc;
-    await play([{ _obj: "select", _target: [{ _ref: "layer", _id: layerId }], makeVisible: false, _options: DONT }]);
-    await play([{ _obj: "placedLayerReplaceContents", null: { _path: token, _kind: "local" }, _options: DONT }]);
+    // act(): a refusal throws, so a failed replace isn't reported as done (and a failed select
+    // can't let the replace land on whatever smart object was selected before)
+    await act({ _obj: "select", _target: [{ _ref: "layer", _id: layerId }], makeVisible: false });
+    await act({ _obj: "placedLayerReplaceContents", null: { _path: token, _kind: "local" } });
   });
   log("info", "bridge replaced", JSON.stringify({ docId: doc.id, layerId, fileName }));
   return { docId: doc.id };

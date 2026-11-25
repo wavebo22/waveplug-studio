@@ -1,6 +1,6 @@
 # 代码检查记录
 
-逐项检查重复接口、冗余代码 / 数据和 bug 的结果。**只记录，没改代码**；修了一项就在那一项后面写「已修（提交号）」。
+逐项检查重复接口、冗余代码 / 数据和 bug 的结果。修了一项就在那一项后面写「已修」。2026-11-25 第四轮修掉了 bug 1–9（冗余代码、过时文档还没动）。
 
 ## 2026-11-25 第一轮
 
@@ -8,7 +8,7 @@
 
 ### Bug
 
-1. **开发版热重载时定时器泄漏**。每次构建自动重载（`main.uxp.ts` 的 `__waveplugDispose`），下面这些裸 `setInterval` 不会被清，旧的继续跑，重载 N 次就有 N 份：
+1. **开发版热重载时定时器泄漏**（已修：改用 `every()`；卡顿探针在 `UxpHost.dispose` 清掉）。每次构建自动重载（`main.uxp.ts` 的 `__waveplugDispose`），下面这些裸 `setInterval` 不会被清，旧的继续跑，重载 N 次就有 N 份：
    - `src/ui/app.ts` `watchCanvas`（200 ms，读 PS 画布并发 `canvas` 给 helper，旧的也发）
    - `src/ui/app.ts` `setInterval(shareAppSettings, 2000)`
    - `src/ui/layersPanel.ts` 读画布范围（每次 4 次 PS 查询）
@@ -16,7 +16,7 @@
    - `src/ps/uxpHost.ts` `probeStalls`（200 ms）
    `src/ui/dom.ts` 已有会随 `disposeGlobals()` 清掉的 `every(fn, ms)`，但没人用。只影响开发版（正式版不自动重载）。
    小问题：`uxpLayers.ts` 的 `onEdited` / `onChange` 丢掉了 `onModalDone` 返回的 off，`onChange` 的 80 ms 定时器 dispose 时不清（注册表是模块内的，重载后旧的不会再被触发，实际无害）。`overlay.ts` dispose 时 `appSettings/keys/report/wanted/webDrop` 五个监听集合没清（连接已关，无害）。
-2. **helper 过旧的提醒失效**：`EXPECTED_HELPER_VERSION` 还是 `0.15.0`，而功能门槛最高到 0.21.0、helper 已是 0.28.0；装着 0.15–0.27 的旧 helper 日志也不报「outdated」。11-25 新加的 `canvas` 消息（0.28）没有任何版本判断。
+2. **helper 过旧的提醒失效**（已修：`EXPECTED_HELPER_VERSION` = 0.29.0，和 Ctrl+F 一起升）：`EXPECTED_HELPER_VERSION` 还是 `0.15.0`，而功能门槛最高到 0.21.0、helper 已是 0.28.0；装着 0.15–0.27 的旧 helper 日志也不报「outdated」。11-25 新加的 `canvas` 消息（0.28）没有任何版本判断。
 
 ### 冗余代码 / 数据
 
@@ -39,14 +39,14 @@
 
 ### Bug
 
-3. **Illustrator 置入失败时改错图层**（`src/ps/uxpBridge.ts` `placeFromIllustrator`）：`placeEvent` 用的是不检查结果的 `play()`。置入被 PS 拒绝时，`doc.activeLayers[0]` 还是用户原来选中的图层，代码把它当成新置入的：**改成 Illustrator 对象的名字**，选了「像素」还会尝试栅格化，并把这个图层作为关联返回给 Illustrator。应改用 `act()`（失败即抛错、整步回滚），或像 `buildBoardFromIllustrator` 那样比对置入前的图层 id。
-4. **「从 Illustrator 更新」失败也报成功**（同文件 `replaceFromIllustrator`）：`select` 和 `placedLayerReplaceContents` 都用 `play()`，替换失败（图层不是智能对象、文件读不了）时照样写日志 `bridge replaced` 并回成功。select 失败时还会替换到当时选中的别的智能对象上。同样改用 `act()`。
-5. **更新程序可能闪退**（`native/overlay/src/setup/update.rs`）：`latest.json` 的 `sha256` 直接由 serde 读入，没有像 GitHub 那条路（`parse_digest`）那样校验长度和十六进制；直连失败转下载节点时 `&want[..12]` 遇到少于 12 个字节（或第 12 字节落在中文中间）会 panic → 整个程序退出。另外大写的 sha256 永远和 `file_sha256` 的小写对不上，下载节点全部失败。应在 `parse_latest` 里用 `parse_digest` 同样的规则规范化 / 丢弃。
-6. **ComfyUI 中途没了会空等 30 分钟**（`src/core/comfy/client.ts` `waitFor`）：`/history` 的错误被 `.catch(() => null)` 吞掉，ComfyUI 关掉或崩溃时一直轮询到 30 分钟超时，界面停在「排队中 / 执行中」；任务在 ComfyUI 网页里被删出队列（不会有 WebSocket 事件、history 里也永远没有）同样如此。建议连续若干次连不上就报错，并定期看 `/queue` 里还有没有这个任务。被别处中断（`execution_interrupted`）时报的是笼统的「ComfyUI 执行失败」。
+3. **Illustrator 置入失败时改错图层**（已修：`act()` + 比对置入前的图层 id）（`src/ps/uxpBridge.ts` `placeFromIllustrator`）：`placeEvent` 用的是不检查结果的 `play()`。置入被 PS 拒绝时，`doc.activeLayers[0]` 还是用户原来选中的图层，代码把它当成新置入的：**改成 Illustrator 对象的名字**，选了「像素」还会尝试栅格化，并把这个图层作为关联返回给 Illustrator。应改用 `act()`（失败即抛错、整步回滚），或像 `buildBoardFromIllustrator` 那样比对置入前的图层 id。
+4. **「从 Illustrator 更新」失败也报成功**（已修：`act()`）（同文件 `replaceFromIllustrator`）：`select` 和 `placedLayerReplaceContents` 都用 `play()`，替换失败（图层不是智能对象、文件读不了）时照样写日志 `bridge replaced` 并回成功。select 失败时还会替换到当时选中的别的智能对象上。同样改用 `act()`。
+5. **更新程序可能闪退**（已修：`parse_latest` 按 `parse_digest` 规范化，有测试）（`native/overlay/src/setup/update.rs`）：`latest.json` 的 `sha256` 直接由 serde 读入，没有像 GitHub 那条路（`parse_digest`）那样校验长度和十六进制；直连失败转下载节点时 `&want[..12]` 遇到少于 12 个字节（或第 12 字节落在中文中间）会 panic → 整个程序退出。另外大写的 sha256 永远和 `file_sha256` 的小写对不上，下载节点全部失败。应在 `parse_latest` 里用 `parse_digest` 同样的规则规范化 / 丢弃。
+6. **ComfyUI 中途没了会空等 30 分钟**（已修：30 秒连不上即报错；`/queue` 每 10 秒查一次，连续两次不在就报错；外部中断说「被中断」；有测试）（`src/core/comfy/client.ts` `waitFor`）：`/history` 的错误被 `.catch(() => null)` 吞掉，ComfyUI 关掉或崩溃时一直轮询到 30 分钟超时，界面停在「排队中 / 执行中」；任务在 ComfyUI 网页里被删出队列（不会有 WebSocket 事件、history 里也永远没有）同样如此。建议连续若干次连不上就报错，并定期看 `/queue` 里还有没有这个任务。被别处中断（`execution_interrupted`）时报的是笼统的「ComfyUI 执行失败」。
 
 ### 小问题
 
-- `uxpHost.ts` `readGroupImage`：`select` 失败不检查，会复制 / 合并当时选中的别的图层，读回错的图（历史记录不提交，文档本身不受影响）。
+- （已修）`uxpHost.ts` `readGroupImage`：`select` 失败不检查，会复制 / 合并当时选中的别的图层，读回错的图（历史记录不提交，文档本身不受影响）。
 - `app.ts` `watchCanvas` 只要有文档就每 200 ms 读一次 PS（PS 不在前台也读），可以在 PS 不在前台时停掉。
 
 ### 查过没问题的
@@ -62,9 +62,9 @@
 
 ### Bug（日志里有证据）
 
-7. **双击智能对象会触发好几次「编辑智能对象内容」**：583 次打开里有 139 次（约 1/4）紧跟着一条「当前文档已切换，已取消操作以防误删其他 PSD」，面板状态栏显示「操作失败」（11-12 到 11-25 每天都有，共 144 条）。PNG 智能对象还会出现「无法读取智能对象内容格式，已停止打开」（19 条）：第一次正在把 PNG 转成 PSB，后面几次同时去读格式。原因：`layerTree.ts` 的自定义双击检测和原生 `dblclick` 只靠 `DOUBLE_CLICK_DEDUPE`（180 ms）去重，打开文档时面板线程被模态占住，第二、三次事件处理时已超过 180 ms；几次 `run("editContents")` 一起排队，第一次打开新文档后其余的被 `requireActiveDoc` 拦下。应按「同一图层的 editContents 正在进行就忽略」去重；被我们自己打开文档拦下的那几次不要报错。
-8. **只有一个图层的文档里「合并图」按钮没用**（11-25 08:30 实测 3 次）：在智能对象打开的「图层 3.psb」（只有一层）里点，PS 回「命令“合并可见图层”当前不可用」（-25920）；切到别的文档就成功了。PS 的盖印可见图层要至少两个可见图层。只有一个可见图层时应改用 `stampSelected` 单图层那条路（复制 → 转智能对象 → 栅格化）。
-9. **变体图层没有蒙版时，每次刷新都报错并重做一次模态读取**（11-23 10:46–10:54，12 次）：`uxpHost.ts` `groupInfo` 里 `getLayerMask` 返回的结果没有 `imageData`，`grayInto` 访问 `d.width` 和 finally 里的 `r.imageData.dispose()` 抛 `Cannot read properties of undefined (reading 'dispose')`。退回图层范围没问题，但失败的结果不缓存，下一次刷新又开一次「WavePlug 读取填充范围」模态。应在 `grayInto` 里处理没有 `imageData` 的情况（当作没有蒙版），并缓存退回的范围。
+7. **双击智能对象会触发好几次「编辑智能对象内容」**（已修：同一图层进行中及结束后 800 ms 内只算一次；离开文档后的选中请求静默跳过）：583 次打开里有 139 次（约 1/4）紧跟着一条「当前文档已切换，已取消操作以防误删其他 PSD」，面板状态栏显示「操作失败」（11-12 到 11-25 每天都有，共 144 条）。PNG 智能对象还会出现「无法读取智能对象内容格式，已停止打开」（19 条）：第一次正在把 PNG 转成 PSB，后面几次同时去读格式。原因：`layerTree.ts` 的自定义双击检测和原生 `dblclick` 只靠 `DOUBLE_CLICK_DEDUPE`（180 ms）去重，打开文档时面板线程被模态占住，第二、三次事件处理时已超过 180 ms；几次 `run("editContents")` 一起排队，第一次打开新文档后其余的被 `requireActiveDoc` 拦下。应按「同一图层的 editContents 正在进行就忽略」去重；被我们自己打开文档拦下的那几次不要报错。
+8. **只有一个图层的文档里「合并图」按钮没用**（已修：只有一个可见图层时走复制 → 智能对象 → 栅格化）（11-25 08:30 实测 3 次）：在智能对象打开的「图层 3.psb」（只有一层）里点，PS 回「命令“合并可见图层”当前不可用」（-25920）；切到别的文档就成功了。PS 的盖印可见图层要至少两个可见图层。只有一个可见图层时应改用 `stampSelected` 单图层那条路（复制 → 转智能对象 → 栅格化）。
+9. **变体图层没有蒙版时，每次刷新都报错并重做一次模态读取**（已修：没有 imageData 时用图层范围并缓存；`grayInto` 给出明确错误）（11-23 10:46–10:54，12 次）：`uxpHost.ts` `groupInfo` 里 `getLayerMask` 返回的结果没有 `imageData`，`grayInto` 访问 `d.width` 和 finally 里的 `r.imageData.dispose()` 抛 `Cannot read properties of undefined (reading 'dispose')`。退回图层范围没问题，但失败的结果不缓存，下一次刷新又开一次「WavePlug 读取填充范围」模态。应在 `grayInto` 里处理没有 `imageData` 的情况（当作没有蒙版），并缓存退回的范围。
 
 ### 只是噪音（建议降级或改说明）
 

@@ -717,7 +717,10 @@ export type LayerAction =
   | "mergeDown" | "mergeVisible" | "flatten" | "rasterizeStyle" | "smartViaCopy" | "embedLinked" | "convertToLinked" | "relink" | "linkToFile" | "updateModified" | "updateAllModified"
   | "align" | "distribute" | "artboardFromLayers" | "newLayerDialog" | "quickExport" | "copyCSS" | "copySVG"
   // 合并图 (the button at the bottom right): a new layer only, every other layer left as it is
-  | "stampVisible" | "stampSelected";
+  | "stampVisible" | "stampSelected"
+  // Ctrl+F (the helper takes it from Photoshop, native/overlay/src/hotkey.rs): Photoshop's own
+  // 编辑 › 选择性粘贴 › 原位粘贴, like Illustrator's Ctrl+F (pasted in front, at the same place)
+  | "pasteInPlace";
 
 /** 智能对象 tools offered in the menu (they act on the selection, like on the 工具 page) */
 export type SmartAction =

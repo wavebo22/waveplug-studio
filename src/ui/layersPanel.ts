@@ -4,7 +4,7 @@
 import type { Services } from "../app/services.ts";
 import { createLayerTreeView } from "./layerTree.ts";
 import { askIllustrator, linkOfLayer, pushBoardToIllustrator, pushToIllustrator } from "../app/illustratorBridge.ts";
-import { h, replace } from "./dom.ts";
+import { every, h, replace } from "./dom.ts";
 import { type FileDropSpot, fileBaseName, fileDropResultText, webDrop, webDropResultText, pathsFromDropText, planFileDrop } from "../core/layers/fileDrop.ts";
 import { log } from "../app/log.ts";
 import { createHintBar, type HintBar } from "./hintBar.ts";
@@ -37,7 +37,7 @@ export function mountLayersPanel(root: HTMLElement, svc: Services, isShown: () =
   // property read every 2 s while the panel is shown), and take them off when the panel is hidden
   // (read when the document changes and then every 10 s: each read is four Photoshop queries)
   let viewReading = false, viewDoc: number | null = null, viewAt = 0;
-  setInterval(() => {
+  every(() => {
     const shown = isShown();
     hintBar.active(shown);
     const doc = view.docId();

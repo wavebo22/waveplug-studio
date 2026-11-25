@@ -74,7 +74,7 @@ export async function modal<T>(name: string, fn: (ctx: any) => Promise<T>, opts:
 // 面板卡顿探针: a timer due every 200 ms that comes late means the plugin's script (all its panels
 // share one) didn't get to run for that long; logged with the Photoshop commands then in flight.
 // 11-25 it found seconds-long stalls from input handlers flooded by a fast mouse (layerTree.ts).
-let stallProbe = false, stallLines = 0;
+let stallProbe: ReturnType<typeof setInterval> | null = null, stallLines = 0;
 const inflight = new Map<number, { name: string; at: number }>();
 let inflightSeq = 0;
 function track(name: string): () => void {
@@ -84,9 +84,8 @@ function track(name: string): () => void {
 }
 function probeStalls(): void {
   if (stallProbe) return;
-  stallProbe = true;
   let last = Date.now();
-  const t: any = setInterval(() => {
+  const t: any = stallProbe = setInterval(() => {
     const now = Date.now(), late = now - last - 200;
     last = now;
     if (late > 400 && stallLines < 40) {
@@ -192,6 +191,9 @@ function boundsOf(b: any, fallback: Rect): Rect {
 
 /** Reads a 1-channel imaging result and places it into `want` (PS trims it to its own bounds). */
 export async function grayInto(r: any, want: Rect, fill: number): Promise<Pixels> {
+  // no imageData: nothing there (a layer without a mask). Said plainly, not a TypeError from the
+  // finally below (11-23 log: 「reading 'dispose'」)
+  if (!r?.imageData) throw new Error("Photoshop 没有返回图像数据（图层没有蒙版或区域是空的）");
   try {
     const d = r.imageData;
     const px: Pixels = { width: d.width, height: d.height, channels: 1, data: new Uint8Array(await d.getData({ chunky: true })) };
@@ -230,7 +232,9 @@ export async function readGroupImage(docId: number, groupId: number, maxEdge = 0
     const hc = ctx.hostControl;
     const s = await hc.suspendHistory({ documentID: docId, name: "WavePlug 合并读取图层组" });
     try {
-      await play([{ _obj: "select", _target: [{ _ref: "layer", _id: groupId }], makeVisible: false, _options: DONT }]);
+      // a refused select would have the next steps copy and merge whatever was selected before
+      const [sel] = await play([{ _obj: "select", _target: [{ _ref: "layer", _id: groupId }], makeVisible: false, _options: DONT }]);
+      if (sel?._obj === "error") throw new Error(sel.message || "选不中图层组");
       await play([{ _obj: "duplicate", _target: [{ _ref: "layer", _enum: "ordinal", _value: "targetEnum" }], version: 5, _options: DONT }]);
       const copy = doc.activeLayers[0];
       if (!copy || copy.id === groupId) throw new Error("复制图层组失败");
@@ -405,7 +409,11 @@ export class UxpHost implements PsHost {
       const lb = boundsRect(vs[0].layer);
       try {
         rect = await modal("WavePlug 读取填充范围", async () => {
-          const mask = await grayInto(await ps().imaging.getLayerMask({ documentID: doc.id, layerID: vs[0].layer.id, sourceBounds: lb }), lb, 0);
+          const r = await ps().imaging.getLayerMask({ documentID: doc.id, layerID: vs[0].layer.id, sourceBounds: lb });
+          // a variation without a mask fills its whole layer: its bounds are the area (and are kept,
+          // not read again on every refresh)
+          if (!r?.imageData) return lb;
+          const mask = await grayInto(r, lb, 0);
           return nonZeroBounds(mask.data, mask.width, mask.height, lb) ?? lb;
         });
         this.rects.set(key, rect);
@@ -1026,5 +1034,7 @@ export class UxpHost implements PsHost {
     this.listeners = [];
     for (const off of this.modalListeners) off();
     this.modalListeners = [];
+    // the next build (the development loader's ⟳ / auto reload) starts its own probe
+    if (stallProbe) { clearInterval(stallProbe); stallProbe = null; }
   }
 }

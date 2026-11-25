@@ -189,23 +189,51 @@ export class ComfyClient {
   /**
    * Waits for a job to finish. Uses WebSocket events when available and always confirms
    * through /history, so a dropped socket can't lose a result.
+   *
+   * Gives up early instead of waiting out `timeoutMs` (30 min) when
+   * - ComfyUI can't be reached for `lostMs` in a row (closed, crashed, restarted), or
+   * - the job is in neither /history nor /queue twice in a row, `queueCheckMs` apart (deleted
+   *   from the queue in ComfyUI's own page, or lost in a restart: no event says so).
    */
-  async waitFor(promptId: string, onEvent: (e: JobEvent) => void, opts: { pollMs?: number; timeoutMs?: number; signal?: { aborted: boolean } } = {}): Promise<HistoryEntry> {
+  async waitFor(promptId: string, onEvent: (e: JobEvent) => void, opts: { pollMs?: number; timeoutMs?: number; lostMs?: number; queueCheckMs?: number; signal?: { aborted: boolean } } = {}): Promise<HistoryEntry> {
     const pollMs = opts.pollMs ?? 1500, deadline = Date.now() + (opts.timeoutMs ?? 30 * 60_000);
-    let settled = false;
+    const lostMs = opts.lostMs ?? 30_000, queueCheckMs = opts.queueCheckMs ?? 10_000;
+    let settled = false, interrupted = false;
     let wake: (() => void) | null = null;
     this.listeners.set(promptId, e => {
       onEvent(e);
+      if (e.type === "interrupted") interrupted = true;
       if (e.type === "done" || e.type === "error" || e.type === "interrupted") { settled = true; wake?.(); }
     });
+    /** since when ComfyUI hasn't answered (null: it answered last time) */
+    let lostSince: number | null = null;
+    let queueCheckedAt = Date.now(), missing = 0;
+    /** notes whether ComfyUI answered; too long without an answer throws */
+    const answered = (yes: boolean) => {
+      if (yes) { lostSince = null; return; }
+      lostSince ??= Date.now();
+      if (Date.now() - lostSince >= lostMs) throw new ComfyError(`和 ComfyUI 的连接断了（${Math.round(lostMs / 1000)} 秒没有回应）：ComfyUI 可能已关闭或崩溃，这次生成没有结果`);
+    };
     try {
       await this.connectWs(Math.min(5000, opts.timeoutMs ?? 5000)).catch(() => undefined);
       for (;;) {
         if (opts.signal?.aborted) throw new ComfyError("已取消");
-        const h = await this.history(promptId).catch(() => null);
+        const got = await this.history(promptId).catch((): typeof LOST => LOST);
+        answered(got !== LOST);
+        const h = got === LOST ? null : got;
         if (h?.status?.completed || h?.status?.status_str === "error" || settled && h) {
-          if (h.status?.status_str === "error") throw new ComfyError(historyError(h) ?? "ComfyUI 执行失败", h);
+          if (h.status?.status_str === "error") throw new ComfyError(historyError(h) ?? (interrupted || wasInterrupted(h) ? "任务在 ComfyUI 里被中断了" : "ComfyUI 执行失败"), h);
           return h;
+        }
+        if (!h && got !== LOST && Date.now() - queueCheckedAt >= queueCheckMs) {
+          queueCheckedAt = Date.now();
+          const q = await this.json<{ queue_running?: unknown[][]; queue_pending?: unknown[][] }>("/queue").catch((): typeof LOST => LOST);
+          answered(q !== LOST);
+          if (q !== LOST) {
+            const listed = [...(q.queue_running ?? []), ...(q.queue_pending ?? [])].some(item => item?.[1] === promptId);
+            missing = listed ? 0 : missing + 1;
+            if (missing >= 2) throw new ComfyError("这个任务已经不在 ComfyUI 的队列里了（可能在 ComfyUI 里被删除，或 ComfyUI 重启过），没有结果");
+          }
         }
         if (Date.now() > deadline) throw new ComfyError("等待 ComfyUI 结果超时");
         await new Promise<void>(r => { wake = r; setTimeout(r, settled ? 200 : pollMs); });
@@ -232,6 +260,13 @@ export function outputImage(h: HistoryEntry, nodeId: string, index = 0): ImageRe
   if (!imgs.length) throw new ComfyError(`输出节点 #${nodeId} 没有返回图片`);
   if (!imgs[index]) throw new ComfyError(`输出节点 #${nodeId} 只返回了 ${imgs.length} 张图片，没有第 ${index + 1} 张`);
   return imgs[index];
+}
+
+/** a request ComfyUI didn't answer (waitFor) */
+const LOST: unique symbol = Symbol("lost");
+
+function wasInterrupted(h: HistoryEntry): boolean {
+  return !!h.status?.messages?.some(x => x[0] === "execution_interrupted");
 }
 
 function historyError(h: HistoryEntry): string | null {

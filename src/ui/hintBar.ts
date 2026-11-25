@@ -5,7 +5,7 @@
 // (line 1 the hints, line 2 the state and the last result — click it for the last ten).
 
 import { type HintItem, type HintMessage, type StatePart, messageLife, pushMessage } from "../core/layers/hints.ts";
-import { h, isShown, listen, replace, setShown } from "./dom.ts";
+import { every, h, isShown, listen, replace, setShown } from "./dom.ts";
 import type { Overlay } from "../app/overlay.ts";
 import type { ScreenRect, StatusBarMode } from "../core/overlay/protocol.ts";
 
@@ -52,7 +52,7 @@ export function createHintBar(overlay?: Overlay): HintBar {
   overlay?.onConnected(sync);
   overlay?.onDisconnected(() => setShown(el, true));
   // the helper's version (new enough or not) arrives a moment after it connects: check again
-  setInterval(() => { if (!!overlay?.statusBarReady === isShown(el)) sync(); }, 1000);
+  every(() => { if (!!overlay?.statusBarReady === isShown(el)) sync(); }, 1000);
 
   const key = (k: string) => h("span", { class: "hb-key" }, k);
   function hints(items: HintItem[]) {

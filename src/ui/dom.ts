@@ -218,6 +218,8 @@ export function onDispose(fn: () => void) {
   globals.push(fn);
 }
 
+/** A repeating timer the next build's load clears (a bare setInterval would keep running in the
+ *  replaced build: after N automatic reloads, N copies). */
 export function every(fn: () => void, ms: number) {
   const t = setInterval(fn, ms);
   globals.push(() => clearInterval(t));
