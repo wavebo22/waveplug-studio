@@ -511,10 +511,13 @@ test("变体图层: an AI group of only variations is one row, its variations a 
   // the shown one is the visible variation
   const hidden = buildTree(doc().map(r => r.id === 11 ? { ...r, visible: false } : r));
   assert.equal(hidden.find(l => l.id === 10)!.ai!.shown, 12);
-  // a layer of the user's own inside the group: listed as a group again
+  // a layer of the user's own inside the group: still a variant layer, that layer listed under it
   const mixed = buildTree([raw(10, "AI填充 · 杯子", 7), raw(13, "修补", 1), raw(11, "v1 · 橘子汁", 1), end()]);
-  assert.ok(!isVariantLayer(mixed[0]));
-  assert.deepEqual(visibleRows(mixed, new Set(), "all", contentUsers(mixed)).map(r => r.layer.id), [10, 13, 11]);
+  assert.ok(isVariantLayer(mixed[0]));
+  assert.deepEqual(visibleRows(mixed, new Set(), "all", contentUsers(mixed)).map(r => r.layer.id), [10, 13]);
+  // an AI group with no variations left is an ordinary group
+  const empty = buildTree([raw(10, "AI填充 · 杯子", 7), raw(13, "修补", 1), end()]);
+  assert.ok(!isVariantLayer(empty[0]));
 });
 
 test("图层样式: effects listed under the layer, several strokes kept apart", () => {

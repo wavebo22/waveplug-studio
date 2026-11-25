@@ -380,9 +380,13 @@ export function filterCounts(layers: TreeLayer[], users: Map<string, number>): R
  *  1… each filter. */
 export interface Row { layer: TreeLayer; context: boolean; filter?: SubRow }
 
-/** An AI result group holding only its variations: listed as one layer (变体图层) whose variations
- *  are picked from a row under it, while Photoshop keeps the group. */
-export const isVariantLayer = (l: TreeLayer) => !!l.ai && l.ai.variations > 0 && l.ai.variations === l.children;
+/** An AI result group with variations: listed as one layer (变体图层) whose variations are picked
+ *  from a row under it, while Photoshop keeps the group. Other layers that ended up in the group
+ *  (strays: placed, pasted or dragged in) don't undo that: they are listed under it as its
+ *  children, and WaveLayer moves new ones out (`aiStrayMoves`). */
+export const isVariantLayer = (l: TreeLayer) => !!l.ai && l.ai.variations > 0;
+/** `l` is one of the variations of the variant layer it is in (listed as a chip, not as a row). */
+const isVariationRow = (l: TreeLayer, parent: TreeLayer | undefined) => !!parent && isVariantLayer(parent) && parent.ai!.ids.includes(l.id);
 /** Compact rows are used for sub-rows and plain groups. A group with its own mask thumbnail
  *  needs the normal layer height so the mask is not clipped vertically. */
 export const isCompactRow = (r: Row): boolean => !!r.filter
@@ -452,12 +456,15 @@ export function visibleRows(layers: TreeLayer[], collapsed: ReadonlySet<number>,
 function baseRows(layers: TreeLayer[], collapsed: ReadonlySet<number>, f: Filter, users: Map<string, number>, q?: Query): Row[] {
   if (f === "all" && !queryActive(q)) {
     const rows: Row[] = [];
+    const byId = new Map(layers.map(l => [l.id, l]));
     let hideBelow = Infinity;
     for (const l of layers) {
       if (l.depth > hideBelow) continue;
       hideBelow = Infinity;
+      // a variant layer's variations are never listed (nor anything inside one)
+      if (isVariationRow(l, l.parentId === null ? undefined : byId.get(l.parentId))) { hideBelow = l.depth; continue; }
       rows.push({ layer: l, context: false });
-      if (l.kind === "group" && collapsed.has(l.id) || isVariantLayer(l)) hideBelow = l.depth;
+      if (l.kind === "group" && !isVariantLayer(l) && collapsed.has(l.id)) hideBelow = l.depth;
     }
     return rows;
   }
@@ -465,8 +472,7 @@ function baseRows(layers: TreeLayer[], collapsed: ReadonlySet<number>, f: Filter
   const keep = new Set<number>(), hit = new Set<number>();
   for (const l of layers) {
     // a variant layer's variations are never listed
-    const p = l.parentId === null ? undefined : byId.get(l.parentId);
-    if (p && isVariantLayer(p)) continue;
+    if (isVariationRow(l, l.parentId === null ? undefined : byId.get(l.parentId))) continue;
     if (!matches(l, f, users) || !queryMatch(l, q)) continue;
     hit.add(l.id);
     for (let p: TreeLayer | undefined = l; p && !keep.has(p.id); p = p.parentId === null ? undefined : byId.get(p.parentId)) keep.add(p.id);
@@ -521,26 +527,42 @@ export interface MoveStep { id: number; rel: number; place: "before" | "after" |
  *  Checked again by the host inside its history step, by name, just before it moves anything. */
 export const isAiStray = (name: string, parentName: string): boolean => !!aiLabel(parentName) && !VARIATION.test(name);
 
+/** What WaveLayer remembers, per document, about strays (layers in an AI group that aren't its
+ *  variations): `leave` are left where they are, `moved` were moved out once, `tries` counts moves
+ *  that were attempted (a move that failed is tried again, up to `STRAY_TRIES` times). */
+export interface StrayMemo { leave: Set<number>; moved: Set<number>; tries: Map<number, number> }
+export const STRAY_TRIES = 2;
+
 /**
- * Photoshop puts a layer made, placed or pasted while an AI result group is selected *inside* the
- * group; the group then no longer reads as one AI layer (it shows as a folder). The new layers
- * (ids not in `seen`, the previous read of this document) directly in an AI group go just above
- * it, top to bottom as they were. Layers already there before are left alone (an undo of this
- * move, or an old document, is not fought). `seen` null: first read of the document, nothing.
+ * Photoshop puts a layer made, placed or pasted while an AI result group (or one of its
+ * variations) is selected *inside* the group, and its own Layers panel lets layers be dragged in.
+ * Every stray directly in an AI group goes just above it, top to bottom as they were — whether
+ * it is new or was moved in, and whether or not an earlier attempt was missed — except:
+ * - on the first read of the document (`memo` undefined) the strays already there are left (an
+ *   old document is not changed just by being looked at);
+ * - a stray that was moved out and is back in the group (the user undid the move, or put it back)
+ *   is left from then on;
+ * - a stray whose move was tried `STRAY_TRIES` times is left.
+ * The returned memo is the one to keep; the caller counts a try (`tries`) before it moves and
+ * adds the ids to `moved` once the move went through.
  */
-export function aiStrayMoves(seen: ReadonlySet<number> | null, layers: readonly TreeLayer[]): MoveStep[] {
-  if (!seen) return [];
+export function aiStrayMoves(memo: StrayMemo | undefined, layers: readonly TreeLayer[]): { steps: MoveStep[]; memo: StrayMemo } {
   const byId = new Map(layers.map(l => [l.id, l]));
-  const last = new Map<number, number>();
-  const out: MoveStep[] = [];
-  for (const l of layers) {
+  const strays = layers.filter(l => {
     const p = l.parentId === null ? undefined : byId.get(l.parentId);
-    if (!p?.ai || seen.has(l.id) || !isAiStray(l.name, p.name)) continue;
-    const prev = last.get(p.id);
-    out.push(prev === undefined ? { id: l.id, rel: p.id, place: "before" } : { id: l.id, rel: prev, place: "after" });
-    last.set(p.id, l.id);
+    return !!p?.ai && isAiStray(l.name, p.name);
+  });
+  if (!memo) return { steps: [], memo: { leave: new Set(strays.map(l => l.id)), moved: new Set(), tries: new Map() } };
+  const last = new Map<number, number>();
+  const steps: MoveStep[] = [];
+  for (const l of strays) {
+    if (memo.leave.has(l.id)) continue;
+    if (memo.moved.has(l.id) || (memo.tries.get(l.id) ?? 0) >= STRAY_TRIES) { memo.leave.add(l.id); continue; }
+    const prev = last.get(l.parentId!);
+    steps.push(prev === undefined ? { id: l.id, rel: l.parentId!, place: "before" } : { id: l.id, rel: prev, place: "after" });
+    last.set(l.parentId!, l.id);
   }
-  return out;
+  return { steps, memo };
 }
 
 /**

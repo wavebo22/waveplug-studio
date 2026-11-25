@@ -17,7 +17,7 @@ import { trashAction, trashDropTarget } from "../core/layers/dragTrash.ts";
 import { explainWorkbenchError } from "../core/layers/workbenchCompatibility.ts";
 import { clampThumbPercent, legacyThumbPercent, thumbnailMetrics, THUMB_PERCENT_KEY } from "../core/layers/topControls.ts";
 import { MULTI_EFFECTS } from "../core/layers/effects.ts";
-import { type AdvancedFilter, type Filter, type LayerAction, aiStrayMoves, isAiStray, type LayerKind, type LockKey, type MoveStep, type Row, type SmartAction, type TreeLayer, type Where, BLEND_MODES, ancestors, isCompactRow, queryActive, clickSelect, contentUsers, canDropToDelete, type DeleteDragPart, canDropMaskOnto, copyPlan, dropPlan, previewMoveTree, dropZone, filterCounts, isVariantLayer, layerMenu, nextLayerAfterDelete, layerTags, linkPeers, lockPlan, packChips, lockedByGroup, sharedColors, selectionAfterLocalClear, visibleRows } from "../core/layers/tree.ts";
+import { type AdvancedFilter, type Filter, type LayerAction, aiStrayMoves, isAiStray, type StrayMemo, type LayerKind, type LockKey, type MoveStep, type Row, type SmartAction, type TreeLayer, type Where, BLEND_MODES, ancestors, isCompactRow, queryActive, clickSelect, contentUsers, canDropToDelete, type DeleteDragPart, canDropMaskOnto, copyPlan, dropPlan, previewMoveTree, dropZone, filterCounts, isVariantLayer, layerMenu, nextLayerAfterDelete, layerTags, linkPeers, lockPlan, packChips, lockedByGroup, sharedColors, selectionAfterLocalClear, visibleRows } from "../core/layers/tree.ts";
 import { isDuplicateLayerDoubleAction, isLayerDoubleClick, type LayerClickPoint, type LayerDoubleAction } from "../core/layers/clicks.ts";
 import { matchesInlineRenameRow } from "../core/layers/rename.ts";
 import { type LayerTools, type LayerTree, type PsHost, type RunOptions, type TargetPart, ADJUSTMENTS } from "../ps/host.ts";
@@ -1778,16 +1778,21 @@ export function createLayerTreeView(tree: LayerTree, status: Status, tools?: Lay
   /** Serialise Photoshop selection changes. Rapid Ctrl/Shift clicks must not overlap modal calls. */
   let selectTail: Promise<void> = Promise.resolve();
   let rescuing = false;
-  /** New layers Photoshop put inside an AI group (made / placed / pasted while it was selected) go
-   *  just above it, as one undo step; the host checks the names again inside that step, so a
-   *  variation being written (placed, then renamed vN) is never moved. */
-  async function rescueAiStrays(doc: number, steps: MoveStep[]) {
+  /** per document: which strays in AI groups are left, were moved out, were tried (`aiStrayMoves`) */
+  const strayMemos = new Map<number, StrayMemo>();
+  /** Layers that ended up inside an AI group (made / placed / pasted while it was selected, or
+   *  dragged in in Photoshop's panel) go just above it, as one undo step; the host checks the names
+   *  again inside that step, so a variation being written (placed, then renamed vN) is never moved.
+   *  A move that didn't go through is tried again on a later read (`StrayMemo.tries`). */
+  async function rescueAiStrays(doc: number, steps: MoveStep[], memo: StrayMemo) {
     if (rescuing) return;
     rescuing = true;
+    for (const s of steps) memo.tries.set(s.id, (memo.tries.get(s.id) ?? 0) + 1);
     try {
       log("info", "ai group strays", doc, JSON.stringify(steps));
       const r = await tree.move(doc, steps, { history: "WavePlug 移出 AI 图层", onlyIf: isAiStray });
-      if (r.done) status(`新图层已放到 AI 图层上方（AI 图层组里只放变体）`, "info");
+      for (const s of steps) memo.moved.add(s.id);
+      if (r.done) status(`图层已移到 AI 图层上方（AI 图层组里只放变体）`, "info");
       if (r.skipped?.length) log("info", "ai group strays skipped", r.skipped.join("；"));
     } catch (e) {
       log("warn", "ai group strays move failed", e);
@@ -1858,9 +1863,9 @@ export function createLayerTreeView(tree: LayerTree, status: Status, tools?: Lay
           if (!stale && maskView && !r.selected.includes(maskView.id)) maskView = null;
           if (!stale || r.docId !== docId) selected = localClear ? new Set() : new Set(r.selected);
           else if (stale) again = selecting === 0;
-          const seen = r.docId === docId ? new Set(layers.map(l => l.id)) : null;
-          const strays = aiStrayMoves(seen, r.layers);
-          if (strays.length) void rescueAiStrays(r.docId, strays);
+          const strays = aiStrayMoves(strayMemos.get(r.docId), r.layers);
+          strayMemos.set(r.docId, strays.memo);
+          if (strays.steps.length) void rescueAiStrays(r.docId, strays.steps, strays.memo);
           if (r.docId !== docId) queueMicrotask(() => workbenchWindow?.docChanged());
           docId = r.docId; layers = r.layers; byId = new Map(layers.map(l => [l.id, l])); users = contentUsers(layers); colors = sharedColors(layers, users); canvas = { width: r.width, height: r.height };
         }
