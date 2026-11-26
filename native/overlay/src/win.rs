@@ -2766,7 +2766,8 @@ fn watch_check(foreground: &str, present: bool) {
         return;
     }
     let ex = unsafe { GetWindowLongPtrW(h, GWL_EXSTYLE) };
-    if needs_noactivate_style(false, ex) {
+    // while AI 整理's field has the keyboard the window must stay activatable
+    if needs_noactivate_style(CHECK_TYPING.load(Ordering::SeqCst), ex) {
         set_style(h, true);
     }
     install_check_guard(h);

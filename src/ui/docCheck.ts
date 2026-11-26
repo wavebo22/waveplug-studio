@@ -119,7 +119,8 @@ export function createDocCheck(d: DocCheckDeps) {
 
   /** a full check of document `id`; `withAi`: the ticked DeepSeek checks too */
   async function start(id: number, withAi: boolean) {
-    if (id !== docId || withAi) { fixed.clear(); ai = []; }
+    // another document, or a fresh check: what DeepSeek is still checking belongs to the old one
+    if (id !== docId || withAi) { fixed.clear(); ai = []; ++aiRun; if (busy === "DeepSeek 正在检查…") busy = ""; }
     docId = id;
     error = "";
     await readLocal(true);
@@ -212,6 +213,8 @@ export function createDocCheck(d: DocCheckDeps) {
     const it = issueOf(key);
     if (!it?.fix || docId === null || working.has(key)) return;
     const f = it.fix, id = docId;
+    // the fixes work on the document in front: not on another one switched to meanwhile
+    if (d.docId() !== id) { error = "文档已切换：回到这个文档再处理，或重新检查"; sync(); return; }
     working.add(key); fixed.set(key, it); error = ""; sync();
     try {
       if (f.kind === "shrinkSmart" || f.kind === "deleteVariants") {
