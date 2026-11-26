@@ -23,9 +23,6 @@ export interface AiOrganizeDeps {
   settings(): { key: string; model: string };
   /** where the sheet goes (a positioned element that the sheet covers) */
   host(): HTMLElement;
-  /** the sheet opened or closed: UXP draws native text fields above everything regardless of z-index,
-   *  so the panel takes its own (the search box) out of the DOM while the sheet is up */
-  onOpenChange?(open: boolean): void;
 }
 
 const EXTRA_KEY = "wp.ai.organize.extra", RENAME_ONLY_KEY = "wp.ai.organize.renameOnly";
@@ -40,7 +37,6 @@ export function createAiOrganize(d: AiOrganizeDeps) {
   function close() {
     if (!sheet) return;
     sheet.remove(); sheet = null;
-    d.onOpenChange?.(false);
   }
 
   function open() {
@@ -83,7 +79,6 @@ export function createAiOrganize(d: AiOrganizeDeps) {
         result),
       h("div", { class: "sheet-foot" }, msg, h("button", { class: "btn", onClick: close }, "取消"), againBtn, applyBtn));
     d.host().append(sheet);
-    d.onOpenChange?.(true);
     render();
     void analyse();
 

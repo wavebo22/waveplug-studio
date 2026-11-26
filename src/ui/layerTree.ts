@@ -3526,18 +3526,46 @@ export function createLayerTreeView(tree: LayerTree, status: Status, tools?: Lay
     tree, status, fetch: assistant.fetch, settings: assistant.settings,
     state: () => ({ docId, layers, selected, width: canvas.width, height: canvas.height }),
     refresh: () => void refresh(),
-    host: () => el.parentElement ?? el,
-    // taken out, not hidden: a visibility toggle coincided with a host crash in 0.1.4 (DEVELOPMENT.md)
-    onOpenChange: open => {
-      if (open) searchBox.remove();
-      else if (!searchBox.parentNode) findRow.insertBefore(searchBox, findRow.firstChild);
-    },
+    host: () => sheetHost(),
   }) : null;
   // ── 文档检查: the button beside AI 整理 (docCheck.ts) ──
   const docCheck = assistant?.checker ? createDocCheck({
     checker: assistant.checker, tree, tools, status, fetch: assistant.fetch, settings: assistant.settings, composite: assistant.composite,
-    state: () => ({ docId }), refresh: () => void refresh(), host: () => el.parentElement ?? el,
+    state: () => ({ docId }), refresh: () => void refresh(), host: () => sheetHost(),
   }) : null;
+
+  // Any sheet over the panel (AI 整理, 检查, later ones) goes through sheetHost(): UXP draws native
+  // text fields above everything whatever the z-index, so while a sheet is up the panel's own fields
+  // are taken out of the page and put back where they were when the last sheet closes. Taken out,
+  // not hidden: a visibility toggle coincided with a host crash in 0.1.4 (DEVELOPMENT.md). Same
+  // approach as the Studio panel (app.ts syncSheets).
+  let parked: { node: Element; parent: Node; next: Node | null }[] = [];
+  let patched: HTMLElement | null = null;
+  const sheetHost = (): HTMLElement => {
+    const host = el.parentElement ?? el;
+    if (patched === host) return host;
+    patched = host;
+    const sync = () => {
+      const open = !!Array.from(host.children).some(c => c.classList.contains("sheet"));
+      if (open && !parked.length) {
+        parked = Array.from(el.querySelectorAll("input, textarea")).filter(n => n.parentNode).map(node => ({ node, parent: node.parentNode!, next: node.nextSibling }));
+        for (const p of parked) p.node.remove();
+      } else if (!open && parked.length) {
+        for (const p of [...parked].reverse()) p.parent.insertBefore(p.node, p.next && p.next.parentNode === p.parent ? p.next : null);
+        parked = [];
+      }
+    };
+    const append = host.append.bind(host);
+    host.append = (...nodes: (Node | string)[]) => {
+      for (const n of nodes) if (n instanceof HTMLElement && n.classList.contains("sheet")) {
+        const detach = n.remove.bind(n);
+        n.remove = () => { detach(); sync(); };
+      }
+      append(...nodes);
+      sync();
+    };
+    return host;
+  };
 
   // ── the panel menu (☰, as the menu at the top right of Photoshop's Layers panel) ──
   const SHORTCUT_KEY = "wp.layers.shortcuts";
