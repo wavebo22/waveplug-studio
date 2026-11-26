@@ -2308,6 +2308,7 @@ pub fn watch() {
             // Independent viewports follow Photoshop even when the generate surface is hidden.
             watch_variant(now_front, present);
             watch_shelf(now_front, present);
+            watch_check(now_front, present);
             if !SHOWN.load(Ordering::SeqCst) {
                 continue;
             }
@@ -2545,4 +2546,194 @@ fn watch_shelf(foreground: &str, present: bool) {
     if SHELF_PARKED.load(Ordering::SeqCst) {
         shelf_put(h);
     }
+}
+
+// ── 检查结果 window (panel/check.rs): beside the WavePlug 图层 panel ──
+// The plugin can't tell where its panel is on screen, but its 检查 button was just clicked: the
+// window under the cursor then is the panel's (check_anchor). That window is followed from then
+// on, so the check window stays against the panel's left edge when the panel or Photoshop moves.
+// Where it goes is layout.rs check_rect. It parks off screen while Photoshop isn't in front.
+static CHECK_SHOWN: AtomicBool = AtomicBool::new(false);
+static CHECK_PARKED: AtomicBool = AtomicBool::new(true);
+static CHECK_FOLDED: AtomicBool = AtomicBool::new(false);
+/// the panel's window (the one under the cursor at the anchor)
+static CHECK_ANCHOR: AtomicIsize = AtomicIsize::new(0);
+static CHECK_OWNER: AtomicIsize = AtomicIsize::new(0);
+/// where the window was last put (to skip moves to the same place)
+static CHECK_AT: Mutex<Option<(i32, i32, i32, i32)>> = Mutex::new(None);
+static CHECK_GUARD_HWND: AtomicIsize = AtomicIsize::new(0);
+static CHECK_ORIGINAL_WNDPROC: AtomicIsize = AtomicIsize::new(0);
+
+unsafe extern "system" fn check_wnd_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
+    if msg == WM_MOUSEACTIVATE {
+        return MA_NOACTIVATE; // clicks go in, the keyboard stays with Photoshop
+    }
+    let original = CHECK_ORIGINAL_WNDPROC.load(Ordering::SeqCst);
+    if original != 0 {
+        let proc: WNDPROC = unsafe { std::mem::transmute(original) };
+        unsafe { CallWindowProcW(proc, hwnd, msg, wparam, lparam) }
+    } else {
+        unsafe { DefWindowProcW(hwnd, msg, wparam, lparam) }
+    }
+}
+
+fn install_check_guard(h: HWND) {
+    if h.is_null() || CHECK_GUARD_HWND.load(Ordering::SeqCst) == h as isize {
+        return;
+    }
+    unsafe {
+        let orig = GetWindowLongPtrW(h, GWLP_WNDPROC);
+        if orig == 0 || orig == check_wnd_proc as *const () as isize {
+            return;
+        }
+        let prior = SetWindowLongPtrW(h, GWLP_WNDPROC, check_wnd_proc as *const () as isize);
+        if prior != 0 {
+            CHECK_ORIGINAL_WNDPROC.store(prior, Ordering::SeqCst);
+            CHECK_GUARD_HWND.store(h as isize, Ordering::SeqCst);
+        }
+    }
+}
+
+fn check_hwnd() -> HWND {
+    find(crate::panel::check::TITLE)
+}
+
+pub fn check_window_exists() -> bool {
+    !check_hwnd().is_null()
+}
+
+/// The 图层 panel is under the cursor now: remember its window.
+pub fn check_anchor() {
+    let mut p = POINT { x: 0, y: 0 };
+    unsafe { GetCursorPos(&mut p) };
+    let h = unsafe { WindowFromPoint(p) };
+    CHECK_ANCHOR.store(h as isize, Ordering::SeqCst);
+    CHECK_OWNER.store(photoshop_at(p) as isize, Ordering::SeqCst);
+    if let Ok(mut at) = CHECK_AT.lock() {
+        *at = None;
+    }
+    log::line(format!("check anchor at {},{}: panel window {:?}", p.x, p.y, window_rect(h).map(|r| (r.left, r.top, r.right, r.bottom))));
+}
+
+/// The panel on screen: the anchored window's rectangle; without one (the plugin reconnected),
+/// a strip at the right of Photoshop's window, where the panels usually dock.
+fn check_panel_rect() -> Option<(i32, i32, i32, i32)> {
+    let a = CHECK_ANCHOR.load(Ordering::SeqCst) as HWND;
+    if !a.is_null() && unsafe { IsWindow(a) } != 0 && unsafe { IsWindowVisible(a) } != 0 {
+        if let Some(r) = window_rect(a).filter(|r| r.right > r.left && r.bottom > r.top) {
+            return Some((r.left, r.top, r.right, r.bottom));
+        }
+    }
+    let ps = window_rect(photoshop_main_hwnd())?;
+    let k = dpi_at(POINT { x: ps.right - 1, y: ps.top + 1 }) / 96.0;
+    Some((ps.right - (320.0 * k) as i32, ps.top + (90.0 * k) as i32, ps.right, ps.bottom - (30.0 * k) as i32))
+}
+
+fn check_rect_now() -> Option<(i32, i32, i32, i32)> {
+    let panel = check_panel_rect()?;
+    let mid = POINT { x: (panel.0 + panel.2) / 2, y: (panel.1 + panel.3) / 2 };
+    let m = unsafe { MonitorFromPoint(mid, MONITOR_DEFAULTTONEAREST) };
+    let mut info: MONITORINFO = unsafe { std::mem::zeroed() };
+    info.cbSize = std::mem::size_of::<MONITORINFO>() as u32;
+    let screen = if unsafe { GetMonitorInfoW(m, &mut info) } != 0 {
+        (info.rcWork.left, info.rcWork.top, info.rcWork.right, info.rcWork.bottom)
+    } else {
+        (i32::MIN / 2, i32::MIN / 2, i32::MAX / 2, i32::MAX / 2)
+    };
+    let k = dpi_at(mid) / 96.0;
+    let width = (crate::panel::check::WIDTH as f64 * k).round() as i32;
+    let height = if CHECK_FOLDED.load(Ordering::SeqCst) {
+        (crate::panel::check::HEAD_H as f64 * k).round() as i32
+    } else {
+        (panel.3 - panel.1).max((240.0 * k) as i32)
+    };
+    Some(crate::layout::check_rect(panel, screen, width, height, (GAP * k).round() as i32))
+}
+
+fn check_put(h: HWND, force: bool) {
+    let Some((x, y, w, ht)) = check_rect_now() else { return };
+    let same = CHECK_AT.lock().map(|at| *at == Some((x, y, w, ht))).unwrap_or(false);
+    if same && !force && !CHECK_PARKED.load(Ordering::SeqCst) {
+        return;
+    }
+    let ok = unsafe { SetWindowPos(h, HWND_TOPMOST, x, y, w, ht, SWP_NOACTIVATE | SWP_ASYNCWINDOWPOS) } != 0;
+    if ok {
+        if let Ok(mut at) = CHECK_AT.lock() {
+            *at = Some((x, y, w, ht));
+        }
+        if CHECK_PARKED.swap(false, Ordering::SeqCst) {
+            log::line(format!("check window shown at {x},{y} size {w}x{ht}"));
+        }
+    }
+}
+
+fn check_park(h: HWND) {
+    let ok = unsafe { SetWindowPos(h, HWND_NOTOPMOST, PARK.0, PARK.1, 0, 0, SWP_NOSIZE | SWP_NOACTIVATE | SWP_ASYNCWINDOWPOS) } != 0;
+    if ok {
+        CHECK_PARKED.store(true, Ordering::SeqCst);
+    }
+}
+
+/// The plugin showed the check window. False until egui made it.
+pub fn check_place() -> bool {
+    let h = check_hwnd();
+    if h.is_null() {
+        return false;
+    }
+    set_style(h, true);
+    install_check_guard(h);
+    if CHECK_OWNER.load(Ordering::SeqCst) == 0 {
+        CHECK_OWNER.store(photoshop_main_hwnd() as isize, Ordering::SeqCst);
+    }
+    CHECK_SHOWN.store(true, Ordering::SeqCst);
+    CHECK_PARKED.store(true, Ordering::SeqCst);
+    check_put(h, true);
+    true
+}
+
+/// 收起 / 展开: only the title bar, or as tall as the panel.
+pub fn check_fold(folded: bool) {
+    if CHECK_FOLDED.swap(folded, Ordering::SeqCst) == folded {
+        return;
+    }
+    let h = check_hwnd();
+    if !h.is_null() && CHECK_SHOWN.load(Ordering::SeqCst) && !CHECK_PARKED.load(Ordering::SeqCst) {
+        check_put(h, true);
+    }
+}
+
+pub fn check_hide() {
+    CHECK_SHOWN.store(false, Ordering::SeqCst);
+    let h = check_hwnd();
+    if !h.is_null() {
+        check_park(h);
+    }
+}
+
+/// Follow Photoshop and the panel: on screen beside the panel while Photoshop (or one of our
+/// windows) is in front, parked otherwise.
+fn watch_check(foreground: &str, present: bool) {
+    if !CHECK_SHOWN.load(Ordering::SeqCst) {
+        return;
+    }
+    let h = check_hwnd();
+    if h.is_null() {
+        CHECK_PARKED.store(true, Ordering::SeqCst);
+        return;
+    }
+    let ex = unsafe { GetWindowLongPtrW(h, GWL_EXSTYLE) };
+    if needs_noactivate_style(false, ex) {
+        set_style(h, true);
+    }
+    install_check_guard(h);
+    let owner = CHECK_OWNER.load(Ordering::SeqCst) as HWND;
+    let owner = if owner.is_null() { photoshop_main_hwnd() } else { owner };
+    if !(present && photoshop_window_ready(owner)) {
+        if !CHECK_PARKED.load(Ordering::SeqCst) {
+            check_park(h);
+            log::line(format!("check window parked: foreground={foreground}"));
+        }
+        return;
+    }
+    check_put(h, false);
 }

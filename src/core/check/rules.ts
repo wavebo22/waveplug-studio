@@ -1,15 +1,13 @@
 // 文档检查 (WavePlug 图层 panel): everything that can be decided from what Photoshop tells us —
-// missing fonts, oversized / blurry / broken smart objects, delivery settings (colour mode,
-// resolution, safe margin, rich black), text (tiny, maybe cut off, low contrast, near-identical
-// sizes), tidiness (empty, off-canvas, invisible layers, unused AI variants) and design consistency
+// missing fonts, oversized / blurry / broken smart objects, print settings for CMYK files
+// (resolution, bleed and safe margin, rich black, tiny text), text (maybe cut off, placeholders),
+// tidiness (empty, off-canvas, invisible layers, unused AI variants) and design consistency
 // (near-identical colours and sizes, uneven spacing). Pure (tests/check_rules.test.ts);
 // the copy and the visual checks are DeepSeek's (core/check/ai.ts).
 
 import type { Rect } from "../image/region.ts";
 import { type DocScan, type ScanLayer, shownSize, sizeText } from "../layers/slim.ts";
 
-export type Purpose = "print" | "screen" | "mobile";
-export const PURPOSE_NAMES: Record<Purpose, string> = { print: "印刷", screen: "网页 / 屏幕", mobile: "手机界面" };
 export type Severity = "error" | "warn" | "info";
 export type Category = "font" | "smart" | "delivery" | "text" | "hygiene" | "design" | "copy" | "visual";
 export const CATEGORY_NAMES: Record<Category, string> = {
@@ -63,8 +61,6 @@ export interface CheckText {
   /** 段落文字: its box on the canvas (px), when it could be worked out */
   box?: Rect;
   visible: boolean;
-  /** shown layer style that recolours the text (颜色叠加 / 渐变叠加 / 图案叠加 / 描边) */
-  overlay?: boolean;
 }
 
 export interface CheckDoc {
@@ -82,8 +78,6 @@ export interface CheckDoc {
   links: { id: number; missing: boolean; changed: boolean }[];
   /** fill and shape layers' colours */
   fills: { id: number; rgb: RGB }[];
-  /** colour right around each text layer on the composite (for contrast) */
-  backgrounds: ReadonlyMap<number, RGB>;
   /** smart objects' content ids (instances share one) */
   contentIds: ReadonlyMap<number, string>;
 }
@@ -101,51 +95,15 @@ const fmt = (n: number, d = 0) => Number(n.toFixed(d)).toString();
 const names = (ids: number[], nameOf: (id: number) => string, max = 3) =>
   ids.slice(0, max).map(id => `「${nameOf(id)}」`).join("") + (ids.length > max ? ` 等 ${ids.length} 个` : "");
 
-/** Auto purpose: CMYK is for print; a tall document of phone width a phone screen; else a screen. */
-export function guessPurpose(d: { mode: CheckDoc["mode"]; width: number; height: number }): Purpose {
-  if (d.mode === "cmyk") return "print";
-  if (d.height > d.width && [375, 390, 393, 414, 430, 720, 750, 828, 1080, 1125, 1170, 1179, 1242, 1284, 1290].includes(Math.round(d.width))) return "mobile";
-  return "screen";
-}
-
-/** WCAG contrast ratio between two colours (1–21). */
-export function contrast(a: RGB, b: RGB): number {
-  const lum = (c: RGB) => {
-    const ch = (v: number) => { const s = v / 255; return s <= 0.03928 ? s / 12.92 : ((s + 0.055) / 1.055) ** 2.4; };
-    return 0.2126 * ch(c.r) + 0.7152 * ch(c.g) + 0.0722 * ch(c.b);
-  };
-  const [x, y] = [lum(a), lum(b)].sort((p, q) => q - p);
-  return (x + 0.05) / (y + 0.05);
-}
-
 export const hex = (c: RGB) => "#" + [c.r, c.g, c.b].map(v => Math.round(Math.max(0, Math.min(255, v))).toString(16).padStart(2, "0")).join("").toUpperCase();
-
-/** The median colour of a thin ring just outside `rect` (document px) on a composite scaled by
- *  `scale` (composite px per document px): what a text layer sits on. null when nothing to sample. */
-export function ringColor(px: { width: number; height: number; channels: number; data: Uint8Array }, rect: Rect, scale: number): RGB | null {
-  const pad = 3;
-  const l = Math.floor(rect.left * scale) - pad, t = Math.floor(rect.top * scale) - pad;
-  const r = Math.ceil(rect.right * scale) + pad, b = Math.ceil(rect.bottom * scale) + pad;
-  const rs: number[] = [], gs: number[] = [], bs: number[] = [];
-  const add = (x: number, y: number) => {
-    if (x < 0 || y < 0 || x >= px.width || y >= px.height) return;
-    const i = (y * px.width + x) * px.channels;
-    if (px.channels === 1) { rs.push(px.data[i]); gs.push(px.data[i]); bs.push(px.data[i]); return; }
-    rs.push(px.data[i]); gs.push(px.data[i + 1]); bs.push(px.data[i + 2]);
-  };
-  const step = Math.max(1, Math.round(Math.max(r - l, b - t) / 200));
-  for (let x = l; x <= r; x += step) for (let k = 0; k < pad; k++) { add(x, t + k); add(x, b - k); }
-  for (let y = t; y <= b; y += step) for (let k = 0; k < pad; k++) { add(l + k, y); add(r - k, y); }
-  if (!rs.length) return null;
-  const med = (a: number[]) => { const s = [...a].sort((p, q) => p - q); return s[s.length >> 1]; };
-  return { r: med(rs), g: med(gs), b: med(bs) };
-}
 
 const dist = (a: RGB, b: RGB) => Math.hypot(a.r - b.r, a.g - b.g, a.b - b.b);
 
-/** Every local check. `purpose` decides the delivery and size rules. */
-export function runChecks(doc: CheckDoc, purpose: Purpose): Issue[] {
+/** Every local check. A CMYK file is for print: then the print rules apply too. Nothing is judged
+ *  by device (screen sizes, contrast): that is the designer's call. */
+export function runChecks(doc: CheckDoc): Issue[] {
   const out: Issue[] = [];
+  const print = doc.mode === "cmyk";
   const layers = doc.scan.layers;
   const byId = new Map(layers.map(l => [l.id, l]));
   const nameOf = (id: number) => byId.get(id)?.name ?? doc.texts.find(t => t.id === id)?.name ?? `#${id}`;
@@ -196,8 +154,8 @@ export function runChecks(doc: CheckDoc, purpose: Purpose): Issue[] {
     if (VECTOR_FILE.test(s.file)) continue; // vector: scaling costs nothing
     // upscaled raster: blurry
     const up = Math.sqrt(shownPx / contentPx);
-    if (RASTER_FILE.test(s.file) && up > (purpose === "print" ? 1.3 : 1.6)) {
-      out.push({ key: "smart:up:" + key, category: "smart", severity: purpose === "print" ? "error" : "warn", ids,
+    if (RASTER_FILE.test(s.file) && up > (print ? 1.3 : 1.6)) {
+      out.push({ key: "smart:up:" + key, category: "smart", severity: print ? "error" : "warn", ids,
         title: `${label}被放大了 ${fmt(up, 1)} 倍，可能发糊`, detail: `内容只有 ${s.width}×${s.height}，却显示成约 ${fmt(biggest.width)}×${fmt(biggest.height)}；换一张更清晰的原图` });
       continue;
     }
@@ -221,8 +179,7 @@ export function runChecks(doc: CheckDoc, purpose: Purpose): Issue[] {
 
   // ── 交付 ──
   const mm = (px: number) => px / doc.ppi * 25.4;
-  if (purpose === "print") {
-    if (doc.mode !== "cmyk") out.push({ key: "del:mode", category: "delivery", severity: "warn", ids: [], title: `印刷稿是 ${doc.mode.toUpperCase()} 模式`, detail: "交印刷厂前转成 CMYK（图像 › 模式 › CMYK 颜色），并检查颜色变化，尤其是鲜艳的蓝、绿、紫" });
+  if (print) {
     if (doc.ppi < 300) out.push({ key: "del:ppi", category: "delivery", severity: doc.ppi < 200 ? "error" : "warn", ids: [], title: `分辨率只有 ${fmt(doc.ppi)} ppi`, detail: `印刷一般要 300 ppi；按现在的像素，300 ppi 下成品约 ${fmt(doc.width / 300 * 25.4)}×${fmt(doc.height / 300 * 25.4)} mm` });
     out.push({ key: "del:bleed", category: "delivery", severity: "info", ids: [], title: `成品尺寸约 ${fmt(mm(doc.width))}×${fmt(mm(doc.height))} mm（${fmt(doc.ppi)} ppi）`, detail: "确认画布已经包含出血（通常每边 3 mm），铺底的图片和色块要铺到画布边缘" });
     const safe = 3 / 25.4 * doc.ppi * 2; // 出血 3 mm + 安全 3 mm
@@ -230,16 +187,12 @@ export function runChecks(doc: CheckDoc, purpose: Purpose): Issue[] {
     if (near.length) out.push({ key: "del:edge", category: "delivery", severity: "warn", ids: near, title: `${near.length} 个文字离画布边不到 6 mm`, detail: `${names(near, nameOf)}：裁切时可能被切到（出血 3 mm + 安全距离 3 mm）` });
     const rich = doc.texts.filter(t => t.cmyk && t.cmyk.k >= 80 && t.cmyk.c + t.cmyk.m + t.cmyk.y >= 30 && Math.max(...t.sizesPx, 0) / doc.ppi * 72 < 14).map(t => t.id);
     if (rich.length) out.push({ key: "del:richblack", category: "delivery", severity: "warn", ids: rich, title: `${rich.length} 个小字是四色黑`, detail: `${names(rich, nameOf)}：印刷套印不准时会发虚，小字改成单黑（C0 M0 Y0 K100）` });
-  } else if (doc.mode === "cmyk") {
-    out.push({ key: "del:mode", category: "delivery", severity: "warn", ids: [], title: "屏幕用的设计是 CMYK 模式", detail: "屏幕显示用 RGB（图像 › 模式 › RGB 颜色），CMYK 会让颜色变灰、导出也更麻烦" });
+    const tiny = doc.texts.filter(t => t.visible && t.sizesPx.length && Math.min(...t.sizesPx) < 6 / 72 * doc.ppi - 0.01).map(t => t.id);
+    if (tiny.length) out.push({ key: "del:tiny", category: "delivery", severity: "warn", ids: tiny, title: `${tiny.length} 个文字小于 6 pt`, detail: `${names(tiny, nameOf)}：印出来会看不清` });
   }
   if (doc.bits > 8) out.push({ key: "del:bits", category: "delivery", severity: "info", ids: [], title: `文档是 ${doc.bits} 位`, detail: "文件比 8 位大一倍；不做精细调色的话可以改成 8 位（图像 › 模式 › 8 位/通道）" });
 
   // ── 文字 ──
-  const minPx = purpose === "print" ? 6 / 72 * doc.ppi : purpose === "mobile" ? 12 * (doc.width / 375) : 12;
-  const minLabel = purpose === "print" ? "6 pt" : purpose === "mobile" ? `12 pt（这个画布上约 ${fmt(minPx)} px）` : "12 px";
-  const tiny = doc.texts.filter(t => t.visible && t.sizesPx.length && Math.min(...t.sizesPx) < minPx - 0.01).map(t => t.id);
-  if (tiny.length) out.push({ key: "text:tiny", category: "text", severity: "warn", ids: tiny, title: `${tiny.length} 个文字小于 ${minLabel}`, detail: `${names(tiny, nameOf)}：${PURPOSE_NAMES[purpose]}上会看不清` });
   for (const t of doc.texts) {
     if (!t.visible || !t.box || !t.bounds || !t.contents.trim()) continue;
     const line = Math.max(...t.sizesPx, 1) * 1.2;
@@ -249,19 +202,6 @@ export function runChecks(doc: CheckDoc, purpose: Purpose): Issue[] {
   }
   for (const t of doc.texts) {
     if (t.visible && PLACEHOLDER.test(t.contents.trim())) out.push({ key: "text:placeholder:" + t.id, category: "text", severity: "warn", ids: [t.id], title: `「${t.name}」还是占位文字「${t.contents.trim().slice(0, 20)}」`, detail: "换成正式文案，或删掉这个图层" });
-  }
-  const lowContrast: { id: number; ratio: number }[] = [];
-  for (const t of doc.texts) {
-    const bg = doc.backgrounds.get(t.id);
-    // a colour / gradient / pattern overlay or a stroke draws the text in other colours than its own
-    if (!t.visible || !t.rgb || !bg || !t.contents.trim() || t.overlay) continue;
-    const large = Math.max(...t.sizesPx, 0) >= (purpose === "print" ? 18 / 72 * doc.ppi : purpose === "mobile" ? 24 * (doc.width / 375) : 24);
-    const ratio = contrast(t.rgb, bg);
-    if (ratio < (large ? 3 : 4.5)) lowContrast.push({ id: t.id, ratio });
-  }
-  for (const c of lowContrast.sort((a, b) => a.ratio - b.ratio).slice(0, 12)) {
-    const t = doc.texts.find(x => x.id === c.id)!;
-    out.push({ key: "text:contrast:" + c.id, category: "text", severity: c.ratio < 2 ? "error" : "warn", ids: [c.id], title: `「${t.name}」和背景对比度只有 ${fmt(c.ratio, 1)}:1`, detail: `文字 ${hex(t.rgb!)}，背景约 ${hex(doc.backgrounds.get(c.id)!)}；正文至少 4.5:1，大字至少 3:1（WCAG），不然看不清` });
   }
   // near-identical sizes: 23.8 and 24 — almost always the same thing set twice
   const sizeUsers = new Map<number, number[]>();

@@ -20,6 +20,10 @@
 //     `gap` above it (the rail scrolls; the workbench clips its list);
 //  4. the toast goes bottom-right, or just above the generate panel when that is there.
 // A new external window gets a corner or edge here and follows the same rules.
+//
+// One window lives outside the canvas: the 检查结果 window (check_rect) goes against the left edge
+// of the WavePlug 图层 panel, top-aligned with it and as tall as it (or just its title bar when
+// folded); on the panel's right instead when the screen has no room on the left.
 
 /// left, top, right, bottom in physical screen px
 pub type R = (i32, i32, i32, i32);
@@ -91,11 +95,35 @@ pub fn toast_rect(work: R, margin: i32, gap: i32, size: (i32, i32), generate: Op
     (x, y.max(work.1), w, h)
 }
 
+/// The 检查结果 window (left, top, width, height): `gap` left of `panel` (the 图层 panel on screen),
+/// its top aligned with the panel's, `height` tall (the panel's height unless folded) but inside
+/// `screen` (the monitor's work area); right of the panel when there is no room on the left.
+pub fn check_rect(panel: R, screen: R, width: i32, height: i32, gap: i32) -> (i32, i32, i32, i32) {
+    let x = if panel.0 - gap - width >= screen.0 { panel.0 - gap - width } else { (panel.2 + gap).min(screen.2 - width).max(screen.0) };
+    let h = height.min(screen.3 - screen.1).max(1);
+    let y = panel.1.clamp(screen.1, (screen.3 - h).max(screen.1));
+    (x, y, width, h)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     const CANVAS: R = (1000, 100, 3000, 2100);
+
+    #[test]
+    fn the_check_window_sits_left_of_the_layer_panel() {
+        let screen = (0, 0, 3840, 2100);
+        // the panel docked on the right: the window just left of it, as tall as it
+        assert_eq!(check_rect((3400, 200, 3840, 1400), screen, 340, 1200, 8), (3400 - 8 - 340, 200, 340, 1200));
+        // folded: only the title bar, same corner
+        assert_eq!(check_rect((3400, 200, 3840, 1400), screen, 340, 34, 8).3, 34);
+        // the panel at the screen's left edge: the window goes to its right
+        assert_eq!(check_rect((0, 200, 300, 1400), screen, 340, 1200, 8).0, 308);
+        // never below the screen's bottom
+        let (_, y, _, h) = check_rect((3400, 1800, 3840, 2100), screen, 340, 1200, 8);
+        assert!(y + h <= 2100);
+    }
 
     #[test]
     fn the_status_bar_strip_is_taken_off_the_bottom() {

@@ -40,6 +40,18 @@ pub struct Tint {
     pub width: u32,
     pub height: u32,
     pub alpha: Vec<u8>,
+    /// the tint's colour; None: the usual blue
+    pub color: Option<(u8, u8, u8)>,
+}
+
+/// "#rrggbb" as RGB
+pub fn parse_color(s: &str) -> Option<(u8, u8, u8)> {
+    let h = s.strip_prefix('#')?;
+    if h.len() != 6 {
+        return None;
+    }
+    let v = u32::from_str_radix(h, 16).ok()?;
+    Some(((v >> 16) as u8, (v >> 8) as u8, v as u8))
 }
 
 /// the largest shape taken (a side), as the plugin reads it
@@ -47,12 +59,12 @@ const TINT_MAX: u32 = 512;
 
 impl Tint {
     /// From the plugin's message; None when it doesn't add up (sizes, base64, an empty rect).
-    pub fn decode(rect: ScreenRect, clip: Option<ScreenRect>, width: u32, height: u32, alpha: &str) -> Option<Tint> {
+    pub fn decode(rect: ScreenRect, clip: Option<ScreenRect>, width: u32, height: u32, alpha: &str, color: Option<&str>) -> Option<Tint> {
         if width == 0 || height == 0 || width > TINT_MAX || height > TINT_MAX || rect.right <= rect.left || rect.bottom <= rect.top {
             return None;
         }
         let bytes = data_encoding::BASE64.decode(alpha.as_bytes()).ok()?;
-        (bytes.len() == (width * height) as usize).then(|| Tint { rect, clip, width, height, alpha: bytes })
+        (bytes.len() == (width * height) as usize).then(|| Tint { rect, clip, width, height, alpha: bytes, color: color.and_then(parse_color) })
     }
 }
 
@@ -287,7 +299,7 @@ mod imp {
             return;
         };
         let k = thickness_at(((t.rect.left + t.rect.right) / 2.0) as i32, ((t.rect.top + t.rect.bottom) / 2.0) as i32);
-        let look = Look { color: TINT_RGB, line: k, grid: 8 * k, grid_alpha: 0.5, fill_alpha: 0.10 };
+        let look = Look { color: t.color.unwrap_or(TINT_RGB), line: k, grid: 8 * k, grid_alpha: 0.5, fill_alpha: if t.color.is_some() { 0.18 } else { 0.10 } };
         let Some((win, px)) = tint_pixels(&t, look) else {
             ShowWindow(h, SW_HIDE);
             return;
@@ -486,7 +498,7 @@ mod tests {
     #[test]
     fn outline_and_grid_inside_the_shape() {
         // a 2 × 1 shape: left half covered, right half empty, over a 20 × 10 rect
-        let t = Tint { rect: r(100.0, 100.0, 120.0, 110.0), clip: None, width: 2, height: 1, alpha: vec![255, 0] };
+        let t = Tint { rect: r(100.0, 100.0, 120.0, 110.0), clip: None, width: 2, height: 1, alpha: vec![255, 0], color: None };
         let (win, px) = tint_pixels(&t, LOOK).unwrap();
         assert_eq!(win, (100, 100, 120, 110));
         let a = |x: usize, y: usize| px[y * 20 + x] >> 24;
@@ -502,7 +514,7 @@ mod tests {
     #[test]
     fn no_outline_along_the_canvas_edge() {
         // a fully covered shape cut by the canvas on the left: no outline where it is cut
-        let t = Tint { rect: r(100.0, 100.0, 120.0, 110.0), clip: Some(r(110.0, 0.0, 500.0, 500.0)), width: 1, height: 1, alpha: vec![255] };
+        let t = Tint { rect: r(100.0, 100.0, 120.0, 110.0), clip: Some(r(110.0, 0.0, 500.0, 500.0)), width: 1, height: 1, alpha: vec![255], color: None };
         let (win, px) = tint_pixels(&t, LOOK).unwrap();
         assert_eq!(win, (110, 100, 120, 110));
         assert_ne!(px[5 * 10] >> 24, 255); // the window's left edge (cut): not outline
@@ -512,10 +524,12 @@ mod tests {
 
     #[test]
     fn tint_decode_checks_sizes() {
-        assert!(Tint::decode(r(0.0, 0.0, 10.0, 10.0), None, 2, 1, "/wA=").is_some());
-        assert!(Tint::decode(r(0.0, 0.0, 10.0, 10.0), None, 3, 1, "/wA=").is_none());
-        assert!(Tint::decode(r(0.0, 0.0, 0.0, 10.0), None, 2, 1, "/wA=").is_none());
-        assert!(Tint::decode(r(0.0, 0.0, 10.0, 10.0), None, 2, 1, "not base64!").is_none());
+        assert!(Tint::decode(r(0.0, 0.0, 10.0, 10.0), None, 2, 1, "/wA=", None).is_some());
+        assert!(Tint::decode(r(0.0, 0.0, 10.0, 10.0), None, 3, 1, "/wA=", None).is_none());
+        assert!(Tint::decode(r(0.0, 0.0, 0.0, 10.0), None, 2, 1, "/wA=", None).is_none());
+        assert!(Tint::decode(r(0.0, 0.0, 10.0, 10.0), None, 2, 1, "not base64!", None).is_none());
+        assert_eq!(Tint::decode(r(0.0, 0.0, 10.0, 10.0), None, 2, 1, "/wA=", Some("#FF4D4F")).unwrap().color, Some((0xFF, 0x4D, 0x4F)));
+        assert_eq!(parse_color("red"), None);
     }
 
     #[test]

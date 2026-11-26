@@ -84,8 +84,13 @@ export type OverlayCommand =
    *  on the bar along the canvas' bottom edge (the 性能监视 meters sit at its right) */
   | { type: "status-bar"; on: boolean; hints: StatusBarHint[]; state: StatusBarPart[]; message: StatusBarPart | null; mode?: StatusBarMode | null; view?: ScreenRect }
   /** 悬停高亮 (helper ≥ TINT_HELPER_VERSION): the hovered layer's shape (`width` × `height` coverage,
-   *  base64) stretched over `rect` and tinted; no rect: take it away */
-  | { type: "hover-tint"; rect: ScreenRect | null; clip?: ScreenRect; width?: number; height?: number; alpha?: string }
+   *  base64) stretched over `rect` and tinted (`color` "#rrggbb", helper ≥ CHECK_HELPER_VERSION;
+   *  the usual blue without it); no rect: take it away */
+  | { type: "hover-tint"; rect: ScreenRect | null; clip?: ScreenRect; width?: number; height?: number; alpha?: string; color?: string }
+  /** 检查结果 window (helper ≥ CHECK_HELPER_VERSION): the WavePlug 图层 panel is under the cursor right
+   *  now (the user just clicked 检查 in it); the helper takes the window there and keeps the check
+   *  window beside it */
+  | { type: "panel-anchor" }
   /** 按键 (helper ≥ KEYS_HELPER_VERSION): report Ctrl / Shift / Alt while on (renew within 3 s) */
   | { type: "watch-keys"; on: boolean }
   /** 快捷键 (native/overlay/src/hotkey.rs): while on, Ctrl+F in Photoshop is taken from Photoshop
@@ -193,9 +198,11 @@ export type OverlayEvent =
 /** The helper build this plugin's protocol needs (native/overlay/Cargo.toml). Bump both together:
  *  an older helper still connects, but e.g. can't arbitrate drag verdicts (drag_target.rs), and
  *  without this check a stale exe looks exactly like a bug in new code. */
-export const EXPECTED_HELPER_VERSION = "0.30.0";
+export const EXPECTED_HELPER_VERSION = "0.31.0";
 /** the native 编辑工作台 window (panel/shelf.rs) needs at least this helper; older: the in-panel workbench */
 export const WORKBENCH_HELPER_VERSION = "0.11.0";
+/** the 检查结果 window, panel-anchor and coloured hover-tint need at least this helper (native/overlay/HANDOFF.md 3.5b) */
+export const CHECK_HELPER_VERSION = "0.31.0";
 /** the 外置删除区 (layer-drag-trash) needs at least this helper; older: the panel's left red rail */
 export const TRASH_HELPER_VERSION = "0.12.0";
 /** 性能监视 (monitor) needs at least this helper; an older one ignores the message */

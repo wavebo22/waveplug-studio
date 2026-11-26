@@ -28,7 +28,8 @@ import type { CanvasView } from "../core/overlay/protocol.ts";
 import { vectorFragment } from "../core/overlay/svgFragment.ts";
 import type { Rect } from "../core/image/region.ts";
 import { type ExternalDragSession, MAX_EXTERNAL_LAYERS, beginExternalExport, capExternalLayers, externalDragKey, externalDragResultText, layersToExport, createExternalDragSession, endExternalDrag, externalDragCandidates, externalDragOver, externalDragSessionId, finishExternalExport, helperCopiedExternalFiles, helperFinishedExternalDrag, recordExportedFile, shouldPrepareExternalDrag } from "../core/overlay/externalDrag.ts";
-import { TINT_SIZE, bytesToBase64, frameKey, frameOnScreen, layerFrame } from "../core/overlay/hoverFrame.ts";
+import { TINT_SIZE, bytesToBase64, frameKey, frameOnScreen, layerFrame, unionShapes } from "../core/overlay/hoverFrame.ts";
+import { SEVERITY_COLOR } from "../core/overlay/checkPanel.ts";
 import { docToScreen } from "../core/overlay/protocol.ts";
 import { NATIVE_COMMANDS_KEY } from "../core/layers/nativeCommands.ts";
 import { every, h, icon, isShown, listen, movesWhile, replace, setShown } from "./dom.ts";
@@ -543,6 +544,34 @@ export function createLayerTreeView(tree: LayerTree, status: Status, tools?: Lay
   };
   // the helper hides the frame itself when the connection goes
   overlay?.onDisconnected(() => { frameSent = ""; frameId = null; });
+
+  // ── 检查结果: the hovered issue's layers light up (their rows, and their shapes on the canvas) in
+  // the issue's colour (core/overlay/checkPanel.ts SEVERITY_COLOR) ──
+  let issueMark: { ids: Set<number>; sev: "error" | "warn" | "info" } | null = null, issueRun = 0;
+  const issueClass = (id: number) => issueMark?.ids.has(id) ? " chk-" + issueMark.sev : "";
+  async function markIssue(ids: number[], sev: "error" | "warn" | "info" | null) {
+    const run = ++issueRun;
+    issueMark = sev && ids.length ? { ids: new Set(ids), sev } : null;
+    draw();
+    const d = docId;
+    if (!issueMark || d === null || !overlay?.tintReady || !canvasView) { overlay?.hoverTint(null); return; }
+    const v = await viewOf(d);
+    if (run !== issueRun || !v || docId !== d) return;
+    const got: { bounds: Rect; width: number; height: number; alpha: Uint8Array }[] = [];
+    for (const id of ids.slice(0, 8)) {
+      const l = byId.get(id), whole = l ? layerFrame(l) : null;
+      if (!l || !whole) continue;
+      let shape: { bounds: Rect; width: number; height: number; alpha: Uint8Array } | null = null;
+      if (tree.shape && l.kind !== "group" && !l.artboard && l.kind !== "adjustment") {
+        try { shape = await tree.shape(d, id, TINT_SIZE); } catch (e) { log("info", "issue tint shape", id, e); }
+        if (run !== issueRun) return;
+      }
+      got.push(shape ?? { bounds: whole, width: 1, height: 1, alpha: new Uint8Array([255]) });
+    }
+    const u = unionShapes(got);
+    if (!u) { overlay.hoverTint(null); return; }
+    overlay.hoverTint({ rect: docToScreen(u.bounds, v), clip: v.view, width: u.width, height: u.height, alpha: bytesToBase64(u.alpha), color: SEVERITY_COLOR[sev!] });
+  }
 
   const countEl = h("span", { class: "muted small" });
   /** 属性: what the selected layer is, in small type under the title */
@@ -1238,7 +1267,7 @@ export function createLayerTreeView(tree: LayerTree, status: Status, tools?: Lay
     const maskThumb = l.mask && thumbsOn ? thumbs().get(maskKey(l.id)) : undefined;
     const vmaskThumb = l.vmask && thumbsOn ? thumbs().get(vmaskKey(l.id)) : undefined;
     const key = [l.id, l.name, l.visible, l.locked, l.lockAll, l.lockPosition, l.lockPixels, l.lockTransparency, groupLocked.has(l.id), l.links.length, peers.has(l.id), sharedColor(l), l.mask, l.maskOn, l.clipped, l.clipBase, l.effects, l.effectsOn, l.depth, l.children, l.ai?.variations, l.smart?.contentId, l.smart?.linked, l.smart?.file, l.filters.length, l.filtersOn, l.effectList.map(e => +e.enabled).join(""), groupColor.get(l.id),
-      users.get(l.smart?.contentId ?? "") ?? 0, sel, open, row.context, moving, thumbs().version(l.id), thumbs().version(maskKey(l.id)), thumbs().version(vmaskKey(l.id)), l.vmask, l.vmaskOn, l.maskLinked, l.vmaskLinked, l.color, customOf(l.id), maskView?.id === l.id, hasPicture(l), framed(l), thumbW(l), openSubs().has(-l.id), openSubs().has(l.id), shown, shown !== null ? thumbs().version(shown) : 0, l.ai?.shown, rows[index + 1]?.layer.parentId === l.id, selParents.has(l.id)].join("|");
+      users.get(l.smart?.contentId ?? "") ?? 0, sel, open, row.context, moving, thumbs().version(l.id), thumbs().version(maskKey(l.id)), thumbs().version(vmaskKey(l.id)), l.vmask, l.vmaskOn, l.maskLinked, l.vmaskLinked, l.color, customOf(l.id), maskView?.id === l.id, hasPicture(l), framed(l), thumbW(l), openSubs().has(-l.id), openSubs().has(l.id), shown, shown !== null ? thumbs().version(shown) : 0, l.ai?.shown, rows[index + 1]?.layer.parentId === l.id, selParents.has(l.id), issueClass(l.id)].join("|");
     r.index = index;
     setShown(r.el, true);
     const gk = key + "#" + guideKey(guides[index]);
@@ -1250,7 +1279,7 @@ export function createLayerTreeView(tree: LayerTree, status: Status, tools?: Lay
     // the other copies of the selected content, and the layers linked with the selection, in a paler
     // shade of the selection's green (a closed group holding a copy, paler still)
     const tint = sel ? "" : sharedColor(l) !== undefined || peer ? " peer" : inside !== undefined ? " peer inside" : "";
-    r.el.className = "lt-row" + (l.kind === "group" && !vl ? " group" : "") + depthClass(l.depth) + (sel ? " on" : "") + (row.context ? " context" : "") + (l.visible ? "" : " off") + (moving ? " moving" : "") + tint + (r.el === hoverEl ? " hover" : "");
+    r.el.className = "lt-row" + (l.kind === "group" && !vl ? " group" : "") + depthClass(l.depth) + (sel ? " on" : "") + (row.context ? " context" : "") + (l.visible ? "" : " off") + (moving ? " moving" : "") + tint + issueClass(l.id) + (r.el === hoverEl ? " hover" : "");
     (r.el.firstChild as HTMLElement).className = "lt-stripe";
     replace(r.eye, l.visible ? ic("eye", "m") : null);
     r.eye.className = "lt-eye" + (l.visible ? "" : " hidden");
@@ -3528,10 +3557,10 @@ export function createLayerTreeView(tree: LayerTree, status: Status, tools?: Lay
     refresh: () => void refresh(),
     host: () => sheetHost(),
   }) : null;
-  // ── 文档检查: the button beside AI 整理 (docCheck.ts) ──
+  // ── 文档检查: the button beside AI 整理; its list is the helper's window beside the panel (docCheck.ts) ──
   const docCheck = assistant?.checker ? createDocCheck({
-    checker: assistant.checker, tree, tools, status, fetch: assistant.fetch, settings: assistant.settings, composite: assistant.composite,
-    state: () => ({ docId }), refresh: () => void refresh(), host: () => sheetHost(),
+    overlay, checker: assistant.checker, tree, tools, status, fetch: assistant.fetch, settings: assistant.settings, composite: assistant.composite,
+    docId: () => docId, docVersion, refresh: () => void refresh(), mark: (ids, sev) => void markIssue(ids, sev),
   }) : null;
 
   // Any sheet over the panel (AI 整理, 检查, later ones) goes through sheetHost(): UXP draws native
@@ -3610,7 +3639,7 @@ export function createLayerTreeView(tree: LayerTree, status: Status, tools?: Lay
   }
   listen(document, "keydown", e => {
     const k = e as KeyboardEvent;
-    if (!shortcutsOn || docId === null || drag?.active || renaming !== null || deleting || !pointerIn || typing(document.activeElement) || aiOrganize?.isOpen() || docCheck?.isOpen()) return;
+    if (!shortcutsOn || docId === null || drag?.active || renaming !== null || deleting || !pointerIn || typing(document.activeElement) || aiOrganize?.isOpen()) return;
     const ctrl = k.ctrlKey || k.metaKey, key = (k.key ?? "").toLowerCase(), code = k.code ?? "";
     const left = code === "BracketLeft" || key === "[" || key === "{", right = code === "BracketRight" || key === "]" || key === "}";
     const sel = selectedLayers(), now = sel.map(l => l.id), doc = docId;

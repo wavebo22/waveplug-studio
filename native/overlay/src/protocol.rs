@@ -152,7 +152,13 @@ pub enum Command {
         height: u32,
         #[serde(default)]
         alpha: String,
+        /// "#rrggbb" (文档检查: red / yellow by severity); the usual blue without it
+        #[serde(default)]
+        color: Option<String>,
     },
+    /// 检查结果: the WavePlug 图层 panel is under the cursor right now (its 检查 button was just
+    /// clicked); the check window goes beside the window found there (win.rs check_anchor).
+    PanelAnchor,
     /// 性能监视 (monitor.rs): the small click-through box in the canvas's bottom-right corner with
     /// CPU / memory / GPU / Photoshop / ComfyUI numbers. `comfy`: ComfyUI's address for its row.
     Monitor {
@@ -608,9 +614,14 @@ mod tests {
         }
         assert!(matches!(parse(r#"{"type":"restart-helper"}"#), Some(Command::RestartHelper)));
         match parse(r#"{"type":"hover-tint","rect":{"left":0,"top":0,"right":20,"bottom":10},"width":2,"height":1,"alpha":"/wA="}"#) {
-            Some(Command::HoverTint { rect: Some(_), width: 2, height: 1, alpha, .. }) => assert_eq!(alpha, "/wA="),
+            Some(Command::HoverTint { rect: Some(_), width: 2, height: 1, alpha, color: None, .. }) => assert_eq!(alpha, "/wA="),
             other => panic!("{other:?}"),
         }
+        match parse(r##"{"type":"hover-tint","rect":{"left":0,"top":0,"right":20,"bottom":10},"width":1,"height":1,"alpha":"/w==","color":"#FF4D4F"}"##) {
+            Some(Command::HoverTint { color: Some(c), .. }) => assert_eq!(c, "#FF4D4F"),
+            other => panic!("{other:?}"),
+        }
+        assert!(matches!(parse(r#"{"type":"panel-anchor"}"#), Some(Command::PanelAnchor)));
         assert!(matches!(
             parse(r#"{"type":"manage-comfy","path":"","base":"http://127.0.0.1:8188","restart":true}"#),
             Some(Command::ManageComfy { restart: true, .. })

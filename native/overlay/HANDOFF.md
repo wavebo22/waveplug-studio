@@ -120,6 +120,12 @@ src/ui/app.ts  startOverlay()      生成页提供状态和     src/panel/genera
 - 被同角色新连接替换掉的旧连接，断开时不算「Photoshop 走了」，不触发 `on_disconnect`。
 - 纯函数 `route()` / `missing()` 有测试。
 
+### 3.5b 检查结果窗口（2026-11-26，0.31.0，未实测）
+
+- `{"type":"panel-anchor"}`：插件在图层面板的「检查」按钮被点下时发；helper 用 `WindowFromPoint(光标)` 取到面板的窗口，之后每个 watch 周期读它的位置，把「检查结果」窗口放在它左边（`layout.rs check_rect`，左边放不下就放右边）。重连后没有锚点时退回 PS 窗口右侧一条。
+- 介面 `check`（`panel/check.rs`，自己的视窗，同工作台）：区块 `head` / `opts` / `issues`；操作 `hover`（null = 离开列表）、`pick`、`fix`、`opt`、`recheck`、`close`。「暂时收起」只在 helper 里，窗口缩成标题栏高度（`win::check_fold`）。
+- `hover-tint` 多了可选 `color`（"#rrggbb"），检查结果悬停时用红 / 黄；不带时仍是蓝色。
+
 ### 3.6 快捷键 Ctrl+F = 原位粘贴（2026-11-25，0.29.0，未实测）
 
 `src/hotkey.rs`：独立线程上的 `WH_KEYBOARD_LL` 键盘钩子（钩子要求所在线程有消息循环）。插件每次连上发 `{"type":"hotkeys","on":true}`，断开时 `on_disconnect` 关掉。打开期间，Photoshop 进程的窗口在前台时按 Ctrl+F（不带 Shift / Alt / Win）：这次按键被吞掉（PS 自己的「上次滤镜」不会执行），发 `{"type":"paste-in-place"}` 给插件；按住的重复和抬起也吞掉，每按一次只发一次。其他程序、小程序自己的窗口、其他按键都不动。插件没连上时 Ctrl+F 照旧给 PS。判断是纯函数 `verdict()`，有测试。

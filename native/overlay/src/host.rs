@@ -13,6 +13,7 @@ use eframe::egui::{self, Frame, Id, Margin, Sense, Stroke, ViewportCommand};
 
 use crate::panel::generate::GenerateSurface;
 use crate::panel::shelf::{self, Shelf};
+use crate::panel::check::{self, Check};
 use crate::panel::variants::{self, VariantRail};
 use crate::panel::{theme, Surface, DraggedLayer};
 use crate::protocol::{Command, Event, ScreenRect};
@@ -226,16 +227,21 @@ fn on_command(c: Command) {
         crate::frame::set(rect, clip);
         return;
     }
-    if let Command::HoverTint { rect, clip, width, height, alpha } = c {
-        crate::frame::set_tint(rect.and_then(|r| crate::frame::Tint::decode(r, clip, width, height, &alpha)));
+    if let Command::HoverTint { rect, clip, width, height, alpha, color } = c {
+        crate::frame::set_tint(rect.and_then(|r| crate::frame::Tint::decode(r, clip, width, height, &alpha, color.as_deref())));
+        return;
+    }
+    if let Command::PanelAnchor = c {
+        #[cfg(windows)]
+        crate::win::check_anchor();
         return;
     }
     #[cfg(windows)]
     match &c {
-        Command::Show { panel, view } if panel != variants::ID && panel != shelf::ID => {
+        Command::Show { panel, view } if panel != variants::ID && panel != shelf::ID && panel != check::ID => {
             crate::win::show(panel, *view, size_of(panel))
         }
-        Command::Hide { panel } if panel != variants::ID && panel != shelf::ID => crate::win::hide(panel),
+        Command::Hide { panel } if panel != variants::ID && panel != shelf::ID && panel != check::ID => crate::win::hide(panel),
         _ => {} // the variants and workbench viewports are controlled separately by Host.update
     }
     if let Ok(mut q) = INBOX.lock() {
@@ -261,6 +267,7 @@ fn on_disconnect() {
         crate::win::hide_all();
         crate::win::variant_hide();
         crate::win::shelf_hide();
+        crate::win::check_hide();
     }
     on_command(Command::Hello);
     on_command(Command::Hide {
@@ -268,6 +275,9 @@ fn on_disconnect() {
     });
     on_command(Command::Hide {
         panel: shelf::ID.to_string(),
+    });
+    on_command(Command::Hide {
+        panel: check::ID.to_string(),
     });
 }
 
@@ -389,6 +399,9 @@ pub fn run() {
                 shelf_view: None,
                 shelf_placed: false,
                 shelf_drag: None,
+                check: Check::new(),
+                check_shown: false,
+                check_placed: false,
                 app: None,
             }))
         }),
@@ -442,6 +455,10 @@ struct Host {
     /// the WavePlug window, once opened
     app: Option<crate::app::AppWindow>,
     shelf_drag: Option<Vec<String>>,
+    /// the 检查结果 window (panel/check.rs), beside the 图层 panel
+    check: Check,
+    check_shown: bool,
+    check_placed: bool,
 }
 
 #[cfg(test)]
@@ -592,6 +609,7 @@ impl Host {
                 Command::HoverFrame { .. } => {} // frame.rs, on its own thread
                 Command::Canvas { .. } => {}     // win.rs relayout, on the server thread
                 Command::HoverTint { .. } => {}  // frame.rs, on its own thread
+                Command::PanelAnchor => {}       // win.rs, on the server thread
                 Command::MenuOpen { .. } | Command::MenuClose { .. } => {} // menu.rs, on its own thread
                 Command::RestartHelper => {}     // life.rs, on its own thread
                 Command::Monitor { .. } => {}    // monitor.rs, on its own thread
@@ -679,6 +697,14 @@ impl Host {
                     rev,
                     sections,
                 } => {
+                    if panel == check::ID {
+                        let last = self.revs.entry(panel).or_insert(0);
+                        if rev > *last {
+                            *last = rev;
+                            self.check.apply(&sections);
+                        }
+                        continue;
+                    }
                     if panel == variants::ID || panel == shelf::ID {
                         let is_shelf = panel == shelf::ID;
                         let last = self.revs.entry(panel).or_insert(0);
@@ -699,6 +725,11 @@ impl Host {
                     self.surfaces[i].apply(&sections);
                 }
                 Command::Show { panel, view } => {
+                    if panel == check::ID {
+                        self.check_shown = true;
+                        self.check_placed = false;
+                        continue;
+                    }
                     if panel == shelf::ID {
                         self.shelf_shown = true;
                         self.shelf_view = view;
@@ -739,6 +770,13 @@ impl Host {
                     });
                 }
                 Command::Hide { panel } => {
+                    if panel == check::ID {
+                        self.check_shown = false;
+                        self.check_placed = false;
+                        #[cfg(windows)]
+                        crate::win::check_hide();
+                        continue;
+                    }
                     if panel == shelf::ID {
                         self.shelf_shown = false;
                         self.shelf_placed = false;
@@ -1126,6 +1164,38 @@ impl Host {
 }
 
 impl Host {
+    /// The 检查结果 window: its own viewport like the workbench; win.rs keeps it beside the 图层 panel.
+    fn check_viewport(&mut self, ctx: &egui::Context) {
+        if !self.check_shown {
+            return;
+        }
+        let builder = egui::ViewportBuilder::default()
+            .with_title(check::TITLE)
+            .with_inner_size(egui::vec2(check::WIDTH, 480.0))
+            .with_decorations(false)
+            .with_taskbar(false)
+            .with_resizable(false)
+            .with_active(false);
+        #[cfg(windows)]
+        let builder = builder.with_position([crate::win::PARK.0 as f32, crate::win::PARK.1 as f32]);
+        #[cfg(not(windows))]
+        let builder = builder.with_always_on_top();
+        let actions = ctx.show_viewport_immediate(egui::ViewportId::from_hash_of("waveplug-check"), builder, |viewport_ctx, _| self.check.draw(viewport_ctx));
+        #[cfg(windows)]
+        {
+            if !self.check_placed || !crate::win::check_window_exists() {
+                self.check_placed = crate::win::check_place();
+                if !self.check_placed {
+                    ctx.request_repaint_after(Duration::from_millis(200));
+                }
+            }
+            crate::win::check_fold(self.check.folded);
+        }
+        for action in actions {
+            server::send(&Event::Action { panel: check::ID.to_string(), action });
+        }
+    }
+
     /// The 编辑工作台 window: its own viewport like the variant rail, a drop target for every
     /// WaveLayer drag while it is on screen, and the start of drags out of it.
     fn shelf_viewport(&mut self, ctx: &egui::Context) {
@@ -1451,6 +1521,7 @@ impl eframe::App for Host {
         self.track_typing(ctx);
         self.variant_viewport(ctx);
         self.shelf_viewport(ctx);
+        self.check_viewport(ctx);
         self.notice(ctx);
         self.hang_dialog(ctx);
         // the WavePlug window (app.rs), made the first time it opens (it looks for Photoshop /

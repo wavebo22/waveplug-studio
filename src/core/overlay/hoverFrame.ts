@@ -48,3 +48,33 @@ export function bytesToBase64(bytes: Uint8Array): string {
   for (let i = 0; i < bytes.length; i += 0x8000) s += String.fromCharCode(...bytes.subarray(i, i + 0x8000));
   return btoa(s);
 }
+
+/** Several layers' shapes as one (文档检查: an issue's layers light up together): their coverage
+ *  grids put on one grid over the union of their bounds, at most `max` px a side, taking the
+ *  highest coverage where they overlap. null without shapes. */
+export function unionShapes(shapes: readonly { bounds: Rect; width: number; height: number; alpha: Uint8Array }[], max = TINT_SIZE): { bounds: Rect; width: number; height: number; alpha: Uint8Array } | null {
+  const ok = shapes.filter(s => s.width >= 1 && s.height >= 1 && s.bounds.right > s.bounds.left && s.bounds.bottom > s.bounds.top && s.alpha.length >= s.width * s.height);
+  if (!ok.length) return null;
+  if (ok.length === 1) return ok[0];
+  const b: Rect = {
+    left: Math.min(...ok.map(s => s.bounds.left)), top: Math.min(...ok.map(s => s.bounds.top)),
+    right: Math.max(...ok.map(s => s.bounds.right)), bottom: Math.max(...ok.map(s => s.bounds.bottom)),
+  };
+  const bw = b.right - b.left, bh = b.bottom - b.top, k = max / Math.max(bw, bh);
+  const width = Math.max(1, Math.round(bw * k)), height = Math.max(1, Math.round(bh * k));
+  const alpha = new Uint8Array(width * height);
+  for (const s of ok) {
+    const sw = s.bounds.right - s.bounds.left, sh = s.bounds.bottom - s.bounds.top;
+    const x0 = Math.max(0, Math.floor((s.bounds.left - b.left) * k)), x1 = Math.min(width, Math.ceil((s.bounds.right - b.left) * k));
+    const y0 = Math.max(0, Math.floor((s.bounds.top - b.top) * k)), y1 = Math.min(height, Math.ceil((s.bounds.bottom - b.top) * k));
+    for (let y = y0; y < y1; y++) {
+      const sy = Math.min(s.height - 1, Math.max(0, Math.floor(((y + 0.5) / k + b.top - s.bounds.top) / sh * s.height)));
+      for (let x = x0; x < x1; x++) {
+        const sx = Math.min(s.width - 1, Math.max(0, Math.floor(((x + 0.5) / k + b.left - s.bounds.left) / sw * s.width)));
+        const v = s.alpha[sy * s.width + sx], i = y * width + x;
+        if (v > alpha[i]) alpha[i] = v;
+      }
+    }
+  }
+  return { bounds: b, width, height, alpha };
+}

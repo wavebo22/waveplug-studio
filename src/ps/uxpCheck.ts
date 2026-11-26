@@ -1,16 +1,15 @@
 // 文档检查 in Photoshop: reads what core/check/rules.ts needs — the 文档优化 scan (smart objects,
 // links), every text layer's copy, fonts, sizes and colours, the installed fonts, fill / shape
-// colours, and the composite around each text (contrast). Read only, apart from setText.
+// colours. Read only, apart from setText.
 // The first text layers' raw descriptors are logged, so the size / box conversions can be checked
 // against a real document (reports/uxp_runtime.log, "check text raw").
 
 import { log } from "../app/log.ts";
 import type { CheckDoc, CheckText, CMYK, RGB } from "../core/check/rules.ts";
-import { ringColor } from "../core/check/rules.ts";
 import { replaceOnce } from "../core/check/ai.ts";
 import type { Rect } from "../core/image/region.ts";
 import type { DocChecker } from "./host.ts";
-import { docById, findLayer, modal, play, readPixels, step } from "./uxpHost.ts";
+import { docById, findLayer, play, step } from "./uxpHost.ts";
 import type { UxpTools } from "./uxpTools.ts";
 
 declare const require: (m: string) => any;
@@ -36,16 +35,6 @@ const rectOf = (b: any): Rect | null => {
   const r = { left: num(b.left), top: num(b.top), right: num(b.right), bottom: num(b.bottom) };
   return [r.left, r.top, r.right, r.bottom].every(Number.isFinite) && r.right > r.left && r.bottom > r.top ? r : null;
 };
-
-/** a shown layer style draws the text in other colours (颜色 / 渐变 / 图案叠加, 描边) */
-function recolours(r: any): boolean {
-  const fx = r?.layerEffects;
-  if (!fx || r.layerFXVisible === false) return false;
-  return ["solidFill", "gradientFill", "patternFill", "frameFX"].some(k => {
-    const one = fx[k], many = fx[k + "Multi"];
-    return (one && one.enabled !== false) || (Array.isArray(many) && many.some((e: any) => e?.enabled !== false));
-  });
-}
 
 export class UxpChecker implements DocChecker {
   constructor(private tools: UxpTools) {}
@@ -103,7 +92,6 @@ export class UxpChecker implements DocChecker {
           fonts: styles.map(s => String(s.fontPostScriptName ?? "")), fontNames: styles.map(s => String(s.fontName ?? s.fontPostScriptName ?? "")),
           sizesPx: sizes, ...first, ranges: Math.max(1, ranges.length),
           bounds: rectOf(r.boundsNoEffects ?? r.bounds), ...(box ? { box } : {}), visible: visible.get(id) !== false,
-          ...(recolours(r) ? { overlay: true } : {}),
         });
       });
     }
@@ -122,23 +110,11 @@ export class UxpChecker implements DocChecker {
       });
     }
 
-    // the composite around each shown text (one small read of the whole picture)
-    const backgrounds = new Map<number, RGB>();
-    const shownTexts = texts.filter(t => t.visible && t.bounds);
-    if (shownTexts.length) {
-      try {
-        const edge = 1024, w = Math.round(d.width), h = Math.round(d.height);
-        const px = await modal("WavePlug 文档检查", () => readPixels({ documentID: docId, targetSize: w >= h ? { width: Math.min(w, edge) } : { height: Math.min(h, edge) } }));
-        const s = px.width / w;
-        for (const t of shownTexts) { const c = ringColor(px, t.bounds!, s); if (c) backgrounds.set(t.id, c); }
-      } catch (e) { log("warn", "check composite", e); }
-    }
-
     const links = scan.layers.filter(l => l.smart?.linked && (l.smart.linkMissing || l.smart.linkChanged))
       .map(l => ({ id: l.id, missing: !!l.smart!.linkMissing, changed: !!l.smart!.linkChanged }));
     const contentIds = new Map(scan.layers.filter(l => l.smart?.contentId).map(l => [l.id, l.smart!.contentId!]));
-    log("info", "check read", JSON.stringify({ layers: scan.layers.length, texts: texts.length, fonts: installed?.size ?? null, fills: fills.length, backgrounds: backgrounds.size, links: links.length, mode, ppi }));
-    return { width: scan.width, height: scan.height, mode, bits: scan.bits, ppi, scan, texts, installed, links, fills, backgrounds, contentIds };
+    log("info", "check read", JSON.stringify({ layers: scan.layers.length, texts: texts.length, fonts: installed?.size ?? null, fills: fills.length, links: links.length, mode, ppi }));
+    return { width: scan.width, height: scan.height, mode, bits: scan.bits, ppi, scan, texts, installed, links, fills, contentIds };
   }
 
   async setText(docId: number, id: number, from: string, to: string): Promise<boolean> {
