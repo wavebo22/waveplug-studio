@@ -452,6 +452,9 @@ async function boot() {
         links: [], fills: [], backgrounds: new Map([[905, { r: 250, g: 250, b: 250 }]]), contentIds: new Map<number, string>() };
     },
     async setText() { await sleep(200); return true; },
+    async restyle(_doc, edits) { await sleep(200); console.info("[mock] restyle", edits); return { done: edits.length, skipped: [] }; },
+    async textInfo(_doc, ids) { return ids.map((id, i) => ({ id, text: ["立即购买", "限时优惠\n全场五折", "新品上市"][i % 3], ranges: i % 4 === 3 ? 2 : 1 })); },
+    async rewrite(_doc, edits) { await sleep(300); console.info("[mock] rewrite", edits); return { done: edits.length, skipped: [] }; },
   };
   const svc: Services = {
     checker,
@@ -473,6 +476,14 @@ async function boot() {
         { id: 901, type: "typo", original: "登陆", suggestion: "登录", reason: "登录账号用「登录」，「登陆」指登上陆地" },
         { id: 902, type: "ad_law", original: "全网最低", suggestion: "超值", reason: "广告法禁止使用「最」等绝对化用语" },
       ] });
+      if (system.includes("图层查找助手")) {
+        const lines = String(body.messages[1].content).split("\n").filter(l => l.startsWith("{")).map(l => JSON.parse(l));
+        return reply({ ids: lines.filter(l => l.kind === "text").map(l => l.id).slice(0, 6), note: "按类型挑出了文字图层" });
+      }
+      if (system.includes("文案助手")) {
+        const lines = String(body.messages[1].content).split("\n").filter(l => l.startsWith("{")).map(l => JSON.parse(l));
+        return reply({ items: lines.map(l => ({ id: l.id, text: "[EN] " + l.text })) });
+      }
       if (system.includes("视觉设计审稿")) return reply({ issues: [{ type: "ai_artifact", where: "右侧人物的左手", problem: "手指看起来有六根", suggestion: "重新生成这只手或局部重绘" }] });
       const lines = String(body.messages[1].content).split("\n").filter(l => l.startsWith("{")).map(l => JSON.parse(l));
       const free = lines.filter(l => !l.fixed);

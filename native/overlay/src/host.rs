@@ -247,10 +247,10 @@ fn on_command(c: Command) {
     }
     #[cfg(windows)]
     match &c {
-        Command::Show { panel, view } if panel != variants::ID && panel != shelf::ID && panel != check::ID && panel != organize::ID => {
+        Command::Show { panel, view } if panel != variants::ID && panel != shelf::ID && assist_id(panel).is_none() => {
             crate::win::show(panel, *view, size_of(panel))
         }
-        Command::Hide { panel } if panel != variants::ID && panel != shelf::ID && panel != check::ID && panel != organize::ID => crate::win::hide(panel),
+        Command::Hide { panel } if panel != variants::ID && panel != shelf::ID && assist_id(panel).is_none() => crate::win::hide(panel),
         _ => {} // the variants and workbench viewports are controlled separately by Host.update
     }
     if let Ok(mut q) = INBOX.lock() {
@@ -291,6 +291,14 @@ fn on_disconnect() {
     on_command(Command::Hide {
         panel: organize::ID.to_string(),
     });
+    on_command(Command::Hide {
+        panel: organize::REWRITE_ID.to_string(),
+    });
+}
+
+/// The panels shown in the window beside the 图层 panel (检查结果, AI 整理, AI 改写).
+fn assist_id(panel: &str) -> Option<&'static str> {
+    [check::ID, organize::ID, organize::REWRITE_ID].into_iter().find(|id| *id == panel)
 }
 
 /// A copy that isn't the installed WavePlug (the one inside the Photoshop plugin) starts the
@@ -413,6 +421,7 @@ pub fn run() {
                 shelf_drag: None,
                 check: Check::new(),
                 organize: Organize::new(),
+                rewrite: Organize::new(),
                 assist: None,
                 check_placed: false,
                 assist_typing: false,
@@ -473,7 +482,9 @@ struct Host {
     check: Check,
     /// the AI 整理 window (panel/organize.rs): the same window slot as 检查结果
     organize: Organize,
-    /// which of the two the window shows (check::ID / organize::ID); None: hidden
+    /// the AI 改写 window (organize.rs with the plugin's labels): the same window slot
+    rewrite: Organize,
+    /// which one the window shows (check::ID / organize::ID / organize::REWRITE_ID); None: hidden
     assist: Option<&'static str>,
     check_placed: bool,
     /// AI 整理's text field has the keyboard
@@ -717,12 +728,15 @@ impl Host {
                     rev,
                     sections,
                 } => {
-                    if panel == check::ID || panel == organize::ID {
-                        let is_check = panel == check::ID;
+                    if let Some(which) = assist_id(&panel) {
                         let last = self.revs.entry(panel).or_insert(0);
                         if rev > *last {
                             *last = rev;
-                            if is_check { self.check.apply(&sections) } else { self.organize.apply(&sections) }
+                            match which {
+                                check::ID => self.check.apply(&sections),
+                                organize::ID => self.organize.apply(&sections),
+                                _ => self.rewrite.apply(&sections),
+                            }
                         }
                         continue;
                     }
@@ -746,9 +760,9 @@ impl Host {
                     self.surfaces[i].apply(&sections);
                 }
                 Command::Show { panel, view } => {
-                    if panel == check::ID || panel == organize::ID {
-                        // one window for both: the last shown is the one it shows
-                        self.assist = Some(if panel == check::ID { check::ID } else { organize::ID });
+                    if let Some(which) = assist_id(&panel) {
+                        // one window for all three: the last shown is the one it shows
+                        self.assist = Some(which);
                         self.check_placed = false;
                         continue;
                     }
@@ -792,8 +806,8 @@ impl Host {
                     });
                 }
                 Command::Hide { panel } => {
-                    if panel == check::ID || panel == organize::ID {
-                        if self.assist == Some(if panel == check::ID { check::ID } else { organize::ID }) {
+                    if let Some(which) = assist_id(&panel) {
+                        if self.assist == Some(which) {
                             self.assist = None;
                             self.check_placed = false;
                             crate::frame::set_leader(None);
@@ -1210,11 +1224,16 @@ impl Host {
         let builder = builder.with_position([crate::win::PARK.0 as f32, crate::win::PARK.1 as f32]);
         #[cfg(not(windows))]
         let builder = builder.with_always_on_top();
-        let is_check = which == check::ID;
-        let actions = ctx.show_viewport_immediate(egui::ViewportId::from_hash_of("waveplug-check"), builder, |viewport_ctx, _| {
-            if is_check { self.check.draw(viewport_ctx) } else { self.organize.draw(viewport_ctx) }
+        let actions = ctx.show_viewport_immediate(egui::ViewportId::from_hash_of("waveplug-check"), builder, |viewport_ctx, _| match which {
+            check::ID => self.check.draw(viewport_ctx),
+            organize::ID => self.organize.draw(viewport_ctx),
+            _ => self.rewrite.draw(viewport_ctx),
         });
-        let (folded, edges, typing) = if is_check { (self.check.folded, self.check.hover_edges, false) } else { (self.organize.folded, self.organize.hover_edges, self.organize.typing) };
+        let (folded, edges, typing) = match which {
+            check::ID => (self.check.folded, self.check.hover_edges, false),
+            organize::ID => (self.organize.folded, self.organize.hover_edges, self.organize.typing),
+            _ => (self.rewrite.folded, self.rewrite.hover_edges, self.rewrite.typing),
+        };
         #[cfg(windows)]
         {
             if !self.check_placed || !crate::win::check_window_exists() {

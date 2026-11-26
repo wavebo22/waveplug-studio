@@ -85,6 +85,8 @@ const KIND_WORD: Record<string, string> = {
  *  fixed) so it knows where they sit. `texts`: text layers' contents. */
 export function describeLayers(
   layers: readonly TreeLayer[], scopeIds: readonly number[], texts: ReadonlyMap<number, string>,
+  /** false: no "fixed" marks (only describing, nothing is renamed: 一句话选图层) */
+  marks = true,
 ): string {
   const byId = byIdOf(layers);
   const scope = new Set(scopeIds);
@@ -108,7 +110,7 @@ export function describeLayers(
     if (l.mask || l.vmask) o.mask = true;
     if (!l.visible) o.hidden = true;
     if (l.mode && l.mode !== "normal" && l.mode !== "passThrough") o.mode = l.mode;
-    if (!scope.has(l.id) || !renamable(byId, l)) o.fixed = true;
+    if (marks && (!scope.has(l.id) || !renamable(byId, l))) o.fixed = true;
     lines.push(JSON.stringify(o));
   }
   return lines.join("\n");

@@ -21,7 +21,21 @@ export type Fix =
   | { kind: "deleteVariants"; ids: number[] }
   | { kind: "updateLinked"; ids: number[] }
   | { kind: "relink"; ids: number[] }
-  | { kind: "setText"; id: number; from: string; to: string };
+  | { kind: "setText"; id: number; from: string; to: string }
+  | { kind: "restyle"; edits: StyleEdit[] };
+
+/** One text / fill layer's change (检查 › 一键统一): the whole layer, one undo step for all. */
+export interface StyleEdit {
+  id: number;
+  /** PostScript name of the font to use */
+  font?: string;
+  /** multiply the font size by this */
+  scale?: number;
+  /** take this layer's colour (its first style range / its fill) */
+  colourFrom?: number;
+  /** set this CMYK colour */
+  cmyk?: CMYK;
+}
 
 export interface Issue {
   /** stable within one check: the list remembers what was fixed or ignored by it */
@@ -34,6 +48,8 @@ export interface Issue {
   fix?: Fix;
   /** the fix's label */
   fixLabel?: string;
+  /** several ways to fix it (替换字体: which font); `fix` is the first */
+  choices?: { label: string; fix: Fix }[];
   /** estimated bytes the fix saves, for ordering */
   bytes?: number;
 }
@@ -74,6 +90,8 @@ export interface CheckDoc {
   texts: CheckText[];
   /** installed fonts' PostScript names; null when they couldn't be read (then fonts aren't checked) */
   installed: ReadonlySet<string> | null;
+  /** installed fonts' display names by PostScript name (the replacement choices' labels) */
+  fontLabels?: ReadonlyMap<string, string>;
   /** linked smart objects whose file is missing / changed on disk */
   links: { id: number; missing: boolean; changed: boolean }[];
   /** fill and shape layers' colours */
@@ -98,6 +116,14 @@ const names = (ids: number[], nameOf: (id: number) => string, max = 3) =>
 export const hex = (c: RGB) => "#" + [c.r, c.g, c.b].map(v => Math.round(Math.max(0, Math.min(255, v))).toString(16).padStart(2, "0")).join("").toUpperCase();
 
 const dist = (a: RGB, b: RGB) => Math.hypot(a.r - b.r, a.g - b.g, a.b - b.b);
+
+/** fonts offered for a missing one when the document uses no other installed font enough */
+const FALLBACK_FONTS = ["SourceHanSansSC-Regular", "NotoSansSC-Regular", "PingFangSC-Regular", "MicrosoftYaHei", "SimHei", "ArialMT"];
+/** a layer with one style throughout: the whole layer can be restyled without losing mixed styling */
+const plain = (t: CheckText) => t.ranges <= 1;
+const restyle = (edits: StyleEdit[]): Fix | undefined => edits.length ? { kind: "restyle", edits } : undefined;
+/** "（N 个混排样式的图层要手动改）" */
+const mixedNote = (n: number) => n ? `（${n} 个图层是混排样式，要手动改）` : "";
 
 /** Every local check. A CMYK file is for print: then the print rules apply too. Nothing is judged
  *  by device (screen sizes, contrast): that is the designer's call. */
@@ -126,8 +152,20 @@ export function runChecks(doc: CheckDoc): Issue[] {
       if (!m.ids.includes(t.id)) m.ids.push(t.id);
       missing.set(f, m);
     });
-    for (const [ps, m] of missing) out.push({ key: "font:" + ps, category: "font", severity: "error", ids: m.ids,
-      title: `缺少字体「${m.label}」`, detail: `${names(m.ids, nameOf)}在用它，Photoshop 正用别的字体代替显示。安装这个字体，或用「文字 › 管理缺失字体」替换` });
+    // replacements: the installed fonts this document uses most, then common ones
+    const usage = new Map<string, number>();
+    for (const t of doc.texts) for (const f of new Set(t.fonts)) if (f && doc.installed.has(f)) usage.set(f, (usage.get(f) ?? 0) + 1);
+    const candidates = [...[...usage.entries()].sort((a, b) => b[1] - a[1]).map(([f]) => f), ...FALLBACK_FONTS.filter(f => doc.installed!.has(f))]
+      .filter((f, i, a) => a.indexOf(f) === i).slice(0, 5);
+    const fontLabel = (ps: string) => doc.fontLabels?.get(ps) || ps;
+    for (const [ps, m] of missing) {
+      // only layers set entirely in the missing font: changing a mixed one would change its other fonts too
+      const whole = m.ids.filter(id => { const t = doc.texts.find(x => x.id === id); return !!t && t.fonts.every(f => f === ps); });
+      const choices = whole.length ? candidates.map(to => ({ label: `换成「${fontLabel(to)}」`, fix: { kind: "restyle" as const, edits: whole.map(id => ({ id, font: to })) } })) : [];
+      out.push({ key: "font:" + ps, category: "font", severity: "error", ids: m.ids,
+        title: `缺少字体「${m.label}」`, detail: `${names(m.ids, nameOf)}在用它，Photoshop 正用别的字体代替显示。安装这个字体，或在这里换成已安装的字体${mixedNote(m.ids.length - whole.length)}`,
+        ...(choices.length ? { fix: choices[0].fix, fixLabel: "替换字体", choices } : {}) });
+    }
     const used = new Set(doc.texts.flatMap(t => t.fonts));
     if (used.size > 5) out.push({ key: "font:many", category: "font", severity: "info", ids: [], title: `用了 ${used.size} 种字体`, detail: "一份设计通常 2～3 种就够；字体多了画面容易乱，交付时也容易缺字体" });
   }
@@ -185,8 +223,11 @@ export function runChecks(doc: CheckDoc): Issue[] {
     const safe = 3 / 25.4 * doc.ppi * 2; // 出血 3 mm + 安全 3 mm
     const near = doc.texts.filter(t => t.visible && t.bounds && (t.bounds.left < safe || t.bounds.top < safe || doc.width - t.bounds.right < safe || doc.height - t.bounds.bottom < safe)).map(t => t.id);
     if (near.length) out.push({ key: "del:edge", category: "delivery", severity: "warn", ids: near, title: `${near.length} 个文字离画布边不到 6 mm`, detail: `${names(near, nameOf)}：裁切时可能被切到（出血 3 mm + 安全距离 3 mm）` });
-    const rich = doc.texts.filter(t => t.cmyk && t.cmyk.k >= 80 && t.cmyk.c + t.cmyk.m + t.cmyk.y >= 30 && Math.max(...t.sizesPx, 0) / doc.ppi * 72 < 14).map(t => t.id);
-    if (rich.length) out.push({ key: "del:richblack", category: "delivery", severity: "warn", ids: rich, title: `${rich.length} 个小字是四色黑`, detail: `${names(rich, nameOf)}：印刷套印不准时会发虚，小字改成单黑（C0 M0 Y0 K100）` });
+    const richTexts = doc.texts.filter(t => t.cmyk && t.cmyk.k >= 80 && t.cmyk.c + t.cmyk.m + t.cmyk.y >= 30 && t.sizesPx.length && Math.max(...t.sizesPx) / doc.ppi * 72 < 14);
+    const rich = richTexts.map(t => t.id);
+    const richFix = restyle(richTexts.filter(plain).map(t => ({ id: t.id, cmyk: { c: 0, m: 0, y: 0, k: 100 } })));
+    if (rich.length) out.push({ key: "del:richblack", category: "delivery", severity: "warn", ids: rich, title: `${rich.length} 个小字是四色黑`, detail: `${names(rich, nameOf)}：印刷套印不准时会发虚，小字改成单黑（C0 M0 Y0 K100）${mixedNote(richTexts.filter(t => !plain(t)).length)}`,
+      ...(richFix ? { fix: richFix, fixLabel: "改成单黑" } : {}) });
     const tiny = doc.texts.filter(t => t.visible && t.sizesPx.length && Math.min(...t.sizesPx) < 6 / 72 * doc.ppi - 0.01).map(t => t.id);
     if (tiny.length) out.push({ key: "del:tiny", category: "delivery", severity: "warn", ids: tiny, title: `${tiny.length} 个文字小于 6 pt`, detail: `${names(tiny, nameOf)}：印出来会看不清` });
   }
@@ -210,8 +251,15 @@ export function runChecks(doc: CheckDoc): Issue[] {
   for (let i = 1; i < sizes.length; i++) {
     const a = sizes[i - 1], b = sizes[i];
     // only slips (23.8 / 24): bigger differences are usually meant
-    if (b - a >= 0.05 && b - a <= 0.5) out.push({ key: `text:size:${a}:${b}`, category: "design", severity: "warn", ids: [...sizeUsers.get(a)!, ...sizeUsers.get(b)!],
-      title: `字号 ${fmt(a, 1)} 和 ${fmt(b, 1)} px 很接近`, detail: `${names(sizeUsers.get(a)!, nameOf, 2)}用 ${fmt(a, 1)}，${names(sizeUsers.get(b)!, nameOf, 2)}用 ${fmt(b, 1)}：多半应该是同一个字号` });
+    if (b - a < 0.05 || b - a > 0.5) continue;
+    // to the size more layers use; only layers in one size throughout
+    const [main, odd] = sizeUsers.get(a)!.length >= sizeUsers.get(b)!.length ? [a, b] : [b, a];
+    const oddTexts = sizeUsers.get(odd)!.map(id => doc.texts.find(t => t.id === id)!).filter(Boolean);
+    const ok = oddTexts.filter(t => plain(t) && new Set(t.sizesPx.map(v => Math.round(v * 10) / 10)).size === 1);
+    const fix = restyle(ok.map(t => ({ id: t.id, scale: main / odd })));
+    out.push({ key: `text:size:${a}:${b}`, category: "design", severity: "warn", ids: [...sizeUsers.get(a)!, ...sizeUsers.get(b)!],
+      title: `字号 ${fmt(a, 1)} 和 ${fmt(b, 1)} px 很接近`, detail: `${names(sizeUsers.get(a)!, nameOf, 2)}用 ${fmt(a, 1)}，${names(sizeUsers.get(b)!, nameOf, 2)}用 ${fmt(b, 1)}：多半应该是同一个字号${mixedNote(oddTexts.length - ok.length)}`,
+      ...(fix ? { fix, fixLabel: `统一成 ${fmt(main, 1)} px` } : {}) });
   }
 
   // ── 图层整洁 ──
@@ -247,8 +295,13 @@ export function runChecks(doc: CheckDoc): Issue[] {
     if (seen.has(key)) continue;
     seen.add(key);
     const [main, odd] = a.ids.length >= b.ids.length ? [[ka, a], [kb, b]] as const : [[kb, b], [ka, a]] as const;
+    // the odd ones take the colour more layers use (texts in one style throughout, and fills)
+    const isFill = (id: number) => doc.fills.some(f => f.id === id);
+    const targets = odd[1].ids.filter(id => isFill(id) || plain(doc.texts.find(t => t.id === id) ?? { ranges: 2 } as CheckText));
+    const fix = restyle(targets.map(id => ({ id, colourFrom: main[1].ids[0] })));
     out.push({ key: "design:colour:" + key, category: "design", severity: "warn", ids: [...main[1].ids, ...odd[1].ids],
-      title: `颜色 ${main[0]} 和 ${odd[0]} 几乎一样`, detail: `${names(main[1].ids, nameOf, 2)}用 ${main[0]}，${names(odd[1].ids, nameOf, 2)}用 ${odd[0]}：多半应该统一成一个颜色` });
+      title: `颜色 ${main[0]} 和 ${odd[0]} 几乎一样`, detail: `${names(main[1].ids, nameOf, 2)}用 ${main[0]}，${names(odd[1].ids, nameOf, 2)}用 ${odd[0]}：多半应该统一成一个颜色${mixedNote(odd[1].ids.length - targets.length)}`,
+      ...(fix ? { fix, fixLabel: `统一成 ${main[0]}` } : {}) });
   }
   out.push(...spacing(layers, shown, inAi, nameOf));
 

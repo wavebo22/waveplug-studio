@@ -34,6 +34,8 @@ export interface ContextMenuInput {
   colors: readonly (readonly [string, string])[];
   /** AI 助手 is available: row "assist:organize" (AI 整理图层) */
   assistant?: boolean;
+  /** AI 改写 is available: row "assist:rewrite" (shown when a text layer is in the selection) */
+  rewrite?: boolean;
   /** 发送到: the other open documents, and the settings shown as check rows */
   send?: {
     docs: readonly { id: number; name: string }[];
@@ -122,6 +124,7 @@ export function contextMenu(input: ContextMenuInput): { title: string; items: Me
     sep,
     act("groupLayers"), when("ungroup"),
     input.assistant ? { id: "assist:organize", label: "AI 整理（重命名 + 归组）…", hint: "DeepSeek", enabled: true } : null,
+    input.rewrite && input.layers.some(l => l.kind === "text" && input.selected.has(l.id)) ? { id: "assist:rewrite", label: "AI 翻译 / 改写文字…", hint: "DeepSeek", enabled: true } : null,
     sub("合并", rows(act("merge"), act("mergeDown"), act("mergeVisible"), act("flatten"))),
     sub("转换", rows(
       act("convertSmart"),

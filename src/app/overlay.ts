@@ -8,7 +8,7 @@
 
 import { onDispose } from "../ui/dom.ts";
 import { log, setLogContext } from "./log.ts";
-import { ASSIST_HELPER_VERSION, CHECK_HELPER_VERSION, EXPECTED_HELPER_VERSION, OVERLAY_URL, type ComfyManagerStatus, type ExternalDragEvent, type ExternalDragFile, HANG_SECONDS, type HangDoc, type MenuNode, type OverlayCommand, MENU_HELPER_VERSION, OPEN_APP_HELPER_VERSION, type ScreenRect, TRASH_HELPER_VERSION, WEBDROP_HELPER_VERSION, KEYS_HELPER_VERSION, STATUSBAR_HELPER_VERSION, TINT_HELPER_VERSION, type StatusBarHint, type StatusBarMode, type StatusBarPart, type WebDropEvent, helperOutdated, parseOverlayEvent } from "../core/overlay/protocol.ts";
+import { ASSIST_HELPER_VERSION, CHECK_HELPER_VERSION, REWRITE_HELPER_VERSION, EXPECTED_HELPER_VERSION, OVERLAY_URL, type ComfyManagerStatus, type ExternalDragEvent, type ExternalDragFile, HANG_SECONDS, type HangDoc, type MenuNode, type OverlayCommand, MENU_HELPER_VERSION, OPEN_APP_HELPER_VERSION, type ScreenRect, TRASH_HELPER_VERSION, WEBDROP_HELPER_VERSION, KEYS_HELPER_VERSION, STATUSBAR_HELPER_VERSION, TINT_HELPER_VERSION, type StatusBarHint, type StatusBarMode, type StatusBarPart, type WebDropEvent, helperOutdated, parseOverlayEvent } from "../core/overlay/protocol.ts";
 import { type Hub, createHub } from "../core/overlay/hub.ts";
 
 const RETRY_MS = 3000;
@@ -46,6 +46,8 @@ export interface Overlay {
   readonly checkReady: boolean;
   /** the helper can show the AI 整理 window and draw lines to the panel's rows */
   readonly assistReady: boolean;
+  /** the helper can show the AI 改写 window */
+  readonly rewriteReady: boolean;
   /** the hovered item's rows in the 图层 panel (page CSS px); null: none */
   issueRows(rows: { left: number; right: number; rows: { top: number; bottom: number }[]; color: string } | null): void;
   /** the helper can tint (connected, ≥ TINT_HELPER_VERSION) */
@@ -387,6 +389,7 @@ export function connectOverlay(opts: { launch?: () => Promise<string | null>; au
       return true;
     },
     anchorPanel() { send({ type: "panel-anchor" }); },
+    get rewriteReady() { return connected && helperVersion !== null && !helperOutdated(helperVersion, REWRITE_HELPER_VERSION); },
     get assistReady() { return connected && helperVersion !== null && !helperOutdated(helperVersion, ASSIST_HELPER_VERSION); },
     issueRows(r) {
       if (!connected || helperVersion === null || helperOutdated(helperVersion, ASSIST_HELPER_VERSION)) return;

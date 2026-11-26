@@ -7,12 +7,18 @@
 //   light up in the panel and on the canvas, with lines to them (the same as 检查结果);
 // - a row's box: "toggle"; 补充要求 (Enter or leaving the field): "extra" then, on Enter, "analyse";
 //   只重命名: "rename-only"; 重新分析 / 应用 / ×: "analyse" / "apply" / "close".
+//
+// The same window shows AI 改写文字 (REWRITE_ID, src/ui/aiRewrite.ts): the plugin sends its own title,
+// field hint, checkbox label ("" hides it), preset buttons (a click: "extra" with the preset, then
+// "analyse"), start-button label and list heading; locked rows are suggestions only.
 use eframe::egui::{self, CornerRadius, RichText, Sense, Stroke, StrokeKind, Vec2};
 use serde_json::{json, Map, Value};
 
 use crate::panel::theme;
 
 pub const ID: &str = "organize";
+/// AI 改写文字: the same window and struct, its own panel id
+pub const REWRITE_ID: &str = "rewrite";
 
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct Item {
@@ -25,6 +31,10 @@ pub struct Item {
     pub members: String,
     pub on: bool,
     pub pick: bool,
+    /// can't be ticked: a suggestion only
+    pub lock: bool,
+    /// a small line under it
+    pub note: String,
 }
 
 #[derive(Default)]
@@ -40,6 +50,14 @@ pub struct Organize {
     pub groups: Vec<Item>,
     pub dropped: Vec<String>,
     pub folded: bool,
+    /// the plugin's labels (defaults: AI 整理's)
+    pub title: String,
+    pub hint: String,
+    pub toggle: String,
+    pub presets: Vec<String>,
+    pub go: String,
+    pub list_title: String,
+    pub empty: String,
     hovered: Option<String>,
     /// the hovered row's left / right edge and middle, physical px inside the window
     pub hover_edges: Option<(f32, f32, f32)>,
@@ -60,7 +78,7 @@ fn items(v: Option<&Value>) -> Vec<Item> {
                 .take(400)
                 .filter_map(|v| {
                     let key = s(v, "key");
-                    (!key.is_empty()).then(|| Item { key, from: s(v, "from"), to: s(v, "to"), members: s(v, "members"), on: b(v, "on"), pick: b(v, "pick") })
+                    (!key.is_empty()).then(|| Item { key, from: s(v, "from"), to: s(v, "to"), members: s(v, "members"), on: b(v, "on"), pick: b(v, "pick"), lock: b(v, "lock"), note: s(v, "note") })
                 })
                 .collect()
         })
@@ -69,10 +87,31 @@ fn items(v: Option<&Value>) -> Vec<Item> {
 
 impl Organize {
     pub fn new() -> Self {
-        Self::default()
+        let mut o = Self::default();
+        o.labels(&Value::Null, &Value::Null, &Value::Null);
+        o
+    }
+
+    fn labels(&mut self, head: &Value, opts: &Value, plan: &Value) {
+        let or = |v: &Value, k: &str, d: &str| v.get(k).and_then(Value::as_str).unwrap_or(d).to_string();
+        if !head.is_null() || self.title.is_empty() {
+            self.title = or(head, "title", "AI 整理");
+        }
+        if !opts.is_null() || self.go.is_empty() {
+            self.hint = or(opts, "hint", "补充要求（可选），例如：按钮统一叫「按钮-…」");
+            self.toggle = or(opts, "toggle", "只重命名，不归组");
+            self.go = or(opts, "go", "重新分析");
+            self.presets = opts.get("presets").and_then(Value::as_array).map(|a| a.iter().filter_map(Value::as_str).take(12).map(str::to_owned).collect()).unwrap_or_default();
+        }
+        if !plan.is_null() || self.list_title.is_empty() {
+            self.list_title = or(plan, "renameTitle", "改名");
+            self.empty = or(plan, "empty", "DeepSeek 认为这些图层不需要整理");
+        }
     }
 
     pub fn apply(&mut self, sections: &Map<String, Value>) {
+        let get = |k: &str| sections.get(k).cloned().unwrap_or(Value::Null);
+        self.labels(&get("head"), &get("opts"), &get("plan"));
         if let Some(v) = sections.get("head") {
             self.scope = s(v, "scope");
             self.busy = s(v, "busy");
@@ -100,10 +139,10 @@ impl Organize {
             .show(ctx, |ui| {
                 // ── title bar: AI 整理 · scope, 收起, × ──
                 let (head, _) = ui.allocate_exact_size(Vec2::new(ui.available_width(), crate::panel::check::HEAD_H), Sense::hover());
-                ui.painter().text(egui::pos2(head.left(), head.center().y), egui::Align2::LEFT_CENTER, "AI 整理", theme::font_bold(theme::FS_L), theme::TEXT);
+                ui.painter().text(egui::pos2(head.left(), head.center().y), egui::Align2::LEFT_CENTER, &self.title, theme::font_bold(theme::FS_L), theme::TEXT);
                 let close = egui::Rect::from_center_size(egui::pos2(head.right() - 10.0, head.center().y), Vec2::splat(22.0));
                 let fold = egui::Rect::from_center_size(egui::pos2(close.left() - 14.0, head.center().y), Vec2::splat(22.0));
-                if crate::panel::check::icon_button(ui, close, "×", "关闭 AI 整理").clicked() {
+                if crate::panel::check::icon_button(ui, close, "×", &format!("关闭 {}", self.title)).clicked() {
                     actions.push(json!({ "kind": "close" }));
                 }
                 if crate::panel::check::icon_button(ui, fold, if self.folded { "▾" } else { "▴" }, if self.folded { "展开" } else { "暂时收起（只留标题栏）" }).clicked() {
@@ -117,9 +156,27 @@ impl Organize {
                 ui.painter().hline(head.x_range(), head.bottom(), Stroke::new(1.0_f32, theme::LINE_SOFT));
                 ui.add_space(6.0);
 
-                // ── 补充要求, 只重命名 ──
+                // ── presets (AI 改写), 补充要求, 只重命名 ──
+                if !self.presets.is_empty() {
+                    let idle = self.busy.is_empty();
+                    ui.horizontal_wrapped(|ui| {
+                        ui.spacing_mut().item_spacing = Vec2::new(6.0, 4.0);
+                        for p in self.presets.clone() {
+                            let on = p == self.extra;
+                            let btn = egui::Button::new(RichText::new(&p).font(theme::font(theme::FS_S)).color(if on { theme::ACCENT_HI } else { theme::TEXT })).selected(on);
+                            if ui.add_enabled(idle, btn).on_hover_text("用这个要求开始").clicked() {
+                                self.extra = p.clone();
+                                self.typed = None;
+                                actions.push(json!({ "kind": "extra", "text": p }));
+                                actions.push(json!({ "kind": "analyse" }));
+                            }
+                        }
+                    });
+                    ui.add_space(4.0);
+                }
+                let hint = self.hint.clone();
                 let text = self.typed.get_or_insert_with(|| self.extra.clone());
-                let field = ui.add(egui::TextEdit::singleline(text).hint_text("补充要求（可选），例如：按钮统一叫「按钮-…」").desired_width(f32::INFINITY).font(theme::font(theme::FS_S)));
+                let field = ui.add(egui::TextEdit::singleline(text).hint_text(hint).desired_width(f32::INFINITY).font(theme::font(theme::FS_S)));
                 typing = field.has_focus();
                 let enter = field.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
                 if field.lost_focus() {
@@ -135,13 +192,15 @@ impl Organize {
                 if !field.has_focus() && !field.lost_focus() {
                     self.typed = None; // follow the plugin's value while not typing
                 }
-                ui.add_space(4.0);
-                ui.horizontal(|ui| {
-                    let mut only = self.rename_only;
-                    if ui.checkbox(&mut only, RichText::new("只重命名，不归组").font(theme::font(theme::FS_S))).changed() {
-                        actions.push(json!({ "kind": "rename-only", "on": only }));
-                    }
-                });
+                if !self.toggle.is_empty() {
+                    ui.add_space(4.0);
+                    ui.horizontal(|ui| {
+                        let mut only = self.rename_only;
+                        if ui.checkbox(&mut only, RichText::new(&self.toggle).font(theme::font(theme::FS_S))).changed() {
+                            actions.push(json!({ "kind": "rename-only", "on": only }));
+                        }
+                    });
+                }
                 if !self.error.is_empty() {
                     ui.add_space(4.0);
                     ui.label(RichText::new(&self.error).font(theme::font(theme::FS_S)).color(theme::ERR));
@@ -152,7 +211,7 @@ impl Organize {
                 let n = self.renames.iter().chain(self.groups.iter()).filter(|i| i.on).count();
                 ui.horizontal(|ui| {
                     let idle = self.busy.is_empty();
-                    if ui.add_enabled(idle, egui::Button::new(RichText::new("重新分析").font(theme::font(theme::FS_S)))).on_hover_text("按上面的补充要求重新让 DeepSeek 分析").clicked() {
+                    if ui.add_enabled(idle, egui::Button::new(RichText::new(&self.go).font(theme::font(theme::FS_S)))).on_hover_text("按上面的要求让 DeepSeek 重新做").clicked() {
                         actions.push(json!({ "kind": "analyse" }));
                     }
                     let label = if n > 0 { format!("应用 {n} 项") } else { "应用".to_string() };
@@ -169,10 +228,10 @@ impl Organize {
                     ui.spacing_mut().item_spacing = Vec2::new(0.0, 0.0);
                     if self.renames.is_empty() && self.groups.is_empty() {
                         ui.add_space(12.0);
-                        let msg = if !self.busy.is_empty() { "DeepSeek 正在分析图层…（图层多时要几十秒）" } else if self.error.is_empty() { "DeepSeek 认为这些图层不需要整理" } else { "" };
+                        let msg = if !self.busy.is_empty() { "DeepSeek 正在处理…（图层多时要几十秒）" } else if self.error.is_empty() { self.empty.as_str() } else { "" };
                         ui.label(RichText::new(msg).font(theme::font(theme::FS)).color(theme::TEXT_2));
                     }
-                    for (title, list) in [("改名", self.renames.clone()), ("新建组", self.groups.clone())] {
+                    for (title, list) in [(self.list_title.clone(), self.renames.clone()), ("新建组".to_string(), self.groups.clone())] {
                         if list.is_empty() {
                             continue;
                         }
@@ -185,7 +244,7 @@ impl Organize {
                                 ui.horizontal_top(|ui| {
                                     ui.spacing_mut().item_spacing.x = 6.0;
                                     let mut on = it.on;
-                                    if ui.checkbox(&mut on, "").changed() {
+                                    if ui.add_enabled(!it.lock, egui::Checkbox::new(&mut on, "")).changed() {
                                         actions.push(json!({ "kind": "toggle", "key": it.key }));
                                     }
                                     ui.vertical(|ui| {
@@ -196,6 +255,9 @@ impl Organize {
                                         } else {
                                             ui.add(egui::Label::new(RichText::new(&it.from).font(theme::font(theme::FS_S)).color(theme::TEXT_3)).wrap());
                                             ui.add(egui::Label::new(RichText::new(format!("→ {}", it.to)).font(theme::font(theme::FS)).color(if it.on { theme::ACCENT_HI } else { ink })).wrap());
+                                        }
+                                        if !it.note.is_empty() {
+                                            ui.add(egui::Label::new(RichText::new(&it.note).font(theme::font(theme::FS_S)).color(theme::WARN)).wrap());
                                         }
                                     });
                                 });
@@ -249,5 +311,22 @@ mod tests {
         assert!(!o.groups[0].on && o.rename_only);
         assert_eq!(o.extra, "用英文");
         assert_eq!(o.dropped, vec!["x".to_string()]);
+        assert_eq!((o.title.as_str(), o.go.as_str(), o.list_title.as_str()), ("AI 整理", "重新分析", "改名"));
+    }
+
+    #[test]
+    fn takes_the_rewrite_labels() {
+        let mut o = Organize::new();
+        let sections = json!({
+            "head": { "title": "AI 改写", "scope": "全部 3 个文字图层", "busy": "", "error": "" },
+            "opts": { "extra": "", "renameOnly": false, "toggle": "", "presets": ["翻译成英文", "更口语化"], "go": "生成" },
+            "plan": { "renames": [{ "key": "r:4", "from": "你好", "to": "Hello", "on": false, "pick": true, "lock": true, "note": "混排" }], "groups": [], "dropped": [], "renameTitle": "改写", "empty": "选一个预设" },
+        });
+        o.apply(sections.as_object().unwrap());
+        assert_eq!(o.title, "AI 改写");
+        assert!(o.toggle.is_empty());
+        assert_eq!(o.presets.len(), 2);
+        assert!(o.renames[0].lock && o.renames[0].note == "混排");
+        assert_eq!((o.go.as_str(), o.list_title.as_str(), o.empty.as_str()), ("生成", "改写", "选一个预设"));
     }
 }

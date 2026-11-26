@@ -7,6 +7,8 @@
 
 import { groupSelectionLayers } from "../core/layers/groupSelection.ts";
 import { createAiOrganize } from "./aiOrganize.ts";
+import { createAiPick } from "./aiPick.ts";
+import { createAiRewrite } from "./aiRewrite.ts";
 import { createDocCheck } from "./docCheck.ts";
 import { crumb, log } from "../app/log.ts";
 import { resultText } from "../core/layers/smart.ts";
@@ -760,7 +762,20 @@ export function createLayerTreeView(tree: LayerTree, status: Status, tools?: Lay
   });
   searchBox.addEventListener("keydown", e => {
     if ((e as KeyboardEvent).key === "Escape") { searchBox.value = ""; query.text = ""; firstRow = 0; render(); }
+    // Enter: 一句话选图层 (the AI button beside the box)
+    if ((e as KeyboardEvent).key === "Enter" && aiPick && searchBox.value.trim()) void aiPick.run();
   });
+  // ── 一句话选图层 (DeepSeek): what is typed in the search box picks the layers (aiPick.ts) ──
+  const aiPick = assistant ? createAiPick({
+    tree, status, fetch: assistant.fetch, settings: assistant.settings, ask: () => searchBox.value,
+    state: () => ({ docId, layers, width: canvas.width, height: canvas.height }),
+    picked: ids => {
+      // the name filter would hide what was picked: clear it, show the first
+      if (searchTimer) clearTimeout(searchTimer);
+      searchBox.value = ""; query.text = ""; firstRow = 0;
+      void refresh().then(() => { if (ids.length) scrollTo(ids[0], true); });
+    },
+  }) : null;
   const KINDS: [LayerKind, string, string][] = [
     ["pixel", "image", "像素图层"], ["adjustment", "adjust", "调整 / 填充图层"], ["text", "text", "文字图层"],
     ["shape", "shape", "形状图层"], ["smartObject", "smart", "智能对象"], ["group", "folder", "图层组"],
@@ -845,7 +860,7 @@ export function createLayerTreeView(tree: LayerTree, status: Status, tools?: Lay
   filterSwitch.addEventListener("click", () => { filterEnabled = !filterEnabled; firstRow = 0; render(); });
   // search | expand / collapse … funnel, switch at the far right; on a narrow panel (.lt-narrow) the
   // expand / collapse buttons drop to a line of their own under the search box
-  const findRow = h("div", { class: "lt-find" }, searchBox, expandCollapseControls, h("span", { class: "grow" }),
+  const findRow = h("div", { class: "lt-find" }, searchBox, ...(aiPick ? [aiPick.button] : []), expandCollapseControls, h("span", { class: "grow" }),
     funnelButton, filterSwitch, filterPopup, thumbPopup);
   listen(document, "mousedown", e => {
     const t = e.target as Node;
@@ -3265,7 +3280,7 @@ export function createLayerTreeView(tree: LayerTree, status: Status, tools?: Lay
     if (!wasSelected) void clickRow(id, { ctrl: false, shift: false });
     // clickRow may first leave a mask view (async): the menu is for the right-clicked row then
     const doc = docId, ids = wasSelected ? selectedLayers().map(l => l.id) : [id];
-    const menu = contextMenu({ layers, selected: new Set(ids), users, smartTools: !!tools, assistant: !!aiOrganize, colors: LABELS.map(([k, name]) => [k, name] as const),
+    const menu = contextMenu({ layers, selected: new Set(ids), users, smartTools: !!tools, assistant: !!aiOrganize, rewrite: !!aiRewrite, colors: LABELS.map(([k, name]) => [k, name] as const),
       send: { docs: workbench.docs().filter(d => d.docId !== docId).map(d => ({ id: d.docId, name: d.name })), prefs: workbenchState().prefs, illustrator: !!illustrator?.ready(), illustratorLink: !!illustrator?.linkOf(doc, id) } });
     const native = overlay?.openMenu(menu.title, menu.items) ?? null;
     if (native) {
@@ -3294,6 +3309,7 @@ export function createLayerTreeView(tree: LayerTree, status: Status, tools?: Lay
     else if (kind === "arrange") arrange(arg as "forward" | "backward" | "front" | "back");
     else if (kind === "tool") void runTool(arg, ids);
     else if (kind === "assist" && arg === "organize") aiOrganize?.button.click();
+    else if (kind === "assist" && arg === "rewrite") aiRewrite?.button.click();
     else if (kind === "send" && arg === "ai") void sendToIllustrator(ids);
     else if (kind === "send" && arg === "aiboard") void sendBoardToIllustrator();
     else if (kind === "ai" && docId !== null) {
@@ -3581,12 +3597,18 @@ export function createLayerTreeView(tree: LayerTree, status: Status, tools?: Lay
   const aiOrganize = assistant ? createAiOrganize({
     overlay, tree, status, fetch: assistant.fetch, settings: assistant.settings,
     state: () => ({ docId, layers, selected, width: canvas.width, height: canvas.height }),
-    refresh: () => void refresh(), mark: (ids, sev) => void markIssue(ids, sev), opening: () => docCheck?.close(),
+    refresh: () => void refresh(), mark: (ids, sev) => void markIssue(ids, sev), opening: () => { docCheck?.close(); aiRewrite?.close(); },
   }) : null;
   // ── 文档检查: the button beside AI 整理; its list is the helper's window beside the panel (docCheck.ts) ──
   const docCheck = assistant?.checker ? createDocCheck({
     overlay, checker: assistant.checker, tree, tools, status, fetch: assistant.fetch, settings: assistant.settings, composite: assistant.composite,
-    docId: () => docId, docVersion, refresh: () => void refresh(), mark: (ids, sev) => void markIssue(ids, sev), opening: () => aiOrganize?.close(),
+    docId: () => docId, docVersion, refresh: () => void refresh(), mark: (ids, sev) => void markIssue(ids, sev), opening: () => { aiOrganize?.close(); aiRewrite?.close(); },
+  }) : null;
+  // ── AI 改写文字: the same window beside the panel (aiRewrite.ts) ──
+  const aiRewrite = assistant?.checker ? createAiRewrite({
+    overlay, checker: assistant.checker, status, fetch: assistant.fetch, settings: assistant.settings,
+    state: () => ({ docId, layers, selected }),
+    refresh: () => void refresh(), mark: (ids, sev) => void markIssue(ids, sev), opening: () => { aiOrganize?.close(); docCheck?.close(); },
   }) : null;
 
 
@@ -3944,7 +3966,7 @@ export function createLayerTreeView(tree: LayerTree, status: Status, tools?: Lay
     props, lockRow,
     list,
     workbench.el,
-    h("div", { class: "lt-foot" }, h("div", { class: "lt-foot-btns" }, menuBtn, ...(aiOrganize ? [aiOrganize.button] : []), ...(docCheck ? [docCheck.button] : []), frameBtn, nativeBtn, ...(WORKBENCH_ENABLED ? [workbench.toggleButton] : [])), bar));
+    h("div", { class: "lt-foot" }, h("div", { class: "lt-foot-btns" }, menuBtn, ...(aiOrganize ? [aiOrganize.button] : []), ...(docCheck ? [docCheck.button] : []), ...(aiRewrite ? [aiRewrite.button] : []), frameBtn, nativeBtn, ...(WORKBENCH_ENABLED ? [workbench.toggleButton] : [])), bar));
   render();
   return { el, refresh, fileDropSpot, clearFileDropSpot, docId: () => docId };
 }

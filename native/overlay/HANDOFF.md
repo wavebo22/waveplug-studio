@@ -129,6 +129,8 @@ src/ui/app.ts  startOverlay()      生成页提供状态和     src/panel/genera
 - 连线（0.32.0）：带颜色的 tint 显示时，`frame.rs` 的第三个穿透窗口（「WavePlug 检查连线」）从检查窗口里悬停那一行朝向画布的边，画一条线到高亮形状最近的点（`leader_pixels`，有测试）；起点由 `host.rs` 每帧算好交给 `frame::set_leader`。
 - 0.33.0：连线也指向图层面板里的行：插件发 `{"type":"issue-rows","left","right","rows":[{top,bottom}],"color"}`（面板页面的 CSS px），helper 用锚定的面板窗口左上角 + CSS px × 显示缩放换成屏幕位置（`win::leader_rows`）；`leader_pixels` 从悬停行朝向目标的那一边画线（画布在左用左边，面板行在右用右边）。
 - 0.33.0：介面 `organize`（`panel/organize.rs`，AI 整理）和 `check` 共用同一个视窗（`host.rs assist`，最后显示的那个），位置、收起、连线完全相同；它的「补充要求」输入框获得焦点时 `win::check_set_typing` 让窗口接管键盘，离开时还给 Photoshop。
+- 0.34.0：介面 `rewrite`（AI 改写文字）用同一个 `Organize` 结构和同一个视窗（`organize::REWRITE_ID`，`host.rs assist_id` 列出三者）；插件在区块里带自己的标题、输入提示、复选框文字（空 = 不显示）、预设按钮（点一下 = 发 `extra` 再发 `analyse`）、开始按钮文字和列表标题；行可以 `lock`（不能勾，只是建议）并带一行 `note`。`check` 的问题可以带 `choices`（多个处理方式），按钮变成菜单，回传 `{"kind":"fix","key","choice":i}`。
+- 0.34.0 修复：AI 整理输入框获得键盘后，`watch_check` 不再每轮把窗口改回不接收键盘（`needs_noactivate_style` 用 `CHECK_TYPING`）。
 
 ### 3.6 快捷键 Ctrl+F = 原位粘贴（2026-11-25，0.29.0，未实测）
 

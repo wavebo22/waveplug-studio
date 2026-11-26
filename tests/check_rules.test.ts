@@ -122,3 +122,26 @@ test("AI 画面：没有 problem 的丢掉；JSON 外面有文字也能读", () 
   assert.equal(parseVisualIssues({ issues: [{ type: "ai_artifact", where: "左手", problem: "六根手指" }, { where: "x" }] }).length, 1);
   assert.deepEqual(parseJsonAnswer("好的，结果如下：\n{\"issues\":[]}\n以上"), { issues: [] });
 });
+
+test("一键统一：缺失字体给几个替换选项，只改整层都是这个字体的；混排的说明要手动改", () => {
+  const d = doc({ installed: new Set(["SourceHanSansSC-Regular", "MicrosoftYaHei"]), fontLabels: new Map([["SourceHanSansSC-Regular", "思源黑体"]]),
+    texts: [text(1, { fonts: ["Missing-Bold"], fontNames: ["缺"] }), text(2, { fonts: ["Missing-Bold", "SourceHanSansSC-Regular"], fontNames: ["缺", "思源黑体"], ranges: 2 }), text(3)] });
+  const f = runChecks(d).find(i => i.key === "font:Missing-Bold")!;
+  assert.deepEqual(f.choices!.map(c => c.label), ["换成「思源黑体」", "换成「MicrosoftYaHei」"]);
+  assert.deepEqual(f.choices![1].fix, { kind: "restyle", edits: [{ id: 1, font: "MicrosoftYaHei" }] });
+  assert.equal(f.fix, f.choices![0].fix);
+  assert.match(f.detail, /1 个图层是混排样式/);
+});
+
+test("一键统一：颜色和字号统一成用得多的那个；四色黑小字改单黑", () => {
+  const near = runChecks(doc({ texts: [text(1, { rgb: { r: 255, g: 90, b: 31 } }), text(2, { rgb: { r: 255, g: 90, b: 31 } }), text(3, { rgb: { r: 255, g: 92, b: 33 } })] }))
+    .find(i => i.key.startsWith("design:colour"))!;
+  assert.deepEqual(near.fix, { kind: "restyle", edits: [{ id: 3, colourFrom: 1 }] });
+  assert.equal(near.fixLabel, "统一成 #FF5A1F");
+  const size = runChecks(doc({ texts: [text(1, { sizesPx: [24] }), text(2, { sizesPx: [24] }), text(3, { sizesPx: [23.8] }), text(4, { sizesPx: [24, 40], ranges: 2 }), text(5, { sizesPx: [23.8], ranges: 3 })] }))
+    .find(i => i.key.startsWith("text:size"))!;
+  assert.deepEqual(size.fix, { kind: "restyle", edits: [{ id: 3, scale: 24 / 23.8 }] });
+  assert.match(size.detail, /1 个图层是混排样式/);
+  const rich = runChecks(doc({ mode: "cmyk", ppi: 300, texts: [text(1, { sizesPx: [30], cmyk: { c: 60, m: 50, y: 50, k: 100 } })] })).find(i => i.key === "del:richblack")!;
+  assert.deepEqual(rich.fix, { kind: "restyle", edits: [{ id: 1, cmyk: { c: 0, m: 0, y: 0, k: 100 } }] });
+});

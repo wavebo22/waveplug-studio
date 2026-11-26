@@ -210,6 +210,12 @@ export interface DocChecker {
   read(docId: number): Promise<import("../core/check/rules.ts").CheckDoc | null>;
   /** replaces `from` with `to` once in a text layer (one undo step); false when `from` is gone */
   setText(docId: number, id: number, from: string, to: string): Promise<boolean>;
+  /** 一键统一: font / size / colour of whole text and fill layers, one undo step */
+  restyle(docId: number, edits: import("../core/check/rules.ts").StyleEdit[]): Promise<{ done: number; skipped: string[] }>;
+  /** text layers' contents and how many style ranges each has (AI 改写) */
+  textInfo(docId: number, ids: number[]): Promise<{ id: number; text: string; ranges: number }[]>;
+  /** AI 改写: each layer's whole text replaced, when it still is `from` (one undo step) */
+  rewrite(docId: number, edits: { id: number; from: string; to: string }[]): Promise<{ done: number; skipped: string[] }>;
 }
 
 export interface LayerDeleteResult {

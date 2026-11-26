@@ -17,6 +17,9 @@ export interface CheckPanelIssue {
   detail: string;
   /** the fix button's label; absent: no button */
   fix?: string;
+  /** several ways to fix it: the button opens a menu of these (helper ≥ REWRITE_HELPER_VERSION;
+   *  an older one sends the fix without a choice: the first) */
+  choices?: string[];
   /** 处理中… / 已处理: shown instead of the button */
   state?: string;
   /** it has layers: hovering lights them up, a click selects them */
@@ -32,7 +35,7 @@ export interface CheckSections {
 export type CheckAction =
   | { kind: "hover"; key: string | null }
   | { kind: "pick"; key: string }
-  | { kind: "fix"; key: string }
+  | { kind: "fix"; key: string; choice?: number }
   | { kind: "opt"; name: "copy" | "visual"; on: boolean }
   | { kind: "recheck" }
   | { kind: "close" };
@@ -46,7 +49,7 @@ export function checkIssues(issues: readonly Issue[], states: ReadonlyMap<string
     .sort((a, b) => ORDER.indexOf(a.category) - ORDER.indexOf(b.category) || SEV_RANK[a.severity] - SEV_RANK[b.severity])
     .map(i => ({
       key: i.key, sev: i.severity, cat: CATEGORY_NAMES[i.category], title: i.title, detail: i.detail, pick: i.ids.length > 0,
-      ...(states.get(i.key) ? { state: states.get(i.key) } : i.fix ? { fix: i.fixLabel ?? "处理" } : {}),
+      ...(states.get(i.key) ? { state: states.get(i.key) } : i.fix ? { fix: i.fixLabel ?? "处理", ...(i.choices && i.choices.length > 1 ? { choices: i.choices.map(c => c.label) } : {}) } : {}),
     }));
 }
 
@@ -66,7 +69,7 @@ export function parseCheckAction(raw: unknown): CheckAction | null {
   switch (a.kind) {
     case "hover": return a.key === null ? { kind: "hover", key: null } : key !== null ? { kind: "hover", key } : null;
     case "pick": return key !== null ? { kind: "pick", key } : null;
-    case "fix": return key !== null ? { kind: "fix", key } : null;
+    case "fix": return key === null ? null : Number.isInteger(a.choice) && (a.choice as number) >= 0 && (a.choice as number) < 20 ? { kind: "fix", key, choice: a.choice as number } : { kind: "fix", key };
     case "opt": return (a.name === "copy" || a.name === "visual") && typeof a.on === "boolean" ? { kind: "opt", name: a.name, on: a.on } : null;
     case "recheck": return { kind: "recheck" };
     case "close": return { kind: "close" };

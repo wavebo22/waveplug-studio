@@ -29,6 +29,8 @@ pub struct Issue {
     pub title: String,
     pub detail: String,
     pub fix: Option<String>,
+    /// several ways to fix it: the button opens a menu ({"kind":"fix","key":…,"choice":i})
+    pub choices: Vec<String>,
     pub state: Option<String>,
     pub pick: bool,
 }
@@ -77,6 +79,7 @@ impl Check {
                         title: s(v, "title"),
                         detail: s(v, "detail"),
                         fix: v.get("fix").and_then(Value::as_str).map(str::to_owned),
+                        choices: v.get("choices").and_then(Value::as_array).map(|a| a.iter().filter_map(Value::as_str).take(20).map(str::to_owned).collect()).unwrap_or_default(),
                         state: v.get("state").and_then(Value::as_str).map(str::to_owned),
                         pick: b(v, "pick"),
                     })
@@ -193,8 +196,19 @@ impl Check {
                                 if let Some(st) = &it.state {
                                     ui.label(RichText::new(st).font(theme::font(theme::FS_S)).color(theme::OK));
                                 } else if let Some(fix) = &it.fix {
-                                    if ui.add(egui::Button::new(small(fix))).on_hover_text("处理这一项（可以 Ctrl+Z 撤销）").clicked() {
-                                        actions.push(json!({ "kind": "fix", "key": it.key }));
+                                    if it.choices.is_empty() {
+                                        if ui.add(egui::Button::new(small(fix))).on_hover_text("处理这一项（可以 Ctrl+Z 撤销）").clicked() {
+                                            actions.push(json!({ "kind": "fix", "key": it.key }));
+                                        }
+                                    } else {
+                                        ui.menu_button(small(&format!("{fix} ▾")), |ui| {
+                                            for (i, c) in it.choices.iter().enumerate() {
+                                                if ui.button(small(c)).clicked() {
+                                                    actions.push(json!({ "kind": "fix", "key": it.key, "choice": i }));
+                                                    ui.close_menu();
+                                                }
+                                            }
+                                        });
                                     }
                                 }
                             });
@@ -270,11 +284,12 @@ mod tests {
         let sections = json!({
             "head": { "summary": "1 个错误", "busy": "", "error": "" },
             "opts": { "copy": true, "visual": false, "ai": true },
-            "issues": [{ "key": "font:x", "sev": "error", "cat": "字体", "title": "缺少字体", "detail": "d", "pick": true, "fix": "处理" }, { "key": "" }],
+            "issues": [{ "key": "font:x", "sev": "error", "cat": "字体", "title": "缺少字体", "detail": "d", "pick": true, "fix": "处理", "choices": ["换成「A」", "换成「B」"] }, { "key": "" }],
         });
         c.apply(sections.as_object().unwrap());
         assert_eq!(c.issues.len(), 1);
         assert_eq!(c.issues[0].fix.as_deref(), Some("处理"));
+        assert_eq!(c.issues[0].choices.len(), 2);
         assert!(c.copy && !c.visual && c.ai);
         assert_eq!(c.summary, "1 个错误");
         // only "head": the list stays

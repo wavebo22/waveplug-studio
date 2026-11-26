@@ -47,3 +47,12 @@ test("几个图层的形状合成一个高亮", () => {
   assert.equal(unionShapes([a]), a);
   assert.equal(unionShapes([]), null);
 });
+
+test("有多个处理方式时把选项发给窗口；窗口回传选第几个", async () => {
+  const { checkIssues, parseCheckAction } = await import("../src/core/overlay/checkPanel.ts");
+  const fix = { kind: "restyle" as const, edits: [{ id: 1, font: "A" }] };
+  const [row] = checkIssues([{ key: "font:x", category: "font", severity: "error", title: "t", detail: "", ids: [1], fix, fixLabel: "替换字体", choices: [{ label: "换成「A」", fix }, { label: "换成「B」", fix }] }], new Map());
+  assert.deepEqual(row.choices, ["换成「A」", "换成「B」"]);
+  assert.deepEqual(parseCheckAction({ kind: "fix", key: "font:x", choice: 1 }), { kind: "fix", key: "font:x", choice: 1 });
+  assert.deepEqual(parseCheckAction({ kind: "fix", key: "font:x", choice: -1 }), { kind: "fix", key: "font:x" });
+});

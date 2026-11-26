@@ -200,7 +200,7 @@ export function createDocCheck(d: DocCheckDeps) {
         if (it?.ids.length && docId !== null) await d.tree.select(docId, it.ids).catch(e => { error = "选不中这些图层：" + ((e as Error)?.message ?? e); sync(); });
         return;
       }
-      case "fix": return fix(a.key);
+      case "fix": return fix(a.key, a.choice);
       case "opt":
         opts[a.name] = a.on; keep(a.name === "copy" ? COPY_KEY : VISUAL_KEY, a.on); sync();
         return;
@@ -209,10 +209,10 @@ export function createDocCheck(d: DocCheckDeps) {
     }
   }
 
-  async function fix(key: string) {
+  async function fix(key: string, choice?: number) {
     const it = issueOf(key);
     if (!it?.fix || docId === null || working.has(key)) return;
-    const f = it.fix, id = docId;
+    const f = (choice !== undefined ? it.choices?.[choice]?.fix : undefined) ?? it.fix, id = docId;
     // the fixes work on the document in front: not on another one switched to meanwhile
     if (d.docId() !== id) { error = "文档已切换：回到这个文档再处理，或重新检查"; sync(); return; }
     working.add(key); fixed.set(key, it); error = ""; sync();
@@ -225,6 +225,11 @@ export function createDocCheck(d: DocCheckDeps) {
       else if (f.kind === "updateLinked") await d.tree.run(id, "updateModified", f.ids);
       else if (f.kind === "relink") await d.tree.run(id, "relink", f.ids);
       else if (f.kind === "setText") { if (!await d.checker.setText(id, f.id, f.from, f.to)) throw new Error("文字已经改过，找不到原文"); }
+      else if (f.kind === "restyle") {
+        const r = await d.checker.restyle(id, f.edits);
+        if (!r.done) throw new Error(r.skipped.slice(0, 2).join("；") || "没有改成");
+        if (r.skipped.length) d.status(`${it.fixLabel ?? "处理"}：${r.skipped.length} 个图层没改成：${r.skipped.slice(0, 2).join("；")}`, "error");
+      }
       d.refresh();
     } catch (e) {
       fixed.delete(key);
