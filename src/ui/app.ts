@@ -26,7 +26,7 @@ import { RATIOS, createExpandEditor } from "./expandEditor.ts";
 import { createToolsView } from "./tools.ts";
 import { type Overlay, connectOverlay } from "../app/overlay.ts";
 import { type GenerateSections, type PanelMode, type PanelParam, isPanelMode, shownPanelMode } from "../core/overlay/generatePanel.ts";
-import { OPEN_APP_HELPER_VERSION, appSettingsOf, hangDocs } from "../core/overlay/protocol.ts";
+import { OPEN_APP_HELPER_VERSION, appSettingsOf, hangDocs, redactSettings } from "../core/overlay/protocol.ts";
 import { attachGenerateSurface } from "./generateSurface.ts";
 import { attachIllustratorBridge } from "../app/illustratorBridge.ts";
 import { attachVariantsSurface } from "./variantsSurface.ts";
@@ -909,7 +909,7 @@ export function mountApp(root: HTMLElement, svc: Services) {
       if (typeof changes.comfyUrl === "string") changes.comfyUrl = normalizeUrl(changes.comfyUrl);
       Object.assign(settings, changes);
       store.saveSettings(settings);
-      log("info", "settings from the WavePlug app", JSON.stringify(changes));
+      log("info", "settings from the WavePlug app", JSON.stringify(redactSettings(changes)));
       if (keys.includes("perfMonitor") || keys.includes("comfyUrl")) syncMonitor();
       if (keys.includes("hangGuard") || keys.includes("hangAutoBackup")) void syncHangGuard();
       if (keys.includes("comfyUrl")) { comfy = svc.comfy(settings.comfyUrl); void checkConn(); }

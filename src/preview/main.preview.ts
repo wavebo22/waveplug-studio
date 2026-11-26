@@ -309,6 +309,19 @@ class MockLayerTree implements LayerTree {
     await sleep(60); this.changed();
   }
   async select(_d: number, ids: number[]) { await sleep(60); this.selected = ids; this.changed(); }
+  async texts(_d: number, ids: number[]) { return new Map(this.raw.filter(l => l.kind === 3 && ids.includes(l.id)).map(l => [l.id, l.name])); }
+  async organize(_d: number, plan: { renames: { id: number; name: string }[]; groups: { name: string; ids: number[] }[] }) {
+    for (const r of plan.renames) { const l = this.raw.find(x => x.id === r.id && x.section !== "end"); if (l) l.name = r.name; }
+    // the ids are adjacent siblings (organize.ts): the group starts above the first and ends below the last
+    for (const g of plan.groups) {
+      const spans = g.ids.map(id => this.block(id)), from = Math.min(...spans.map(s => s[0])), to = Math.max(...spans.map(s => s[1]));
+      const id = Math.max(...this.raw.map(l => l.id)) + 1;
+      this.raw.splice(to, 0, { id: 0, name: "", kind: 13, section: "end", visible: true, locked: false, mask: false });
+      this.raw.splice(from, 0, { id, name: g.name, kind: 7, section: "start", visible: true, locked: false, mask: false });
+    }
+    await sleep(300); this.changed();
+    return { done: plan.renames.length + plan.groups.length, skipped: [] };
+  }
   async setVisible(_d: number, ids: number[], visible: boolean) { for (const l of this.raw) if (ids.includes(l.id)) l.visible = visible; await sleep(60); this.changed(); }
   /** a layer's records in the flat list: itself, or a group from its start to its end marker */
   private block(id: number): [number, number] {
@@ -437,7 +450,23 @@ async function boot() {
     async pickLauncher() { return "J:\\AI things\\ComfyUI\\ComfyUI_windows_portable\\run_nvidia_gpu.bat"; },
     async launch() { setTimeout(() => { comfy.online = true; }, 5000); return null; },
     version: "0.1.0 preview",
+    // a stand-in for DeepSeek: renames default-looking names and groups the first two layers listed
+    aiFetch: (async (_url: string, init: RequestInit) => {
+      const body = JSON.parse(String(init.body));
+      const lines = String(body.messages[1].content).split("\n").filter(l => l.startsWith("{")).map(l => JSON.parse(l));
+      const free = lines.filter(l => !l.fixed);
+      const renames = free.filter(l => /^(图层|矩形|组|碎片|Layer)\s*\d|拷贝/.test(l.name)).slice(0, 40).map(l => ({ id: l.id, name: l.text ? String(l.text).slice(0, 8) : (l.kind === "group" ? "区块 " : "元素 ") + l.id }));
+      const pair = free.filter(l => l.kind !== "artboard" && l.parent === free.find(f => f.kind !== "artboard" && f.kind !== "group")?.parent);
+      const top = pair.slice(0, 2).map(l => l.id);
+      await sleep(1200);
+      const content = JSON.stringify({ renames, groups: [{ name: "顶部区域", ids: top }] });
+      return { ok: true, status: 200, text: async () => JSON.stringify({ model: "mock", choices: [{ finish_reason: "stop", message: { content } }], usage: { prompt_tokens: 1, completion_tokens: 1 } }) } as unknown as Response;
+    }) as unknown as typeof fetch,
   };
+  try {
+    const s = JSON.parse(localStorage.getItem("wp.settings") ?? "{}");
+    if (!s.deepseekKey) localStorage.setItem("wp.settings", JSON.stringify({ ...s, deepseekKey: "sk-preview" }));
+  } catch { /* preview only */ }
   mountApp(document.getElementById("app")!, svc);
   mountLayersPanel(document.getElementById("layers-app")!, svc, () => true).show();
 

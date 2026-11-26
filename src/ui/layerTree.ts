@@ -6,6 +6,7 @@
 // stay smooth.
 
 import { groupSelectionLayers } from "../core/layers/groupSelection.ts";
+import { createAiOrganize } from "./aiOrganize.ts";
 import { crumb, log } from "../app/log.ts";
 import { resultText } from "../core/layers/smart.ts";
 import { ThumbCache, thumbRetryDelay } from "../core/layers/thumbs.ts";
@@ -178,7 +179,7 @@ function coalesce<T>(ms: number, fn: (v: T) => void): ((v: T) => void) & { cance
   return f;
 }
 
-export function createLayerTreeView(tree: LayerTree, status: Status, tools?: LayerTools, overlay?: Overlay, canvasView?: (docId: number) => Promise<CanvasView | null>, exportLayerPng?: PsHost["exportLayerPng"], docVersion?: PsHost["docVersion"], layerDragInfo?: PsHost["layerDragInfo"], illustrator?: { ready(): boolean; push(docId: number, ids: number[]): Promise<number>; pushBoard(docId: number, layers: readonly TreeLayer[], selected: readonly number[]): Promise<{ count: number; name: string; notes: string[] }>; linkOf(docId: number, layerId: number): string | null; ask(kind: "update" | "reveal", link: string): void }, hintBar?: HintBar) {
+export function createLayerTreeView(tree: LayerTree, status: Status, tools?: LayerTools, overlay?: Overlay, canvasView?: (docId: number) => Promise<CanvasView | null>, exportLayerPng?: PsHost["exportLayerPng"], docVersion?: PsHost["docVersion"], layerDragInfo?: PsHost["layerDragInfo"], illustrator?: { ready(): boolean; push(docId: number, ids: number[]): Promise<number>; pushBoard(docId: number, layers: readonly TreeLayer[], selected: readonly number[]): Promise<{ count: number; name: string; notes: string[] }>; linkOf(docId: number, layerId: number): string | null; ask(kind: "update" | "reveal", link: string): void }, hintBar?: HintBar, assistant?: { fetch: typeof fetch; settings(): { key: string; model: string } }) {
   let docId: number | null = null, layers: TreeLayer[] = [], users = new Map<string, number>(), canvas = { width: 0, height: 0 };
   /** the layers by id (kept with `layers`): lookups in drawing and dragging, which run for every row */
   let byId = new Map<number, TreeLayer>();
@@ -3208,7 +3209,7 @@ export function createLayerTreeView(tree: LayerTree, status: Status, tools?: Lay
     if (!wasSelected) void clickRow(id, { ctrl: false, shift: false });
     // clickRow may first leave a mask view (async): the menu is for the right-clicked row then
     const doc = docId, ids = wasSelected ? selectedLayers().map(l => l.id) : [id];
-    const menu = contextMenu({ layers, selected: new Set(ids), users, smartTools: !!tools, colors: LABELS.map(([k, name]) => [k, name] as const),
+    const menu = contextMenu({ layers, selected: new Set(ids), users, smartTools: !!tools, assistant: !!aiOrganize, colors: LABELS.map(([k, name]) => [k, name] as const),
       send: { docs: workbench.docs().filter(d => d.docId !== docId).map(d => ({ id: d.docId, name: d.name })), prefs: workbenchState().prefs, illustrator: !!illustrator?.ready(), illustratorLink: !!illustrator?.linkOf(doc, id) } });
     const native = overlay?.openMenu(menu.title, menu.items) ?? null;
     if (native) {
@@ -3236,6 +3237,7 @@ export function createLayerTreeView(tree: LayerTree, status: Status, tools?: Lay
     else if (kind === "dist") void run("distribute", ids, arg);
     else if (kind === "arrange") arrange(arg as "forward" | "backward" | "front" | "back");
     else if (kind === "tool") void runTool(arg, ids);
+    else if (kind === "assist" && arg === "organize") aiOrganize?.open();
     else if (kind === "send" && arg === "ai") void sendToIllustrator(ids);
     else if (kind === "send" && arg === "aiboard") void sendBoardToIllustrator();
     else if (kind === "ai" && docId !== null) {
@@ -3518,6 +3520,14 @@ export function createLayerTreeView(tree: LayerTree, status: Status, tools?: Lay
   // whether the pointer is over one of them while dragging is decided by locateDrag's geometry
   const bar = h("div", { class: "lt-bar" }, linkBtn, fxBtn, maskBtn, adjBtn, groupBtn, newBtn, trashBtn, stampBtn);
 
+  // ── AI 整理 (DeepSeek): the button beside ☰ and the right-click menu's row (aiOrganize.ts) ──
+  const aiOrganize = assistant ? createAiOrganize({
+    tree, status, fetch: assistant.fetch, settings: assistant.settings,
+    state: () => ({ docId, layers, selected, width: canvas.width, height: canvas.height }),
+    refresh: () => void refresh(),
+    host: () => el.parentElement ?? el,
+  }) : null;
+
   // ── the panel menu (☰, as the menu at the top right of Photoshop's Layers panel) ──
   const SHORTCUT_KEY = "wp.layers.shortcuts";
   let shortcutsOn = localStorage.getItem(SHORTCUT_KEY) !== "off";
@@ -3561,7 +3571,7 @@ export function createLayerTreeView(tree: LayerTree, status: Status, tools?: Lay
   }
   listen(document, "keydown", e => {
     const k = e as KeyboardEvent;
-    if (!shortcutsOn || docId === null || drag?.active || renaming !== null || deleting || !pointerIn || typing(document.activeElement)) return;
+    if (!shortcutsOn || docId === null || drag?.active || renaming !== null || deleting || !pointerIn || typing(document.activeElement) || aiOrganize?.isOpen()) return;
     const ctrl = k.ctrlKey || k.metaKey, key = (k.key ?? "").toLowerCase(), code = k.code ?? "";
     const left = code === "BracketLeft" || key === "[" || key === "{", right = code === "BracketRight" || key === "]" || key === "}";
     const sel = selectedLayers(), now = sel.map(l => l.id), doc = docId;
@@ -3872,7 +3882,7 @@ export function createLayerTreeView(tree: LayerTree, status: Status, tools?: Lay
     props, lockRow,
     list,
     workbench.el,
-    h("div", { class: "lt-foot" }, h("div", { class: "lt-foot-btns" }, menuBtn, frameBtn, nativeBtn, ...(WORKBENCH_ENABLED ? [workbench.toggleButton] : [])), bar));
+    h("div", { class: "lt-foot" }, h("div", { class: "lt-foot-btns" }, menuBtn, ...(aiOrganize ? [aiOrganize.button] : []), frameBtn, nativeBtn, ...(WORKBENCH_ENABLED ? [workbench.toggleButton] : [])), bar));
   render();
   return { el, refresh, fileDropSpot, clearFileDropSpot, docId: () => docId };
 }

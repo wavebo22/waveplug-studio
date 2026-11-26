@@ -121,6 +121,7 @@ const services: Services = {
   layers: layerTree,
   bridgePs,
   comfy: base => new ComfyClient(base, { fetch: uxpFetch, WebSocket }),
+  aiFetch: uxpFetch,
   diagnose,
   debugSave: DEV ? (name, png) => {
     void (async () => {

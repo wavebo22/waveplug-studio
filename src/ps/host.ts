@@ -245,6 +245,11 @@ export interface LayerTree {
   run(docId: number, action: LayerAction, ids: number[], arg?: string, opts?: RunOptions): Promise<void | LayerDeleteResult>;
   /** Makes exactly `ids` the selected layers (none when empty). */
   select(docId: number, ids: number[]): Promise<void>;
+  /** AI 整理: the text of these text layers (others are left out). Read only. */
+  texts(docId: number, ids: number[]): Promise<Map<number, string>>;
+  /** AI 整理: renames layers and puts adjacent siblings into new named groups
+   *  (core/assistant/organize.ts checked the plan), one undo step. */
+  organize(docId: number, plan: { renames: { id: number; name: string }[]; groups: { name: string; ids: number[] }[] }): Promise<ToolResult>;
   /** Shows / hides `ids` (one Photoshop call, however many: a drag down the eye column). */
   setVisible(docId: number, ids: number[], visible: boolean): Promise<void>;
   /** Runs the moves (core/layers/tree.ts dropPlan) as one undo step. */

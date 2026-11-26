@@ -193,7 +193,7 @@ export type OverlayEvent =
 /** The helper build this plugin's protocol needs (native/overlay/Cargo.toml). Bump both together:
  *  an older helper still connects, but e.g. can't arbitrate drag verdicts (drag_target.rs), and
  *  without this check a stale exe looks exactly like a bug in new code. */
-export const EXPECTED_HELPER_VERSION = "0.29.0";
+export const EXPECTED_HELPER_VERSION = "0.30.0";
 /** the native 编辑工作台 window (panel/shelf.rs) needs at least this helper; older: the in-panel workbench */
 export const WORKBENCH_HELPER_VERSION = "0.11.0";
 /** the 外置删除区 (layer-drag-trash) needs at least this helper; older: the panel's left red rail */
@@ -211,8 +211,17 @@ export const BRIDGE_HELPER_VERSION = "0.15.0";
 export const APP_SETTING_KEYS: Record<string, "flag" | "off" | "text" | "dev"> = {
   helperAutoStart: "flag", perfMonitor: "flag", hangGuard: "flag", hangAutoBackup: "flag",
   comfyUrl: "text", comfyLaunch: "text", comfyAutoStartWithPhotoshop: "flag", comfyCloseWithPhotoshop: "flag", comfyNoBrowser: "flag",
-  debugFiles: "off", devLoad: "dev",
+  debugFiles: "off", devLoad: "dev", deepseekKey: "text", deepseekModel: "text",
 };
+
+/** Settings never written to the log or a diagnostic report as they are. */
+export const SECRET_SETTING_KEYS = ["deepseekKey"];
+/** `settings` with every secret replaced by whether it is set. */
+export function redactSettings<T extends Record<string, unknown>>(settings: T): T {
+  const out: Record<string, unknown> = { ...settings };
+  for (const k of SECRET_SETTING_KEYS) if (k in out) out[k] = out[k] ? "（已填写）" : "";
+  return out as T;
+}
 
 /** open-app (the panel's settings button opens the app window's 功能设置) needs at least this helper */
 export const OPEN_APP_HELPER_VERSION = "0.17.0";

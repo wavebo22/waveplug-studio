@@ -1,7 +1,7 @@
 // WavePlug 图层: the layer list as a panel of its own, which docks and groups with Photoshop's
 // panels like the Layers panel does. Refreshes only while it is shown.
 
-import type { Services } from "../app/services.ts";
+import { type Services, store } from "../app/services.ts";
 import { createLayerTreeView } from "./layerTree.ts";
 import { askIllustrator, linkOfLayer, pushBoardToIllustrator, pushToIllustrator } from "../app/illustratorBridge.ts";
 import { every, h, replace } from "./dom.ts";
@@ -26,7 +26,9 @@ export function mountLayersPanel(root: HTMLElement, svc: Services, isShown: () =
       pushBoard: (docId, layers, selected) => svc.overlay?.illustrator ? pushBoardToIllustrator(svc.overlay, svc.host, svc.bridgePs!, docId, layers, selected) : Promise.reject(new Error("Illustrator 的 WaveLayer 面板没有连接")),
       linkOf: (docId, layerId) => linkOfLayer(docId, layerId),
       ask: (kind, link) => { if (svc.overlay) askIllustrator(svc.overlay, kind, link); },
-    } : undefined, hintBar);
+    } : undefined, hintBar,
+    // AI 整理: the key and the model come from 功能设置 (the Studio panel keeps them in its settings)
+    svc.aiFetch ? { fetch: svc.aiFetch, settings: () => { const s = store.settings(); return { key: s.deepseekKey ?? "", model: s.deepseekModel ?? "" }; } } : undefined);
   const dropEl = h("div", { class: "lp-drop" });
   const panel = h("div", { class: "lp" }, view.el, hintBar.el, dropEl);
   replace(root, panel);

@@ -32,6 +32,8 @@ export interface ContextMenuInput {
   smartTools: boolean;
   /** 图层颜色 labels: Photoshop's key and its name */
   colors: readonly (readonly [string, string])[];
+  /** AI 助手 is available: row "assist:organize" (AI 整理图层) */
+  assistant?: boolean;
   /** 发送到: the other open documents, and the settings shown as check rows */
   send?: {
     docs: readonly { id: number; name: string }[];
@@ -119,6 +121,7 @@ export function contextMenu(input: ContextMenuInput): { title: string; items: Me
     act("layerStyle"), act("rename"), act("duplicate"), act("delete"),
     sep,
     act("groupLayers"), when("ungroup"),
+    input.assistant ? { id: "assist:organize", label: "AI 整理（重命名 + 归组）…", hint: "DeepSeek", enabled: true } : null,
     sub("合并", rows(act("merge"), act("mergeDown"), act("mergeVisible"), act("flatten"))),
     sub("转换", rows(
       act("convertSmart"),

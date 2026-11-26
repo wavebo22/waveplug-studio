@@ -116,3 +116,10 @@ test("WavePlug 程序的功能设置: only known keys, right kinds", async () =>
   assert.equal(view.comfyLaunch, "");
   assert.deepEqual(parseOverlayEvent('{"type":"app-settings-set","changes":{"hangAutoBackup":false}}'), { type: "app-settings-set", changes: { hangAutoBackup: false } });
 });
+
+test("右键菜单: AI 整理 only when the AI assistant is available, after 编组", () => {
+  const layers = tree();
+  const ids = (assistant: boolean) => menuIds(contextMenu({ layers, selected: new Set([4]), users: contentUsers(layers), smartTools: true, colors: COLORS, assistant }).items);
+  assert.ok(ids(true).includes("assist:organize"));
+  assert.ok(!ids(false).includes("assist:organize"));
+});

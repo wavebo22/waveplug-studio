@@ -18,6 +18,8 @@ export interface Services {
   bridgePs?: import("./illustratorBridge.ts").BridgePs;
   /** Created on demand from the configured address. */
   comfy(base: string): Comfy;
+  /** fetch for the AI assistant's requests (DeepSeek); without it the AI features are not shown */
+  aiFetch?: typeof fetch;
   pickJson(): Promise<{ name: string; text: string } | null>;
   pickImage(): Promise<PickedImage | null>;
   saveImage(png: Uint8Array, suggested: string): Promise<boolean>;
@@ -66,6 +68,10 @@ export interface Settings {
   hangGuard?: boolean;
   /** 卡死保护: start the backup as soon as the hang is noticed; default true */
   hangAutoBackup?: boolean;
+  /** AI 助手 (DeepSeek): the API key and the model, from 功能设置 in the WavePlug program; the key
+   *  never goes into the log or the diagnostics */
+  deepseekKey?: string;
+  deepseekModel?: string;
   /** 生成 (the AI modes) or 工具 */
   view?: "generate" | "tools";
   /** panel mode and the workflow last used in each mode */

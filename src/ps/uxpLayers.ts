@@ -515,6 +515,47 @@ export class UxpLayerTree implements LayerTree {
     return "#" + [c.red, c.grain ?? c.green, c.blue].map(x => v(x).toString(16).padStart(2, "0")).join("");
   }
 
+  async texts(docId: number, ids: number[]): Promise<Map<number, string>> {
+    const out = new Map<number, string>();
+    // in chunks: one get per layer; a failed one (not a text layer any more) answers with an error
+    for (let i = 0; i < ids.length; i += 50) {
+      const chunk = ids.slice(i, i + 50);
+      const res = await play(chunk.map(id => ({ _obj: "get", _target: [{ _property: "textKey" }, { _ref: "layer", _id: id }, { _ref: "document", _id: docId }] })));
+      res.forEach((r, k) => { const t = r?.textKey?.textKey; if (typeof t === "string" && t.trim()) out.set(chunk[k], t); });
+    }
+    return out;
+  }
+
+  async organize(docId: number, plan: { renames: { id: number; name: string }[]; groups: { name: string; ids: number[] }[] }): Promise<ToolResult> {
+    requireActiveDoc(docId);
+    const skipped: string[] = [];
+    const done = await whenFree(() => step("WavePlug AI 整理图层", docId, async () => {
+      requireActiveDoc(docId);
+      const doc = docById(docId);
+      let n = 0;
+      for (const { id, name } of plan.renames) {
+        const layer = findLayer(doc.layers, id);
+        if (!layer) { skipped.push(`#${id}：图层已不存在`); continue; }
+        try { await act({ _obj: "set", _target: [{ _ref: "layer", _id: id }], to: { _obj: "layer", name } }); n++; }
+        catch (e) { skipped.push(`${layer.name}：${(e as Error)?.message ?? e}`); }
+      }
+      for (const g of plan.groups) {
+        const ids = g.ids.filter(id => findLayer(doc.layers, id));
+        if (ids.length < 2) { skipped.push(`新组「${g.name}」：图层已不存在`); continue; }
+        try {
+          await selectLayers(ids);
+          // Photoshop's 从图层新建组 with the name, as its action recorder writes it
+          await act({ _obj: "make", _target: [{ _ref: "layerSection" }], from: { _ref: "layer", _enum: "ordinal", _value: "targetEnum" },
+            using: { _obj: "layerSection", name: g.name } });
+          n++;
+        } catch (e) { skipped.push(`新组「${g.name}」：${(e as Error)?.message ?? e}`); }
+      }
+      return n;
+    }));
+    log("info", "ai organize", JSON.stringify({ renames: plan.renames.length, groups: plan.groups.length, done, skipped }));
+    return { done, skipped };
+  }
+
   async select(_docId: number, ids: number[]) {
     requireActiveDoc(_docId);
     if (ids.length) {

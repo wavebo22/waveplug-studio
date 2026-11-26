@@ -155,6 +155,7 @@ fn default_settings() -> Map<String, Value> {
         "helperAutoStart": true, "perfMonitor": true, "hangGuard": true, "hangAutoBackup": true,
         "comfyUrl": "http://127.0.0.1:8188", "comfyLaunch": "", "comfyAutoStartWithPhotoshop": true,
         "comfyCloseWithPhotoshop": true, "comfyNoBrowser": true, "debugFiles": false,
+        "deepseekKey": "", "deepseekModel": "deepseek-chat",
     });
     v.as_object().cloned().unwrap_or_default()
 }
@@ -173,6 +174,21 @@ fn known_settings() -> Map<String, Value> {
 }
 
 /// Changes from 功能设置: to the panel now, or kept for when it connects.
+/// Settings never written to the log or the diagnostics as they are (protocol.ts SECRET_SETTING_KEYS).
+const SECRET_KEYS: [&str; 1] = ["deepseekKey"];
+
+/// `v` with every secret replaced by whether it is set.
+fn redacted(v: &Map<String, Value>) -> Map<String, Value> {
+    let mut out = v.clone();
+    for k in SECRET_KEYS {
+        if let Some(x) = out.get_mut(k) {
+            let set = x.as_str().is_some_and(|s| !s.is_empty());
+            *x = json!(if set { "（已填写）" } else { "" });
+        }
+    }
+    out
+}
+
 fn apply_plugin_changes(changes: Map<String, Value>) {
     if changes.is_empty() {
         return;
@@ -183,7 +199,7 @@ fn apply_plugin_changes(changes: Map<String, Value>) {
     }
     save_known(&cur);
     *PLUGIN_SETTINGS.lock().unwrap() = Some(cur);
-    crate::log::line(format!("app settings changed: {}", Value::Object(changes.clone())));
+    crate::log::line(format!("app settings changed: {}", Value::Object(redacted(&changes))));
     if PLUGIN_ONLINE.load(Ordering::SeqCst) {
         crate::server::send(&Event::AppSettingsSet { changes: Value::Object(changes) });
     } else {
@@ -310,6 +326,10 @@ pub struct AppWindow {
     /// the comfy fields being typed (sent when they lose the keyboard)
     comfy_url: Option<String>,
     comfy_launch: Option<String>,
+    /// AI 助手's fields being typed (sent when they lose the keyboard); whether the key is shown
+    deepseek_key: Option<String>,
+    deepseek_model: Option<String>,
+    deepseek_show: bool,
     /// the update source has been asked once since the window opened
     auto_checked: bool,
     confirm_publish: bool,
@@ -372,6 +392,9 @@ impl AppWindow {
             uninstall_ai: true,
             comfy_url: None,
             comfy_launch: None,
+            deepseek_key: None,
+            deepseek_model: None,
+            deepseek_show: false,
             auto_checked: false,
             confirm_publish: false,
             last_git: None,
@@ -1139,6 +1162,28 @@ impl AppWindow {
             toggle(ui, &mut changes, "hangGuard", flag("hangGuard"), "Photoshop 卡死时提示并备份恢复文件", "没有响应时弹出提示：等待、备份自动恢复文件或关闭 Photoshop");
             toggle(ui, &mut changes, "hangAutoBackup", flag("hangAutoBackup"), "发现卡死时立即备份", "不等点按钮就开始复制自动恢复文件");
         });
+        card(ui, "AI 助手（DeepSeek）", |ui| {
+            ui.label(small("用于 WavePlug 图层面板的「AI 整理」：重命名图层、把相关图层归组。Key 只保存在这台电脑上，日志和诊断信息里不会出现", theme::TEXT_3));
+            ui.label(small("API Key（在 platform.deepseek.com 的 API keys 页面创建）", theme::TEXT_3));
+            ui.horizontal(|ui| {
+                let key = self.deepseek_key.get_or_insert_with(|| text("deepseekKey"));
+                let w = (ui.available_width() - 70.0).max(120.0);
+                if ui.add(egui::TextEdit::singleline(key).password(!self.deepseek_show).hint_text("sk-…").desired_width(w)).lost_focus() {
+                    changes.insert("deepseekKey".into(), json!(key.trim()));
+                }
+                let label = if self.deepseek_show { "隐藏" } else { "显示" };
+                if ui.button(label).clicked() {
+                    self.deepseek_show = !self.deepseek_show;
+                }
+            });
+            ui.label(small("模型（一般不用改）", theme::TEXT_3));
+            let model = self.deepseek_model.get_or_insert_with(|| text("deepseekModel"));
+            if ui.add(egui::TextEdit::singleline(model).hint_text("deepseek-chat").desired_width(f32::INFINITY)).lost_focus() {
+                changes.insert("deepseekModel".into(), json!(model.trim()));
+            }
+            let set = !text("deepseekKey").trim().is_empty();
+            ui.label(small(if set { "已填写 Key" } else { "还没有填写 Key：AI 整理不能用" }, if set { theme::OK } else { theme::TEXT_3 }));
+        });
         card(ui, "排查问题", |ui| {
             toggle(ui, &mut changes, "debugFiles", s.get("debugFiles").and_then(Value::as_bool).unwrap_or(false), "保存调试文件（图片较大，仅排查时打开）", "每次生成时把发送、返回的图片和提交的工作流存到 reports\\debug_*（从开发文件夹加载时）");
             if ui.button("导出诊断信息").on_hover_text("日志、设置和 Photoshop 插件的诊断报告复制到桌面上的一个文件夹，发给开发者").clicked() {
@@ -1155,6 +1200,12 @@ impl AppWindow {
         }
         if changes.contains_key("comfyLaunch") {
             self.comfy_launch = None;
+        }
+        if changes.contains_key("deepseekKey") {
+            self.deepseek_key = None;
+        }
+        if changes.contains_key("deepseekModel") {
+            self.deepseek_model = None;
         }
         if !changes.is_empty() {
             apply_plugin_changes(changes);
@@ -1294,7 +1345,7 @@ fn export_diagnostics(cfg: &Config) -> Result<PathBuf, String> {
         "app": env!("CARGO_PKG_VERSION"),
         "installDir": paths::install_dir().map(|d| d.display().to_string()),
         "config": serde_json::to_value(cfg).unwrap_or(Value::Null),
-        "pluginSettings": PLUGIN_SETTINGS.lock().ok().and_then(|s| s.clone()),
+        "pluginSettings": PLUGIN_SETTINGS.lock().ok().and_then(|s| s.as_ref().map(redacted)),
         "plugin": install::installed_plugin(),
         "panel": install::installed_panel(),
     });
@@ -1392,6 +1443,7 @@ mod tests {
         let d = default_settings();
         assert_eq!(d.get("debugFiles"), Some(&json!(false)));
         assert_eq!(d.get("comfyUrl"), Some(&json!("http://127.0.0.1:8188")));
+        assert_eq!(d.get("deepseekModel"), Some(&json!("deepseek-chat")));
         assert_eq!(Tab::named("settings"), Tab::Settings);
         assert_eq!(Tab::named("x"), Tab::Overview);
     }
@@ -1414,6 +1466,18 @@ mod tests {
     fn comfy_address_is_checked_by_host_and_port() {
         assert_eq!(reachable("http://127.0.0.1:1/"), Some(false));
         assert_eq!(reachable(""), None);
+    }
+
+    #[test]
+    fn the_deepseek_key_never_reaches_the_log() {
+        let mut m = Map::new();
+        m.insert("deepseekKey".into(), json!("sk-secret"));
+        m.insert("comfyUrl".into(), json!("http://x"));
+        let r = redacted(&m);
+        assert_eq!(r.get("deepseekKey"), Some(&json!("（已填写）")));
+        assert_eq!(r.get("comfyUrl"), Some(&json!("http://x")));
+        m.insert("deepseekKey".into(), json!(""));
+        assert_eq!(redacted(&m).get("deepseekKey"), Some(&json!("")));
     }
 
     #[test]
