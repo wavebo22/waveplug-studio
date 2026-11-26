@@ -23,6 +23,9 @@ export interface AiOrganizeDeps {
   settings(): { key: string; model: string };
   /** where the sheet goes (a positioned element that the sheet covers) */
   host(): HTMLElement;
+  /** the sheet opened or closed: UXP draws native text fields above everything regardless of z-index,
+   *  so the panel takes its own (the search box) out of the DOM while the sheet is up */
+  onOpenChange?(open: boolean): void;
 }
 
 const EXTRA_KEY = "wp.ai.organize.extra", RENAME_ONLY_KEY = "wp.ai.organize.renameOnly";
@@ -34,7 +37,11 @@ export function createAiOrganize(d: AiOrganizeDeps) {
   const button = h("button", { class: "lt-head-btn", title: "AI 整理：用 DeepSeek 给图层起清楚的中文名字，并把属于同一元素的相邻图层归进新组。先列出方案，勾选后一步执行，可以 Ctrl+Z 撤销。选中组：整理组内；选中多个图层：整理它们；否则整理整个文档。DeepSeek 看不到图像，只根据图层类型、文字内容、位置大小、智能对象文件名等判断。API Key 在 WavePlug 程序 › 功能设置 › AI 助手 里填写" }, "AI 整理");
   button.addEventListener("click", () => open());
 
-  function close() { sheet?.remove(); sheet = null; }
+  function close() {
+    if (!sheet) return;
+    sheet.remove(); sheet = null;
+    d.onOpenChange?.(false);
+  }
 
   function open() {
     if (sheet) return;
@@ -76,6 +83,7 @@ export function createAiOrganize(d: AiOrganizeDeps) {
         result),
       h("div", { class: "sheet-foot" }, msg, h("button", { class: "btn", onClick: close }, "取消"), againBtn, applyBtn));
     d.host().append(sheet);
+    d.onOpenChange?.(true);
     render();
     void analyse();
 

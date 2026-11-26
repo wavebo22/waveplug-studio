@@ -3526,6 +3526,11 @@ export function createLayerTreeView(tree: LayerTree, status: Status, tools?: Lay
     state: () => ({ docId, layers, selected, width: canvas.width, height: canvas.height }),
     refresh: () => void refresh(),
     host: () => el.parentElement ?? el,
+    // taken out, not hidden: a visibility toggle coincided with a host crash in 0.1.4 (DEVELOPMENT.md)
+    onOpenChange: open => {
+      if (open) searchBox.remove();
+      else if (!searchBox.parentNode) findRow.insertBefore(searchBox, findRow.firstChild);
+    },
   }) : null;
 
   // ── the panel menu (☰, as the menu at the top right of Photoshop's Layers panel) ──
