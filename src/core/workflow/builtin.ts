@@ -98,30 +98,6 @@ export const BUILTIN_PROFILES: readonly Profile[] = [
      "title": "TextEncodeQwenImage21GH"
     }
    },
-   "179": {
-    "class_type": "QwenImagePromptOptimizer",
-    "inputs": {
-     "用户提示词": [
-      "22",
-      0
-     ],
-     "文生图模型": "Qwen-Image-2.1-PE-T2I.Q5_K_S.gguf",
-     "图生图模型": "Qwen-Image-2.1-PE-I2I.Q5_K_S.gguf",
-     "视觉模型": "Qwen-Image-2.1-PE-I2I.mmproj-bf16.gguf",
-     "输出语言": "自动",
-     "透明背景": false,
-     "种子值": 666,
-     "种子模式": "固定",
-     "卸载模型": "自动",
-     "图像_01": [
-      "250",
-      0
-     ]
-    },
-    "_meta": {
-     "title": "QwenImagePromptOptimizer"
-    }
-   },
    "201": {
     "class_type": "GH_MaskCropV2",
     "inputs": {
@@ -389,7 +365,7 @@ export const BUILTIN_PROFILES: readonly Profile[] = [
     "class_type": "TextEncodeQwenImage21GH",
     "inputs": {
      "prompt": [
-      "305",
+      "22",
       0
      ],
      "negative_prompt": "",
@@ -616,19 +592,6 @@ export const BUILTIN_PROFILES: readonly Profile[] = [
      "title": "BasicGuider"
     }
    },
-   "277": {
-    "class_type": "GoohaiDisplayAny",
-    "inputs": {
-     "gh_input_type": "STRING",
-     "Any": [
-      "179",
-      0
-     ]
-    },
-    "_meta": {
-     "title": "GoohaiDisplayAny"
-    }
-   },
    "303": {
     "class_type": "LoadImage",
     "inputs": {
@@ -646,35 +609,6 @@ export const BUILTIN_PROFILES: readonly Profile[] = [
     },
     "_meta": {
      "title": "# 4.最大采样尺寸（长边）"
-    }
-   },
-   "305": {
-    "class_type": "easy ifElse",
-    "inputs": {
-     "boolean": [
-      "306",
-      0
-     ],
-     "on_true": [
-      "277",
-      0
-     ],
-     "on_false": [
-      "22",
-      0
-     ]
-    },
-    "_meta": {
-     "title": "easy ifElse"
-    }
-   },
-   "306": {
-    "class_type": "easy boolean",
-    "inputs": {
-     "value": true
-    },
-    "_meta": {
-     "title": "# 3.提示词优化"
     }
    },
    "307": {
@@ -725,14 +659,6 @@ export const BUILTIN_PROFILES: readonly Profile[] = [
     "classType": "easy int",
     "title": "# 4.最大采样尺寸（长边）",
     "label": "最大采样尺寸（长边）"
-   },
-   {
-    "role": "param",
-    "nodeId": "306",
-    "input": "value",
-    "classType": "easy boolean",
-    "title": "# 3.提示词优化",
-    "label": "提示词优化"
    },
    {
     "role": "param",
@@ -1598,10 +1524,7 @@ export const BUILTIN_PROFILES: readonly Profile[] = [
    "170": {
     "class_type": "GoohaiRouteBlocker",
     "inputs": {
-     "是否阻断": [
-      "179",
-      2
-     ],
+     "是否阻断": false,
      "阻断模式": "仅输出空值",
      "any": [
       "193",
@@ -1624,30 +1547,6 @@ export const BUILTIN_PROFILES: readonly Profile[] = [
     },
     "_meta": {
      "title": "是否禁用遮罩"
-    }
-   },
-   "179": {
-    "class_type": "QwenImagePromptOptimizer",
-    "inputs": {
-     "用户提示词": [
-      "22",
-      0
-     ],
-     "文生图模型": "Qwen-Image-2.1-PE-T2I.Q5_K_S.gguf",
-     "图生图模型": "Qwen-Image-2.1-PE-I2I.Q5_K_S.gguf",
-     "视觉模型": "Qwen-Image-2.1-PE-I2I.mmproj-bf16.gguf",
-     "输出语言": "自动",
-     "透明背景": false,
-     "种子值": 1445299085,
-     "种子模式": "随机",
-     "卸载模型": "自动",
-     "图像_01": [
-      "193",
-      0
-     ]
-    },
-    "_meta": {
-     "title": "QwenImagePromptOptimizer"
     }
    },
    "192": {
@@ -1695,7 +1594,7 @@ export const BUILTIN_PROFILES: readonly Profile[] = [
     "inputs": {
      "gh_input_type": "STRING",
      "Any": [
-      "179",
+      "22",
       0
      ]
     },
@@ -2087,30 +1986,6 @@ export const BUILTIN_PROFILES: readonly Profile[] = [
      "title": "TextEncodeQwenImage21GH"
     }
    },
-   "179": {
-    "class_type": "QwenImagePromptOptimizer",
-    "inputs": {
-     "用户提示词": [
-      "310",
-      0
-     ],
-     "文生图模型": "Qwen-Image-2.1-PE-T2I.Q5_K_S.gguf",
-     "图生图模型": "Qwen-Image-2.1-PE-I2I.Q5_K_S.gguf",
-     "视觉模型": "Qwen-Image-2.1-PE-I2I.mmproj-bf16.gguf",
-     "输出语言": "自动",
-     "透明背景": false,
-     "种子值": 666,
-     "种子模式": "固定",
-     "卸载模型": "自动",
-     "图像_01": [
-      "250",
-      0
-     ]
-    },
-    "_meta": {
-     "title": "QwenImagePromptOptimizer"
-    }
-   },
    "201": {
     "class_type": "GH_MaskCropV2",
     "inputs": {
@@ -2364,7 +2239,7 @@ export const BUILTIN_PROFILES: readonly Profile[] = [
     "class_type": "TextEncodeQwenImage21GH",
     "inputs": {
      "prompt": [
-      "305",
+      "310",
       0
      ],
      "negative_prompt": "",
@@ -2588,19 +2463,6 @@ export const BUILTIN_PROFILES: readonly Profile[] = [
      "title": "BasicGuider"
     }
    },
-   "277": {
-    "class_type": "GoohaiDisplayAny",
-    "inputs": {
-     "gh_input_type": "STRING",
-     "Any": [
-      "179",
-      0
-     ]
-    },
-    "_meta": {
-     "title": "GoohaiDisplayAny"
-    }
-   },
    "303": {
     "class_type": "LoadImage",
     "inputs": {
@@ -2618,35 +2480,6 @@ export const BUILTIN_PROFILES: readonly Profile[] = [
     },
     "_meta": {
      "title": "# 4.最大采样尺寸（长边）"
-    }
-   },
-   "305": {
-    "class_type": "easy ifElse",
-    "inputs": {
-     "boolean": [
-      "306",
-      0
-     ],
-     "on_true": [
-      "277",
-      0
-     ],
-     "on_false": [
-      "310",
-      0
-     ]
-    },
-    "_meta": {
-     "title": "easy ifElse"
-    }
-   },
-   "306": {
-    "class_type": "easy boolean",
-    "inputs": {
-     "value": true
-    },
-    "_meta": {
-     "title": "# 3.提示词优化"
     }
    },
    "307": {
@@ -2740,14 +2573,6 @@ export const BUILTIN_PROFILES: readonly Profile[] = [
     "classType": "easy int",
     "title": "# 4.最大采样尺寸（长边）",
     "label": "最大采样尺寸（长边）"
-   },
-   {
-    "role": "param",
-    "nodeId": "306",
-    "input": "value",
-    "classType": "easy boolean",
-    "title": "# 3.提示词优化",
-    "label": "提示词优化"
    },
    {
     "role": "param",

@@ -155,7 +155,7 @@ fn default_settings() -> Map<String, Value> {
         "helperAutoStart": true, "perfMonitor": true, "hangGuard": true, "hangAutoBackup": true,
         "comfyUrl": "http://127.0.0.1:8188", "comfyLaunch": "", "comfyAutoStartWithPhotoshop": true,
         "comfyCloseWithPhotoshop": true, "comfyNoBrowser": true, "debugFiles": false,
-        "deepseekKey": "", "deepseekModel": "deepseek-chat",
+        "deepseekKey": "", "deepseekModel": "deepseek-chat", "deepseekPromptImage": true,
     });
     v.as_object().cloned().unwrap_or_default()
 }
@@ -1163,7 +1163,7 @@ impl AppWindow {
             toggle(ui, &mut changes, "hangAutoBackup", flag("hangAutoBackup"), "发现卡死时立即备份", "不等点按钮就开始复制自动恢复文件");
         });
         card(ui, "AI 助手（DeepSeek）", |ui| {
-            ui.label(small("用于 WavePlug 图层面板的「AI 整理」：重命名图层、把相关图层归组。Key 只保存在这台电脑上，日志和诊断信息里不会出现", theme::TEXT_3));
+            ui.label(small("用于生成面板的「AI 优化」提示词，以及 WavePlug 图层面板的「AI 整理」「AI 选」「改写」「检查」。Key 只保存在这台电脑上，日志和诊断信息里不会出现", theme::TEXT_3));
             ui.label(small("API Key（在 platform.deepseek.com 的 API keys 页面创建）", theme::TEXT_3));
             ui.horizontal(|ui| {
                 let key = self.deepseek_key.get_or_insert_with(|| text("deepseekKey"));
@@ -1181,8 +1181,9 @@ impl AppWindow {
             if ui.add(egui::TextEdit::singleline(model).hint_text("deepseek-chat").desired_width(f32::INFINITY)).lost_focus() {
                 changes.insert("deepseekModel".into(), json!(model.trim()));
             }
+            toggle(ui, &mut changes, "deepseekPromptImage", flag("deepseekPromptImage"), "「AI 优化」提示词时参考画面", "局部重绘、融图、扩图时把画面缩略图和选区位置一起发给 DeepSeek，写出的提示词和画面的光线、透视更一致；保密的稿子可以关掉");
             let set = !text("deepseekKey").trim().is_empty();
-            ui.label(small(if set { "已填写 Key" } else { "还没有填写 Key：AI 整理不能用" }, if set { theme::OK } else { theme::TEXT_3 }));
+            ui.label(small(if set { "已填写 Key" } else { "还没有填写 Key：AI 功能不能用" }, if set { theme::OK } else { theme::TEXT_3 }));
         });
         card(ui, "排查问题", |ui| {
             toggle(ui, &mut changes, "debugFiles", s.get("debugFiles").and_then(Value::as_bool).unwrap_or(false), "保存调试文件（图片较大，仅排查时打开）", "每次生成时把发送、返回的图片和提交的工作流存到 reports\\debug_*（从开发文件夹加载时）");

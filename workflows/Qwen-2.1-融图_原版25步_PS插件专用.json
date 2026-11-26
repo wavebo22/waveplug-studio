@@ -1475,9 +1475,7 @@
      "label": "输出",
      "name": "IMAGE",
      "type": "IMAGE",
-     "links": [
-      560
-     ]
+     "links": []
     }
    ],
    "properties": {
@@ -2271,242 +2269,6 @@
    "bgcolor": "#653"
   },
   {
-   "id": 277,
-   "type": "GoohaiDisplayAny",
-   "pos": [
-    1340,
-    2970
-   ],
-   "size": [
-    555,
-    565
-   ],
-   "flags": {},
-   "order": 27,
-   "mode": 0,
-   "inputs": [
-    {
-     "label": "字符串",
-     "name": "Any",
-     "shape": 7,
-     "type": "STRING",
-     "link": 557
-    }
-   ],
-   "outputs": [
-    {
-     "label": "字符串",
-     "name": "Any",
-     "type": "STRING",
-     "links": [
-      599
-     ]
-    }
-   ],
-   "properties": {
-    "aux_id": "goohai/Goohaitools-comfyui",
-    "ver": "83abca47fa10d47a1ffd0c7cb62b7fa2a9dc0ddc",
-    "Node name for S&R": "GoohaiDisplayAny",
-    "gh_font_size": 24,
-    "gh_font_color": "#7d8997",
-    "gh_text_style_customized": false,
-    "ue_properties": {
-     "widget_ue_connectable": {},
-     "input_ue_unconnectable": {},
-     "version": "7.8"
-    },
-    "widget_ue_connectable": {},
-    "gh_display_preview": {
-     "type": "STRING",
-     "text": "修复输入图片中人物双手的手指结构，将当前形态扭曲、比例失调、关节弯曲异常的手指重新渲染为解剖结构正确、比例自然、关节弯曲合理的手部，使上方握住手腕的手与下方自然下垂的手各自五指完整、长短粗细符合真实人体结构，手指边缘干净清晰并与皮肤光影自然衔接，同时保持双手原有的相互握持姿态关系、手部位置、肤色与指甲状态不变，保持人物身穿的绿色针织开衫与白色连衣裙的款式、褶皱和版型不变，保持画面左侧的橙色手提箱局部、背景的浅青色墙面以及整体柔和均匀的光线方向不变，保持横跨画面中部的浅绿色衬线大写文字\"GOOH\"的内容、字体、颜色、大小与位置完全不变，其余所有像素与构图均与输入图完全一致。",
-     "images": [],
-     "audio": [],
-     "video": []
-    }
-   },
-   "widgets_values": [
-    "STRING"
-   ],
-   "widgets_values_named": {
-    "gh_input_type": "STRING"
-   }
-  },
-  {
-   "id": 179,
-   "type": "QwenImagePromptOptimizer",
-   "pos": [
-    810,
-    3035
-   ],
-   "size": [
-    445,
-    460
-   ],
-   "flags": {
-    "collapsed": false,
-    "disabled": false
-   },
-   "order": 28,
-   "mode": 0,
-   "inputs": [
-    {
-     "label": "图像 1",
-     "name": "图像_01",
-     "shape": 7,
-     "type": "IMAGE",
-     "link": 560
-    },
-    {
-     "label": "图像 2",
-     "name": "图像_02",
-     "shape": 7,
-     "type": "IMAGE",
-     "link": null
-    },
-    {
-     "label": "用户提示词",
-     "name": "用户提示词",
-     "type": "STRING",
-     "widget": {
-      "name": "用户提示词"
-     },
-     "link": 609
-    },
-    {
-     "label": "文生图模型",
-     "name": "文生图模型",
-     "type": "COMBO",
-     "widget": {
-      "name": "文生图模型"
-     },
-     "link": null
-    },
-    {
-     "label": "图生图模型",
-     "name": "图生图模型",
-     "type": "COMBO",
-     "widget": {
-      "name": "图生图模型"
-     },
-     "link": null
-    },
-    {
-     "label": "视觉模型",
-     "name": "视觉模型",
-     "type": "COMBO",
-     "widget": {
-      "name": "视觉模型"
-     },
-     "link": null
-    },
-    {
-     "label": "输出语言",
-     "name": "输出语言",
-     "type": "COMBO",
-     "widget": {
-      "name": "输出语言"
-     },
-     "link": null
-    },
-    {
-     "label": "透明背景",
-     "name": "透明背景",
-     "type": "BOOLEAN",
-     "widget": {
-      "name": "透明背景"
-     },
-     "link": null
-    },
-    {
-     "label": "种子值",
-     "name": "种子值",
-     "type": "INT",
-     "widget": {
-      "name": "种子值"
-     },
-     "link": null
-    },
-    {
-     "label": "种子模式",
-     "name": "种子模式",
-     "type": "COMBO",
-     "widget": {
-      "name": "种子模式"
-     },
-     "link": null
-    },
-    {
-     "label": "卸载模型",
-     "name": "卸载模型",
-     "type": "COMBO",
-     "widget": {
-      "name": "卸载模型"
-     },
-     "link": null
-    }
-   ],
-   "outputs": [
-    {
-     "label": "prompt",
-     "name": "prompt",
-     "type": "STRING",
-     "links": [
-      557
-     ]
-    },
-    {
-     "label": "json",
-     "name": "json",
-     "type": "STRING",
-     "links": null
-    },
-    {
-     "label": "是否反推",
-     "name": "是否反推",
-     "type": "BOOLEAN",
-     "links": []
-    }
-   ],
-   "properties": {
-    "aux_id": "goohai/Goohaitools-comfyui",
-    "ver": "83abca47fa10d47a1ffd0c7cb62b7fa2a9dc0ddc",
-    "Node name for S&R": "QwenImagePromptOptimizer",
-    "ue_properties": {
-     "widget_ue_connectable": {},
-     "input_ue_unconnectable": {},
-     "version": "7.8"
-    },
-    "goohai_last_executed_seed_mode": "固定",
-    "widget_ue_connectable": {
-     "用户提示词": true
-    }
-   },
-   "widgets_values": [
-    "",
-    "Qwen-Image-2.1-PE-T2I.Q5_K_S.gguf",
-    "Qwen-Image-2.1-PE-I2I.Q5_K_S.gguf",
-    "Qwen-Image-2.1-PE-I2I.mmproj-bf16.gguf",
-    "自动",
-    false,
-    666,
-    "固定",
-    "自动"
-   ],
-   "widgets_values_named": {
-    "用户提示词": "",
-    "文生图模型": "Qwen-Image-2.1-PE-T2I.Q5_K_S.gguf",
-    "图生图模型": "Qwen-Image-2.1-PE-I2I.Q5_K_S.gguf",
-    "视觉模型": "Qwen-Image-2.1-PE-I2I.mmproj-bf16.gguf",
-    "输出语言": "自动",
-    "透明背景": false,
-    "种子值": 666,
-    "种子模式": "固定",
-    "卸载模型": "自动"
-   },
-   "color": "#514d6a",
-   "bgcolor": "#3d3956"
-  },
-  {
    "id": 262,
    "type": "easy ifElse",
    "pos": [
@@ -3255,123 +3017,6 @@
    "bgcolor": "#653"
   },
   {
-   "id": 305,
-   "type": "easy ifElse",
-   "pos": [
-    2140,
-    3120
-   ],
-   "size": [
-    270,
-    78
-   ],
-   "flags": {},
-   "order": 38,
-   "mode": 0,
-   "inputs": [
-    {
-     "label": "真时",
-     "name": "on_true",
-     "type": "*",
-     "link": 599
-    },
-    {
-     "label": "假时",
-     "name": "on_false",
-     "type": "*",
-     "link": 608
-    },
-    {
-     "label": "布尔",
-     "name": "boolean",
-     "type": "BOOLEAN",
-     "widget": {
-      "name": "boolean"
-     },
-     "link": 601
-    }
-   ],
-   "outputs": [
-    {
-     "name": "*",
-     "type": "*",
-     "links": [
-      598
-     ]
-    }
-   ],
-   "properties": {
-    "ue_properties": {
-     "widget_ue_connectable": {},
-     "input_ue_unconnectable": {}
-    },
-    "cnr_id": "comfyui-easy-use",
-    "ver": "130c1b5796d9876a5f853fa0bea88e808cfda4ad",
-    "Node name for S&R": "easy ifElse"
-   },
-   "widgets_values": [
-    false
-   ],
-   "widgets_values_named": {
-    "boolean": false
-   }
-  },
-  {
-   "id": 306,
-   "type": "easy boolean",
-   "pos": [
-    -790,
-    2890
-   ],
-   "size": [
-    365,
-    90
-   ],
-   "flags": {},
-   "order": 39,
-   "mode": 0,
-   "inputs": [
-    {
-     "label": "值",
-     "name": "value",
-     "type": "BOOLEAN",
-     "widget": {
-      "name": "value"
-     },
-     "link": null
-    }
-   ],
-   "outputs": [
-    {
-     "label": "布尔",
-     "name": "boolean",
-     "type": "BOOLEAN",
-     "links": [
-      601
-     ]
-    }
-   ],
-   "title": "# 3.提示词优化",
-   "properties": {
-    "ue_properties": {
-     "widget_ue_connectable": {},
-     "input_ue_unconnectable": {}
-    },
-    "cnr_id": "comfyui-easy-use",
-    "ver": "130c1b5796d9876a5f853fa0bea88e808cfda4ad",
-    "Node name for S&R": "easy boolean",
-    "sdppp_widgetable_title": "# 3.提示词优化"
-   },
-   "widgets_values": [
-    true
-   ],
-   "widgets_values_named": {
-    "value": true
-   },
-   "color": "#432",
-   "bgcolor": "#653"
-  },
-  {
    "id": 307,
    "type": "easy float",
    "pos": [
@@ -3589,8 +3234,7 @@
      "name": "*",
      "type": "*",
      "links": [
-      608,
-      609
+      598
      ]
     }
    ],
@@ -3928,14 +3572,6 @@
    "LATENT"
   ],
   [
-   557,
-   179,
-   0,
-   277,
-   0,
-   "STRING"
-  ],
-  [
    559,
    250,
    0,
@@ -4032,14 +3668,6 @@
    "INT"
   ],
   [
-   560,
-   279,
-   0,
-   179,
-   0,
-   "IMAGE"
-  ],
-  [
    212,
    9,
    0,
@@ -4129,27 +3757,11 @@
   ],
   [
    598,
-   305,
+   310,
    0,
    255,
    5,
    "STRING"
-  ],
-  [
-   599,
-   277,
-   0,
-   305,
-   0,
-   "STRING"
-  ],
-  [
-   601,
-   306,
-   0,
-   305,
-   2,
-   "BOOLEAN"
   ],
   [
    602,
@@ -4198,22 +3810,6 @@
    310,
    2,
    "STRING"
-  ],
-  [
-   608,
-   310,
-   0,
-   305,
-   1,
-   "*"
-  ],
-  [
-   609,
-   310,
-   0,
-   179,
-   2,
-   "*"
   ],
   [
    610,
@@ -4295,20 +3891,6 @@
    "color": "#3f789e",
    "flags": {},
    "font_size": 30,
-   "title_align": "left"
-  },
-  {
-   "id": 13,
-   "title": "PE 提示词优化",
-   "bounding": [
-    745,
-    2935,
-    565,
-    600
-   ],
-   "color": "#3f789e",
-   "flags": {},
-   "font_size": 34,
    "title_align": "left"
   },
   {

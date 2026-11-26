@@ -74,6 +74,8 @@ export interface Settings {
    *  never goes into the log or the diagnostics */
   deepseekKey?: string;
   deepseekModel?: string;
+  /** AI 优化提示词 sends a thumbnail of the canvas in the modes that change a picture (on unless off) */
+  deepseekPromptImage?: boolean;
   /** 生成 (the AI modes) or 工具 */
   view?: "generate" | "tools";
   /** panel mode and the workflow last used in each mode */

@@ -69,6 +69,7 @@ impl Demo {
                 action: String::new(),
                 blocked: None,
                 note: None,
+                ai: Some(super::state::AiPrompt::default()),
                 params: vec![
                     Param::Number {
                         key: "12.strength".into(),
@@ -233,6 +234,17 @@ impl Demo {
                 s.fav_open = false;
             }
             Action::RemoveFavorite(t) => s.favorites.retain(|x| *x != t),
+            Action::OptimizePrompt => {
+                s.prompt = format!("{}，柔和的自然光从左上方照来，材质细节清晰", s.prompt.trim());
+                if let Some(ai) = &mut s.ai {
+                    ai.undo = true;
+                }
+            }
+            Action::RestorePrompt => {
+                if let Some(ai) = &mut s.ai {
+                    ai.undo = false;
+                }
+            }
             Action::AddRef { slot, source } => {
                 let name = match source {
                     RefSource::Layer => "图层 9 拷贝 11",

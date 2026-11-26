@@ -49,6 +49,9 @@ export interface GenerateSections {
   status: { tone: "info" | "ok" | "error"; text: string };
   /** a line under the button about what the panel will do (the plugin is in another mode …); null: none */
   note: string | null;
+  /** 「AI 优化」 (DeepSeek) beside 收藏: null where the mode has no prompt to optimise; `blocked`:
+   *  why it can't run now; `undo`: 还原 is offered (helper ≥ REWRITE_HELPER_VERSION shows it) */
+  ai?: { busy: boolean; blocked: string | null; undo: boolean } | null;
 }
 
 export type GenerateAction =
@@ -61,6 +64,8 @@ export type GenerateAction =
   | { kind: "set-seed"; random: boolean; value: number }
   | { kind: "new-seed" }
   | { kind: "toggle-favorite" }
+  | { kind: "optimize-prompt" }
+  | { kind: "restore-prompt" }
   | { kind: "pick-favorite"; text: string }
   | { kind: "remove-favorite"; text: string }
   | { kind: "add-ref"; slot: number; source: "layer" | "file" | "clipboard" }
@@ -102,7 +107,7 @@ export function parseGenerateAction(a: any): GenerateAction | null {
     case "generate":
       if (a.mode === undefined) return { kind: a.kind };
       return isPanelMode(a.mode) ? { kind: a.kind, mode: a.mode } : null;
-    case "new-seed": case "toggle-favorite": case "cancel": return { kind: a.kind };
+    case "new-seed": case "toggle-favorite": case "cancel": case "optimize-prompt": case "restore-prompt": return { kind: a.kind };
     default: return null;
   }
 }

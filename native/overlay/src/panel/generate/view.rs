@@ -123,6 +123,22 @@ fn main_card(
         if chevron_button(ui, &label, s.fav_open).clicked() {
             s.fav_open = !s.fav_open;
         }
+        // ✦ AI 优化 · ↶ 还原 (DeepSeek, done by the plugin)
+        if let Some(ai) = s.ai.clone() {
+            let ok = !ai.busy && ai.blocked.is_none();
+            let b = button(ui, if ai.busy { "优化中…" } else { "✦ AI 优化" }, ok, false);
+            if b.clicked() {
+                out.push(Action::OptimizePrompt);
+            }
+            b.on_hover_text(match (&ai.blocked, ai.busy) {
+                (_, true) => "DeepSeek 正在优化提示词…",
+                (Some(why), _) => why.as_str(),
+                _ => "让 DeepSeek 把提示词写得更完整、更适合 Qwen-Image；优化后可以点「还原」",
+            });
+            if ai.undo && button(ui, "↶ 还原", true, false).on_hover_text("恢复成优化前的提示词").clicked() {
+                out.push(Action::RestorePrompt);
+            }
+        }
     });
     if s.fav_open {
         favorites(ui, s, out);

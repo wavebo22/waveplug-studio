@@ -148,6 +148,8 @@ pub struct PanelState {
     pub status: Option<(Tone, String)>,
     /// a line under the button about what 开始 will do (the plugin panel is in 放大 / 扩图 …)
     pub note: Option<String>,
+    /// 「AI 优化」 (DeepSeek) beside 收藏; None: the mode has no prompt to optimise
+    pub ai: Option<AiPrompt>,
     // ── panel-local, never sent back ──
     pub fav_open: bool,
     pub adv_open: bool,
@@ -162,12 +164,26 @@ pub struct PanelState {
     pub external_drag: Option<super::super::ExternalLayerDrag>,
 }
 
+/// The plugin's 「AI 优化」 state: running, why it can't run (None: it can), 还原 offered.
+#[derive(Clone, Debug, Default, PartialEq, serde::Deserialize)]
+pub struct AiPrompt {
+    #[serde(default)]
+    pub busy: bool,
+    #[serde(default)]
+    pub blocked: Option<String>,
+    #[serde(default)]
+    pub undo: bool,
+}
+
 /// What the user did. Phase 3 sends these to the plugin, which runs its own handlers.
 #[derive(Clone, Debug, PartialEq)]
 pub enum Action {
     SetMode(Mode),
     SetPrompt(String),
     ToggleFavorite,
+    /// 「AI 优化」 / 还原 (the plugin asks DeepSeek and puts the result in the prompt)
+    OptimizePrompt,
+    RestorePrompt,
     PickFavorite(String),
     RemoveFavorite(String),
     AddRef { slot: u32, source: RefSource },

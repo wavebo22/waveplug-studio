@@ -476,6 +476,11 @@ async function boot() {
         { id: 901, type: "typo", original: "登陆", suggestion: "登录", reason: "登录账号用「登录」，「登陆」指登上陆地" },
         { id: 902, type: "ad_law", original: "全网最低", suggestion: "超值", reason: "广告法禁止使用「最」等绝对化用语" },
       ] });
+      if (system.includes("生图提示词助手")) {
+        const c = body.messages[1].content, text = Array.isArray(c) ? c.map((x: any) => x.text ?? "").join("\n") : String(c);
+        const idea = /用户的想法：(.*)$/m.exec(text)?.[1] ?? "";
+        return reply({ prompt: `${idea}，柔和的自然光从左上方照来，和周围画面的色调、透视一致，材质细节清晰` });
+      }
       if (system.includes("图层查找助手")) {
         const lines = String(body.messages[1].content).split("\n").filter(l => l.startsWith("{")).map(l => JSON.parse(l));
         return reply({ ids: lines.filter(l => l.kind === "text").map(l => l.id).slice(0, 6), note: "按类型挑出了文字图层" });

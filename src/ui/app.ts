@@ -8,6 +8,9 @@ import { missingBuiltins } from "../core/workflow/builtin.ts";
 import { MAX_SEED, randomSeed } from "../core/workflow/inject.ts";
 import { normalizeVariationCount, stepVariationCountByWheel } from "../core/workflow/variationCount.ts";
 import { type Binding, type Profile, type TaskType, ROLE_LABEL, carryOver, inpaintLike, newProfile, validateProfile } from "../core/workflow/profile.ts";
+import { stripOptimizer, withoutOptimizer } from "../core/workflow/stripOptimizer.ts";
+import { PROMPT_SYSTEM, isPromptMode, optimizeBlocked, parsePromptAnswer, promptRequest } from "../core/assistant/promptOptimize.ts";
+import { DEEPSEEK_VISION_MODEL, deepseekJson } from "../core/assistant/deepseek.ts";
 import { isBlendGraph, recognize } from "../core/workflow/recognize.ts";
 import { uiToApi } from "../core/workflow/uiToApi.ts";
 import { findLocalMaskLinks } from "../core/workflow/localMask.ts";
@@ -44,15 +47,13 @@ function bytesToDataUrl(bytes: Uint8Array, mime: string): string {
   return `data:${mime};base64,${btoa(bin)}`;
 }
 
-/** Prompt optimisers (an LLM rewriting the prompt) are slow and off unless the user turns them on. */
-const OPTIMIZER = /提示词优化|prompt\s*optimi[sz]/i;
 /** A bound number's slider range and whether it counts in whole steps (the panel and the external panel). */
 function paramRange(b: Binding, base: unknown): { int: boolean; lo: number; hi: number } {
   const int = Number.isInteger(base) && !/strength|强度|cfg|denoise/i.test(b.label ?? b.input);
   return { int, lo: b.min ?? 0, hi: b.max ?? (int ? Math.max(Number(base) * 2, 10) : Math.max(2, Number(base) * 2)) };
 }
-function defaultParam(b: Binding, base: unknown): number | boolean {
-  return typeof base === "boolean" && OPTIMIZER.test(b.label ?? b.title ?? "") ? false : (base as number | boolean);
+function defaultParam(_b: Binding, base: unknown): number | boolean {
+  return base as number | boolean;
 }
 function effectiveParams(p: Profile, ps: ProfileState): Record<string, number | boolean> {
   const out: Record<string, number | boolean> = {};
@@ -102,6 +103,15 @@ export function mountApp(root: HTMLElement, svc: Services) {
     localStorage.setItem(DEV_LIFECYCLE_KEY, "1");
   }
   let profiles: Profile[] = store.profiles();
+  // prompts are optimised with DeepSeek (AI 优化) now: saved workflows lose their own optimiser nodes
+  {
+    const stripped = profiles.map(withoutOptimizer);
+    if (stripped.some((p, i) => p !== profiles[i])) {
+      log("info", "prompt optimiser nodes removed from saved workflows", stripped.filter((p, i) => p !== profiles[i]).map(p => p.name).join("、"));
+      profiles = stripped;
+      store.saveProfiles(profiles);
+    }
+  }
   // a panel that never had workflows starts with WavePlug's built-in ones (once: deleting them
   // later sticks; 导入工作流 › WavePlug 内置工作流 brings them back)
   const BUILTIN_SEEDED_KEY = "wp.builtinsSeeded.v1";
@@ -278,7 +288,10 @@ export function mountApp(root: HTMLElement, svc: Services) {
   const favStar = h("button", { class: "fav-star" });
   const favToggle = h("button", { class: "fav-toggle", title: "收藏的提示词" });
   const favList = h("div", { class: "fav-list" });
-  const favEl = h("div", { class: "fav" }, h("div", { class: "fav-bar" }, favStar, favToggle), favList);
+  // AI 优化 (DeepSeek, core/assistant/promptOptimize.ts) and, right after it, 还原
+  const optBtn = h("button", { class: "ub fav-star ai-opt", onClick: () => void optimizePrompt() });
+  const optUndo = h("button", { class: "ub fav-star", title: "恢复成优化前的提示词", onClick: () => restorePrompt() }, h("span", null, "↶ 还原"));
+  const favEl = h("div", { class: "fav" }, h("div", { class: "fav-bar" }, favStar, favToggle, optBtn, optUndo), favList);
   favStar.addEventListener("click", () => {
     const text = prompt.value.trim(), list = favorites[favKey()] ?? [];
     if (!text) return;
@@ -288,6 +301,62 @@ export function mountApp(root: HTMLElement, svc: Services) {
   favToggle.addEventListener("click", () => { favOpen = !favOpen; renderFav(); });
   /** Puts `text` into the prompt box as if typed (saved with the workflow's state). */
   const setPromptText = (text: string) => { prompt.value = text; prompt.dispatchEvent(new Event("input")); };
+
+  // ── AI 优化提示词 ──
+  /** what was typed before the last optimisation, and what it became (还原 while the box still shows it) */
+  let optBefore: string | null = null, optAfter = "", optBusy = false, optRun = 0;
+  const optWithImage = () => settings.deepseekPromptImage !== false && (mode === "inpaint" || mode === "blend" || mode === "outpaint");
+  /** why 「AI 优化」 can't run now (null: it can) */
+  function optBlocked(): string | null {
+    if (!(settings.deepseekKey ?? "").trim()) return "先在 WavePlug 程序 › 功能设置 › AI 助手 里填写 DeepSeek API Key";
+    if (optWithImage() && !doc) return "没有打开的文档";
+    return optimizeBlocked(mode, prompt.value, optWithImage());
+  }
+  const canRestore = () => optBefore !== null && prompt.value === optAfter;
+  function renderOpt() {
+    const shown = isPromptMode(mode);
+    optBtn.hidden = !shown;
+    optUndo.hidden = !shown || !canRestore() || optBusy;
+    const why = optBusy ? null : optBlocked();
+    optBtn.className = "ub fav-star ai-opt" + (why || optBusy ? " is-disabled" : "");
+    optBtn.title = optBusy ? "DeepSeek 正在优化提示词…" : why ?? `让 DeepSeek 把提示词写得更完整、更适合 Qwen-Image${optWithImage() ? "（会上传画面缩略图，可在 WavePlug 程序 › 功能设置 › AI 助手 里关闭）" : ""}；优化后可以点「还原」`;
+    replace(optBtn, h("span", null, optBusy ? "优化中…" : "✦ AI 优化"));
+  }
+  async function optimizePrompt() {
+    if (optBusy || !isPromptMode(mode)) return;
+    const why = optBlocked();
+    if (why) { setStatus(why, "error"); return; }
+    const m = mode, text = prompt.value, withImage = optWithImage(), d = doc, mine = ++optRun;
+    optBusy = true; renderOpt(); outSync();
+    const t0 = Date.now();
+    try {
+      const image = withImage && d ? await svc.host.docThumbnail(d.id, 1024) : null;
+      const user = promptRequest(m, text, { image: !!image, sel: m === "outpaint" ? null : sel, size: d ? { width: d.width, height: d.height } : null, ratio: settings.t2iRatio });
+      const r = await withTimeout(deepseekJson(svc.aiFetch ?? fetch, { key: settings.deepseekKey ?? "", model: image ? DEEPSEEK_VISION_MODEL : settings.deepseekModel },
+        { system: PROMPT_SYSTEM, user, images: image ? [image] : undefined, maxTokens: 1500 }), 90_000, "DeepSeek ");
+      const out = parsePromptAnswer(r.value);
+      log("info", "ai prompt", JSON.stringify({ mode: m, image: !!image, chars: out.length, usage: r.usage, model: r.model, ms: Date.now() - t0 }));
+      if (mine !== optRun) return;
+      if (!out) throw new Error("DeepSeek 没有返回提示词");
+      if (mode !== m || prompt.value !== text) { setStatus("提示词在优化期间改过了，没有替换", "info"); return; }
+      optBefore = text; optAfter = out;
+      setPromptText(out);
+      setStatus("提示词已优化（不满意可以点「还原」）", "ok");
+    } catch (e) {
+      const msg = (e as Error)?.message ?? String(e);
+      log("warn", "ai prompt", msg);
+      setStatus("AI 优化失败：" + msg, "error");
+    } finally {
+      if (mine === optRun) { optBusy = false; renderOpt(); outSync(); }
+    }
+  }
+  function restorePrompt() {
+    if (!canRestore()) return;
+    const before = optBefore!;
+    optBefore = null;
+    setPromptText(before);
+    setStatus("已还原成优化前的提示词", "info");
+  }
 
   // 抠图 → 拆图: remove the cut-out object from the original afterwards (局部重绘's removal)
   const exRemoveBox = h("input", { type: "checkbox", onChange: (e: Event) => { settings.extractRemove = (e.target as HTMLInputElement).checked; store.saveSettings(settings); } }) as HTMLInputElement;
@@ -349,6 +418,7 @@ export function mountApp(root: HTMLElement, svc: Services) {
     outSync();
     favEl.hidden = mode === "upscale";
     const list = favorites[favKey()] ?? [], text = prompt.value.trim(), saved = !!text && list.includes(text);
+    renderOpt();
     favStar.className = "ub fav-star" + (saved ? " on" : "") + (text ? "" : " is-disabled");
     favStar.title = !text ? "先输入提示词再收藏" : saved ? "取消收藏这条提示词" : "收藏这条提示词";
     replace(favStar, h("span", { class: "fav-icon" }, saved ? "★" : "☆"), h("span", null, saved ? "已收藏" : "收藏"));
@@ -967,6 +1037,7 @@ export function mountApp(root: HTMLElement, svc: Services) {
         run: run ? { stage: run.stage + (run.detail ? " · " + run.detail : ""), progress: run.progress ?? 0 } : null,
         status: { tone: status.kind, text: status.text },
         note: null,
+        ai: isPromptMode(shown) ? { busy: optBusy, blocked: optBusy ? null : optBlocked(), undo: canRestore() && !optBusy } : null,
         };
       },
       where: () => ({ docId: doc?.id ?? null, sel }),
@@ -988,6 +1059,8 @@ export function mountApp(root: HTMLElement, svc: Services) {
       cancel: () => { if (run) void cancel(); },
       // the same handlers as this page's ☆ 收藏 and 收藏夹 entries
       toggleFavorite: () => favStar.click(),
+      optimizePrompt: () => void optimizePrompt(),
+      restorePrompt: () => restorePrompt(),
       pickFavorite: text => setPromptText(text),
       removeFavorite: text => { favorites[favKey()] = (favorites[favKey()] ?? []).filter(x => x !== text); store.saveFavorites(favorites); renderFav(); },
       addRef: (slot, source) => { void addReferenceFromSurface(slot, source); },
@@ -1363,6 +1436,9 @@ export function mountApp(root: HTMLElement, svc: Services) {
 
   /** New import, or re-import of a workflow with the same name: carry valid bindings over. */
   async function adopt(name: string, api: ReturnType<typeof asApiGraph>, warnings: string[], source: Profile["source"] = { kind: "file" }) {
+    // the workflow's own prompt optimiser goes: WavePlug optimises with DeepSeek (AI 优化) instead
+    const stripped = stripOptimizer(api, []);
+    if (stripped) { api = stripped.api as typeof api; warnings = [...warnings, "已去掉工作流里的提示词优化节点：提示词用面板上的「AI 优化」（DeepSeek）优化"]; }
     const rec = recognize(api);
     if (warnings.length) rec.notes.push(...warnings);
     /** 扩图 workflows: task type, the canvas node's fixed inputs, prompt may be empty */

@@ -34,6 +34,9 @@ export interface GeneratePage {
   generate(): void;
   cancel(): void;
   toggleFavorite(): void;
+  /** 「AI 优化」 / 还原 (DeepSeek) */
+  optimizePrompt(): void;
+  restorePrompt(): void;
   pickFavorite(text: string): void;
   removeFavorite(text: string): void;
   addRef(slot: number, source: "layer" | "file" | "clipboard"): void;
@@ -108,6 +111,8 @@ export function attachGenerateSurface(overlay: Overlay, page: GeneratePage) {
         case "generate": return page.generate();
         case "cancel": return page.cancel();
         case "toggle-favorite": return page.toggleFavorite();
+        case "optimize-prompt": return page.optimizePrompt();
+        case "restore-prompt": return page.restorePrompt();
         case "pick-favorite": return page.pickFavorite(a.text);
         case "remove-favorite": return page.removeFavorite(a.text);
         case "add-ref": return page.addRef(a.slot, a.source as "layer" | "file" | "clipboard");

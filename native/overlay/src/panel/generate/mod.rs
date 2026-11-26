@@ -53,6 +53,7 @@ impl PanelState {
             running: None,
             status: None,
             note: None,
+            ai: None,
             fav_open: false,
             adv_open: false,
             ref_menu: None,
@@ -295,6 +296,9 @@ impl Surface for GenerateSurface {
         if sections.contains_key("note") {
             s.note = get(sections, "note");
         }
+        if sections.contains_key("ai") {
+            s.ai = get(sections, "ai");
+        }
         if let Some(st) = get::<StatusIn>(sections, "status") {
             let tone = match st.tone.as_str() {
                 "ok" => Tone::Ok,
@@ -344,6 +348,8 @@ fn action_json(a: &Action) -> Value {
         Action::SetMode(m) => json!({ "kind": "set-mode", "mode": m.key() }),
         Action::SetPrompt(t) => json!({ "kind": "set-prompt", "text": t }),
         Action::ToggleFavorite => json!({ "kind": "toggle-favorite" }),
+        Action::OptimizePrompt => json!({ "kind": "optimize-prompt" }),
+        Action::RestorePrompt => json!({ "kind": "restore-prompt" }),
         Action::PickFavorite(t) => json!({ "kind": "pick-favorite", "text": t }),
         Action::RemoveFavorite(t) => json!({ "kind": "remove-favorite", "text": t }),
         Action::AddRef { slot, source } => {
@@ -414,6 +420,10 @@ mod tests {
         g.apply(&serde_json::from_str(r#"{"note":"插件面板现在是「放大」"}"#).unwrap());
         assert_eq!(g.s.note.as_deref(), Some("插件面板现在是「放大」"));
         g.apply(&serde_json::from_str(r#"{"note":null}"#).unwrap());
+        g.apply(&serde_json::from_str(r#"{"ai":{"busy":false,"blocked":null,"undo":true}}"#).unwrap());
+        assert_eq!(g.s.ai, Some(state::AiPrompt { busy: false, blocked: None, undo: true }));
+        g.apply(&serde_json::from_str(r#"{"ai":null}"#).unwrap());
+        assert_eq!(g.s.ai, None);
         assert_eq!(g.s.note, None);
     }
 
