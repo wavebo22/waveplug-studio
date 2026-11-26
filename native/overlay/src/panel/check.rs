@@ -13,7 +13,8 @@ use serde_json::{json, Map, Value};
 use crate::panel::theme;
 
 pub const ID: &str = "check";
-pub const TITLE: &str = "WavePlug 检查结果";
+/// the window both 检查结果 and AI 整理 (organize.rs) are shown in
+pub const TITLE: &str = "WavePlug 检查与整理";
 /// logical width; the height follows the 图层 panel (win.rs)
 pub const WIDTH: f32 = 340.0;
 /// the title bar: all that shows while folded
@@ -242,7 +243,7 @@ fn badge(ui: &mut egui::Ui, sev: &str, done: bool) {
     ui.painter().text(r.center(), egui::Align2::CENTER_CENTER, label, theme::font(theme::FS_S), c);
 }
 
-fn icon_button(ui: &mut egui::Ui, r: egui::Rect, text: &str, tip: &str) -> egui::Response {
+pub fn icon_button(ui: &mut egui::Ui, r: egui::Rect, text: &str, tip: &str) -> egui::Response {
     let resp = ui.interact(r, ui.id().with(("check-icon", text)), Sense::click());
     if resp.hovered() {
         ui.painter().rect_filled(r, CornerRadius::same(theme::R), theme::HOVER);
@@ -252,7 +253,7 @@ fn icon_button(ui: &mut egui::Ui, r: egui::Rect, text: &str, tip: &str) -> egui:
 }
 
 /// at most `max` characters, with an ellipsis
-fn elide(text: &str, max: usize) -> String {
+pub fn elide(text: &str, max: usize) -> String {
     if text.chars().count() <= max {
         return text.to_string();
     }

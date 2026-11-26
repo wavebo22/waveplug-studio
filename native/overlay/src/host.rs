@@ -14,6 +14,7 @@ use eframe::egui::{self, Frame, Id, Margin, Sense, Stroke, ViewportCommand};
 use crate::panel::generate::GenerateSurface;
 use crate::panel::shelf::{self, Shelf};
 use crate::panel::check::{self, Check};
+use crate::panel::organize::{self, Organize};
 use crate::panel::variants::{self, VariantRail};
 use crate::panel::{theme, Surface, DraggedLayer};
 use crate::protocol::{Command, Event, ScreenRect};
@@ -236,12 +237,20 @@ fn on_command(c: Command) {
         crate::win::check_anchor();
         return;
     }
+    if let Command::IssueRows { left, right, rows, color } = c {
+        let color = color.as_deref().and_then(crate::frame::parse_color);
+        #[cfg(windows)]
+        crate::frame::set_leader_rows(crate::win::leader_rows(left, right, &rows), color);
+        #[cfg(not(windows))]
+        let _ = (left, right, rows, color);
+        return;
+    }
     #[cfg(windows)]
     match &c {
-        Command::Show { panel, view } if panel != variants::ID && panel != shelf::ID && panel != check::ID => {
+        Command::Show { panel, view } if panel != variants::ID && panel != shelf::ID && panel != check::ID && panel != organize::ID => {
             crate::win::show(panel, *view, size_of(panel))
         }
-        Command::Hide { panel } if panel != variants::ID && panel != shelf::ID && panel != check::ID => crate::win::hide(panel),
+        Command::Hide { panel } if panel != variants::ID && panel != shelf::ID && panel != check::ID && panel != organize::ID => crate::win::hide(panel),
         _ => {} // the variants and workbench viewports are controlled separately by Host.update
     }
     if let Ok(mut q) = INBOX.lock() {
@@ -278,6 +287,9 @@ fn on_disconnect() {
     });
     on_command(Command::Hide {
         panel: check::ID.to_string(),
+    });
+    on_command(Command::Hide {
+        panel: organize::ID.to_string(),
     });
 }
 
@@ -400,8 +412,10 @@ pub fn run() {
                 shelf_placed: false,
                 shelf_drag: None,
                 check: Check::new(),
-                check_shown: false,
+                organize: Organize::new(),
+                assist: None,
                 check_placed: false,
+                assist_typing: false,
                 app: None,
             }))
         }),
@@ -457,8 +471,13 @@ struct Host {
     shelf_drag: Option<Vec<String>>,
     /// the 检查结果 window (panel/check.rs), beside the 图层 panel
     check: Check,
-    check_shown: bool,
+    /// the AI 整理 window (panel/organize.rs): the same window slot as 检查结果
+    organize: Organize,
+    /// which of the two the window shows (check::ID / organize::ID); None: hidden
+    assist: Option<&'static str>,
     check_placed: bool,
+    /// AI 整理's text field has the keyboard
+    assist_typing: bool,
 }
 
 #[cfg(test)]
@@ -610,6 +629,7 @@ impl Host {
                 Command::Canvas { .. } => {}     // win.rs relayout, on the server thread
                 Command::HoverTint { .. } => {}  // frame.rs, on its own thread
                 Command::PanelAnchor => {}       // win.rs, on the server thread
+                Command::IssueRows { .. } => {}  // frame.rs, on its own thread
                 Command::MenuOpen { .. } | Command::MenuClose { .. } => {} // menu.rs, on its own thread
                 Command::RestartHelper => {}     // life.rs, on its own thread
                 Command::Monitor { .. } => {}    // monitor.rs, on its own thread
@@ -697,11 +717,12 @@ impl Host {
                     rev,
                     sections,
                 } => {
-                    if panel == check::ID {
+                    if panel == check::ID || panel == organize::ID {
+                        let is_check = panel == check::ID;
                         let last = self.revs.entry(panel).or_insert(0);
                         if rev > *last {
                             *last = rev;
-                            self.check.apply(&sections);
+                            if is_check { self.check.apply(&sections) } else { self.organize.apply(&sections) }
                         }
                         continue;
                     }
@@ -725,8 +746,9 @@ impl Host {
                     self.surfaces[i].apply(&sections);
                 }
                 Command::Show { panel, view } => {
-                    if panel == check::ID {
-                        self.check_shown = true;
+                    if panel == check::ID || panel == organize::ID {
+                        // one window for both: the last shown is the one it shows
+                        self.assist = Some(if panel == check::ID { check::ID } else { organize::ID });
                         self.check_placed = false;
                         continue;
                     }
@@ -770,12 +792,20 @@ impl Host {
                     });
                 }
                 Command::Hide { panel } => {
-                    if panel == check::ID {
-                        self.check_shown = false;
-                        self.check_placed = false;
-                        crate::frame::set_leader(None);
-                        #[cfg(windows)]
-                        crate::win::check_hide();
+                    if panel == check::ID || panel == organize::ID {
+                        if self.assist == Some(if panel == check::ID { check::ID } else { organize::ID }) {
+                            self.assist = None;
+                            self.check_placed = false;
+                            crate::frame::set_leader(None);
+                            crate::frame::set_leader_rows(Vec::new(), None);
+                            if self.assist_typing {
+                                self.assist_typing = false;
+                                #[cfg(windows)]
+                                crate::win::check_set_typing(false);
+                            }
+                            #[cfg(windows)]
+                            crate::win::check_hide();
+                        }
                         continue;
                     }
                     if panel == shelf::ID {
@@ -1165,11 +1195,10 @@ impl Host {
 }
 
 impl Host {
-    /// The 检查结果 window: its own viewport like the workbench; win.rs keeps it beside the 图层 panel.
+    /// The window beside the 图层 panel: 检查结果 or AI 整理 (whichever was shown last), its own
+    /// viewport like the workbench; win.rs keeps it beside the panel.
     fn check_viewport(&mut self, ctx: &egui::Context) {
-        if !self.check_shown {
-            return;
-        }
+        let Some(which) = self.assist else { return };
         let builder = egui::ViewportBuilder::default()
             .with_title(check::TITLE)
             .with_inner_size(egui::vec2(check::WIDTH, 480.0))
@@ -1181,7 +1210,11 @@ impl Host {
         let builder = builder.with_position([crate::win::PARK.0 as f32, crate::win::PARK.1 as f32]);
         #[cfg(not(windows))]
         let builder = builder.with_always_on_top();
-        let actions = ctx.show_viewport_immediate(egui::ViewportId::from_hash_of("waveplug-check"), builder, |viewport_ctx, _| self.check.draw(viewport_ctx));
+        let is_check = which == check::ID;
+        let actions = ctx.show_viewport_immediate(egui::ViewportId::from_hash_of("waveplug-check"), builder, |viewport_ctx, _| {
+            if is_check { self.check.draw(viewport_ctx) } else { self.organize.draw(viewport_ctx) }
+        });
+        let (folded, edges, typing) = if is_check { (self.check.folded, self.check.hover_edges, false) } else { (self.organize.folded, self.organize.hover_edges, self.organize.typing) };
         #[cfg(windows)]
         {
             if !self.check_placed || !crate::win::check_window_exists() {
@@ -1190,17 +1223,25 @@ impl Host {
                     ctx.request_repaint_after(Duration::from_millis(200));
                 }
             }
-            crate::win::check_fold(self.check.folded);
-            // the line from the hovered row to its layers on the canvas (frame.rs)
-            let from = self.check.hover_edges.zip(crate::win::check_origin()).map(|((l, r, y), (x0, y0, left))| {
-                ((x0 as f32 + if left { l } else { r }).round() as i32, (y0 as f32 + y).round() as i32)
+            crate::win::check_fold(folded);
+            // the lines from the hovered row to its layers on the canvas and in the panel (frame.rs)
+            let from = edges.zip(crate::win::check_origin()).map(|((l, r, y), (x0, y0))| {
+                ((x0 as f32 + l).round() as i32, (x0 as f32 + r).round() as i32, (y0 as f32 + y).round() as i32)
             });
             crate::frame::set_leader(from);
+            // typing in AI 整理's field: the window takes the keyboard from Photoshop, then gives it back
+            if typing != self.assist_typing {
+                self.assist_typing = typing;
+                crate::win::check_set_typing(typing);
+            }
         }
         #[cfg(not(windows))]
-        crate::frame::set_leader(None);
+        {
+            let _ = (folded, edges, typing);
+            crate::frame::set_leader(None);
+        }
         for action in actions {
-            server::send(&Event::Action { panel: check::ID.to_string(), action });
+            server::send(&Event::Action { panel: which.to_string(), action });
         }
     }
 

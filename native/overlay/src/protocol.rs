@@ -53,6 +53,13 @@ pub struct BarMode {
 }
 
 /// plugin → helper
+/// A row's top and bottom (IssueRows).
+#[derive(Debug, Clone, Copy, Deserialize, PartialEq)]
+pub struct RowSpan {
+    pub top: f64,
+    pub bottom: f64,
+}
+
 #[cfg_attr(not(windows), allow(dead_code))] // `view` is used by win.rs
 #[derive(Debug, Clone, Deserialize)]
 #[serde(tag = "type", rename_all = "kebab-case")]
@@ -159,6 +166,19 @@ pub enum Command {
     /// 检查结果: the WavePlug 图层 panel is under the cursor right now (its 检查 button was just
     /// clicked); the check window goes beside the window found there (win.rs check_anchor).
     PanelAnchor,
+    /// The hovered item's layer rows in the 图层 panel (CSS px of the panel's page: `left` / `right`
+    /// and each row's `top` / `bottom`) and their colour: the window's lines go to them too. No
+    /// rows: none (win.rs leader_rows).
+    IssueRows {
+        #[serde(default)]
+        left: f64,
+        #[serde(default)]
+        right: f64,
+        #[serde(default)]
+        rows: Vec<RowSpan>,
+        #[serde(default)]
+        color: Option<String>,
+    },
     /// 性能监视 (monitor.rs): the small click-through box in the canvas's bottom-right corner with
     /// CPU / memory / GPU / Photoshop / ComfyUI numbers. `comfy`: ComfyUI's address for its row.
     Monitor {
@@ -622,6 +642,13 @@ mod tests {
             other => panic!("{other:?}"),
         }
         assert!(matches!(parse(r#"{"type":"panel-anchor"}"#), Some(Command::PanelAnchor)));
+        match parse(r##"{"type":"issue-rows","left":8,"right":300,"rows":[{"top":120,"bottom":148}],"color":"#E3B04B"}"##) {
+            Some(Command::IssueRows { left, right, rows, color: Some(c) }) => {
+                assert_eq!((left, right, rows[0].top, rows[0].bottom), (8.0, 300.0, 120.0, 148.0));
+                assert_eq!(c, "#E3B04B");
+            }
+            other => panic!("{other:?}"),
+        }
         assert!(matches!(
             parse(r#"{"type":"manage-comfy","path":"","base":"http://127.0.0.1:8188","restart":true}"#),
             Some(Command::ManageComfy { restart: true, .. })

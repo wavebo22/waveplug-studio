@@ -127,6 +127,8 @@ src/ui/app.ts  startOverlay()      生成页提供状态和     src/panel/genera
 - `hover-tint` 多了可选 `color`（"#rrggbb"），检查结果悬停时用红 / 黄；不带时仍是蓝色。
 - 颜色只有两种（0.32.0 统一）：错误红 `#EC7A69`，警告和提示黄 `#E3B04B`；检查窗口的标签和描边、图层面板的行（`.chk-error` / `.chk-warn`）、画面上的高亮都用这两个。
 - 连线（0.32.0）：带颜色的 tint 显示时，`frame.rs` 的第三个穿透窗口（「WavePlug 检查连线」）从检查窗口里悬停那一行朝向画布的边，画一条线到高亮形状最近的点（`leader_pixels`，有测试）；起点由 `host.rs` 每帧算好交给 `frame::set_leader`。
+- 0.33.0：连线也指向图层面板里的行：插件发 `{"type":"issue-rows","left","right","rows":[{top,bottom}],"color"}`（面板页面的 CSS px），helper 用锚定的面板窗口左上角 + CSS px × 显示缩放换成屏幕位置（`win::leader_rows`）；`leader_pixels` 从悬停行朝向目标的那一边画线（画布在左用左边，面板行在右用右边）。
+- 0.33.0：介面 `organize`（`panel/organize.rs`，AI 整理）和 `check` 共用同一个视窗（`host.rs assist`，最后显示的那个），位置、收起、连线完全相同；它的「补充要求」输入框获得焦点时 `win::check_set_typing` 让窗口接管键盘，离开时还给 Photoshop。
 
 ### 3.6 快捷键 Ctrl+F = 原位粘贴（2026-11-25，0.29.0，未实测）
 

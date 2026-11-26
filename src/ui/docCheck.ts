@@ -34,6 +34,8 @@ export interface DocCheckDeps {
   composite?(docId: number, maxEdge: number): Promise<string>;
   /** light up these layers in the issue's colour (null: none) */
   mark(ids: number[], sev: Issue["severity"] | null): void;
+  /** the window is about to show 检查结果: whatever else it showed (AI 整理) closes */
+  opening?(): void;
 }
 
 const COPY_KEY = "wp.check.copy", VISUAL_KEY = "wp.check.visual";
@@ -100,6 +102,7 @@ export function createDocCheck(d: DocCheckDeps) {
     if (!ov.checkReady) { d.status(`检查结果窗口需要 WavePlug 程序 0.31.0（现在是 ${ov.helperVersion ?? "旧版"}）：双击 update.cmd 更新`, "error"); return; }
     const id = d.docId();
     if (id === null) { d.status("没有打开的文档", "error"); return; }
+    d.opening?.();
     // the click is in this panel: the helper takes the window under the cursor as the panel
     ov.anchorPanel();
     open = true;

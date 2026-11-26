@@ -1136,20 +1136,6 @@ textarea,
 .lt .lt-list .lt-row.d4 { background-image: linear-gradient(to right, transparent 38px, var(--c-depth-1) 38px, var(--c-depth-1) 56px, var(--c-depth-2) 56px, var(--c-depth-2) 74px, var(--c-depth-3) 74px, var(--c-depth-3) 92px, var(--c-depth-4) 92px); }
 .lt .lt-list .lt-row.d5 { background-image: linear-gradient(to right, transparent 38px, var(--c-depth-1) 38px, var(--c-depth-1) 56px, var(--c-depth-2) 56px, var(--c-depth-2) 74px, var(--c-depth-3) 74px, var(--c-depth-3) 92px, var(--c-depth-4) 92px, var(--c-depth-4) 110px, var(--c-depth-5) 110px); }
 
-/* ── AI 整理图层 (src/ui/aiOrganize.ts): a sheet over the WavePlug 图层 panel ── */
-/* above the panel's own raised rows (.lt-find 36, menus 39, the hint history 40) */
-.ai-org { z-index: 41; }
-.ai-org .sheet-body { padding: var(--sp-4) var(--sp-5); }
-.ai-org-ask { display: flex; flex-direction: column; margin-top: var(--sp-4); }
-.ai-org-ask .check-row { margin-top: var(--sp-3); }
-.ai-org-row { min-width: 0; padding: var(--sp-2) 0; border-bottom: 1px solid var(--c-line-row); }
-.ai-org-row span { flex: none; white-space: nowrap; }
-.ai-org-from { flex: 0 1 auto !important; min-width: 0; overflow: hidden; text-overflow: ellipsis; color: var(--c-text-2) !important; }
-.ai-org-arrow { margin: 0 var(--sp-3); color: var(--c-text-2) !important; }
-.ai-org-to { color: var(--c-accent-hi) !important; }
-.ai-org-members { flex: 1 1 auto !important; min-width: 0; margin-left: var(--sp-3); overflow: hidden; text-overflow: ellipsis; color: var(--c-text-2) !important; font-size: var(--fs-s); }
-.ai-org-wait { margin-top: var(--sp-6); color: var(--c-text-2); font-size: var(--fs); }
-.ai-org-notes { margin-top: var(--sp-5); }
 
 /* ── 文档检查 (src/ui/docCheck.ts): the hovered issue's layers in the 检查结果 window's colour ── */
 /* red for 错误, yellow for 警告 and 提示: the same colours as the window and the canvas */

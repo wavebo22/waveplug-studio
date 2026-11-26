@@ -19,18 +19,23 @@
 // equally click-through — tints that shape lightly in the frame's blue over the canvas. It lies on
 // top of everything, so the parts of the layer other layers cover show too.
 //
-// 检查结果 (文档检查): the tint comes in the issue's colour (red / yellow), and a third window, as
-// click-through as the others, draws a line from the hovered row of the check window to the
-// nearest point of the tinted shape (set_leader: the row's edge on screen).
+// 检查结果 / AI 整理 (the window beside the 图层 panel): the tint comes in the item's colour
+// (red / yellow), and a third window, as click-through as the others, draws lines from the hovered
+// row of that window to the nearest point of the tinted shape (from the row's edge facing it) and
+// to the item's layer rows in the 图层 panel (set_leader: the row's edges; set_leader_rows).
 
 use crate::protocol::ScreenRect;
 
 #[cfg(windows)]
-pub use imp::{set, set_leader, set_tint};
+pub use imp::{set, set_leader, set_leader_rows, set_tint};
 
-/// The line from the check window's hovered row (`from`, screen px) to the tint; None: no line.
+/// The window's hovered row: its left and right edge and its middle (screen px); None: no lines.
 #[cfg(not(windows))]
-pub fn set_leader(_from: Option<(i32, i32)>) {}
+pub fn set_leader(_from: Option<(i32, i32, i32)>) {}
+
+/// The hovered item's rows in the 图层 panel (screen px) and their colour: lines go to them too.
+#[cfg(not(windows))]
+pub fn set_leader_rows(_rows: Vec<(i32, i32, i32, i32)>, _color: Option<(u8, u8, u8)>) {}
 
 /// Shows the frame around `rect` (screen px) cut to `clip`; `None` hides it (and the tint).
 #[cfg(not(windows))]
@@ -188,42 +193,61 @@ fn layout(rect: ScreenRect, clip: Option<ScreenRect>, t: i32) -> Option<((i32, i
     Some((win, outer))
 }
 
-/// The line from `from` to the nearest point of `to` (left, top, right, bottom; screen px): where
-/// its window goes and its pixels (premultiplied BGRA, top-down), `width` px wide and smoothed, a
-/// dot at each end. None when `from` is inside `to` (nothing to point at).
+/// The line from the row (`from`: its left and right edge and middle, screen px) to the nearest
+/// point of each target (left, top, right, bottom): from the edge facing the target. Where the
+/// window goes and its pixels (premultiplied BGRA, top-down), `width` px wide and smoothed, a dot at
+/// both ends of each line. None when there is nothing to point at.
 #[cfg_attr(not(windows), allow(dead_code))]
-fn leader_pixels(from: (i32, i32), to: (i32, i32, i32, i32), color: (u8, u8, u8), width: i32) -> Option<((i32, i32, i32, i32), Vec<u32>)> {
-    let end = (from.0.clamp(to.0, (to.2 - 1).max(to.0)), from.1.clamp(to.1, (to.3 - 1).max(to.1)));
-    if end == from {
+fn leader_pixels(from: (i32, i32, i32), targets: &[(i32, i32, i32, i32)], color: (u8, u8, u8), width: i32) -> Option<((i32, i32, i32, i32), Vec<u32>)> {
+    let lines: Vec<((f64, f64), (f64, f64))> = targets
+        .iter()
+        .filter_map(|to| {
+            let cx = (to.0 + to.2) / 2;
+            let x = if cx < (from.0 + from.1) / 2 { from.0 } else { from.1 };
+            let start = (x, from.2);
+            let end = (start.0.clamp(to.0, (to.2 - 1).max(to.0)), start.1.clamp(to.1, (to.3 - 1).max(to.1)));
+            (end != start).then(|| ((start.0 as f64, start.1 as f64), (end.0 as f64, end.1 as f64)))
+        })
+        .collect();
+    if lines.is_empty() {
         return None;
     }
     let half = width.max(1) as f64 / 2.0;
     let dot = half * 2.5;
     let pad = dot.ceil() as i32 + 2;
-    let win = (from.0.min(end.0) - pad, from.1.min(end.1) - pad, from.0.max(end.0) + pad + 1, from.1.max(end.1) + pad + 1);
+    let xs = lines.iter().flat_map(|(a, b)| [a.0, b.0]);
+    let ys = lines.iter().flat_map(|(a, b)| [a.1, b.1]);
+    let (min_x, max_x) = xs.fold((f64::MAX, f64::MIN), |(l, r), v| (l.min(v), r.max(v)));
+    let (min_y, max_y) = ys.fold((f64::MAX, f64::MIN), |(l, r), v| (l.min(v), r.max(v)));
+    let win = (min_x as i32 - pad, min_y as i32 - pad, max_x as i32 + pad + 1, max_y as i32 + pad + 1);
     let (w, h) = (win.2 - win.0, win.3 - win.1);
     if w <= 0 || h <= 0 || (w as i64) * (h as i64) > 40_000_000 {
         return None;
     }
-    let (ax, ay, bx, by) = (from.0 as f64, from.1 as f64, end.0 as f64, end.1 as f64);
-    let (dx, dy) = (bx - ax, by - ay);
-    let len2 = (dx * dx + dy * dy).max(1e-9);
     let mut px = vec![0u32; (w * h) as usize];
-    for y in 0..h {
-        let py = (win.1 + y) as f64 + 0.5;
-        for x in 0..w {
-            let pxf = (win.0 + x) as f64 + 0.5;
-            let t = (((pxf - ax) * dx + (py - ay) * dy) / len2).clamp(0.0, 1.0);
-            let d = ((pxf - ax - t * dx).powi(2) + (py - ay - t * dy).powi(2)).sqrt();
-            let de = ((pxf - bx).powi(2) + (py - by).powi(2)).sqrt();
-            let ds = ((pxf - ax).powi(2) + (py - ay).powi(2)).sqrt();
-            let a = (half + 0.5 - d).clamp(0.0, 1.0).max((dot + 0.5 - de).clamp(0.0, 1.0)).max((half * 1.8 + 0.5 - ds).clamp(0.0, 1.0));
-            if a <= 0.0 {
-                continue;
+    for &((ax, ay), (bx, by)) in &lines {
+        let (dx, dy) = (bx - ax, by - ay);
+        let len2 = (dx * dx + dy * dy).max(1e-9);
+        // only the band around this line
+        let (x0, x1) = ((ax.min(bx) - pad as f64) as i32 - win.0, (ax.max(bx) + pad as f64) as i32 - win.0 + 1);
+        let (y0, y1) = ((ay.min(by) - pad as f64) as i32 - win.1, (ay.max(by) + pad as f64) as i32 - win.1 + 1);
+        for y in y0.max(0)..y1.min(h) {
+            let py = (win.1 + y) as f64 + 0.5;
+            for x in x0.max(0)..x1.min(w) {
+                let pxf = (win.0 + x) as f64 + 0.5;
+                let t = (((pxf - ax) * dx + (py - ay) * dy) / len2).clamp(0.0, 1.0);
+                let d = ((pxf - ax - t * dx).powi(2) + (py - ay - t * dy).powi(2)).sqrt();
+                let de = ((pxf - bx).powi(2) + (py - by).powi(2)).sqrt();
+                let ds = ((pxf - ax).powi(2) + (py - ay).powi(2)).sqrt();
+                let a = (half + 0.5 - d).clamp(0.0, 1.0).max((dot + 0.5 - de).clamp(0.0, 1.0)).max((half * 1.8 + 0.5 - ds).clamp(0.0, 1.0));
+                let a8 = (a * 235.0).round() as u32;
+                let i = (y * w + x) as usize;
+                if a8 == 0 || a8 <= px[i] >> 24 {
+                    continue;
+                }
+                let c = |v: u8| (v as u32 * a8 + 127) / 255;
+                px[i] = (a8 << 24) | (c(color.0) << 16) | (c(color.1) << 8) | c(color.2);
             }
-            let a8 = (a * 235.0).round() as u32;
-            let c = |v: u8| (v as u32 * a8 + 127) / 255;
-            px[(y * w + x) as usize] = (a8 << 24) | (c(color.0) << 16) | (c(color.1) << 8) | c(color.2);
         }
     }
     Some((win, px))
@@ -286,8 +310,10 @@ mod imp {
     static HWND_SELF: AtomicIsize = AtomicIsize::new(0);
     static HWND_TINT: AtomicIsize = AtomicIsize::new(0);
     static HWND_LEADER: AtomicIsize = AtomicIsize::new(0);
-    /// where the check window's line starts (screen px)
-    static LEADER: Mutex<Option<(i32, i32)>> = Mutex::new(None);
+    /// where the window's lines start: the hovered row's left and right edge and middle (screen px)
+    static LEADER: Mutex<Option<(i32, i32, i32)>> = Mutex::new(None);
+    /// the hovered item's rows in the 图层 panel (screen px) and their colour
+    static LEADER_ROWS: Mutex<(Vec<(i32, i32, i32, i32)>, Option<(u8, u8, u8)>)> = Mutex::new((Vec::new(), None));
     /// the latest request; the window thread takes it, older ones are simply overwritten
     static WANTED: Mutex<Option<(ScreenRect, Option<ScreenRect>)>> = Mutex::new(None);
     static TINT: Mutex<Option<Tint>> = Mutex::new(None);
@@ -342,8 +368,22 @@ mod imp {
         post(&TINT_POSTED, WM_APP_TINT);
     }
 
-    /// The check window's hovered row (its edge, screen px): a line goes from it to the tint.
-    pub fn set_leader(from: Option<(i32, i32)>) {
+    /// The item's rows in the 图层 panel (screen px): lines go to them too (in `color`).
+    pub fn set_leader_rows(rows: Vec<(i32, i32, i32, i32)>, color: Option<(u8, u8, u8)>) {
+        if let Ok(mut l) = LEADER_ROWS.lock() {
+            if l.0 == rows && l.1 == color {
+                return;
+            }
+            *l = (rows, color);
+        }
+        START.call_once(|| {
+            thread::spawn(run);
+        });
+        post(&TINT_POSTED, WM_APP_TINT);
+    }
+
+    /// The window's hovered row (its edges, screen px): lines go from it to the tint and the rows.
+    pub fn set_leader(from: Option<(i32, i32, i32)>) {
         if let Ok(mut l) = LEADER.lock() {
             if *l == from {
                 return;
@@ -398,17 +438,22 @@ mod imp {
         true
     }
 
-    /// The line from the check window to the tint `to` (its window on screen), or none.
-    unsafe fn apply_leader(to: Option<((i32, i32, i32, i32), (u8, u8, u8))>) {
+    /// The lines from the window's hovered row to the tint `canvas` (its window on screen) and to
+    /// the item's rows in the 图层 panel, or none.
+    unsafe fn apply_leader(canvas: Option<((i32, i32, i32, i32), (u8, u8, u8))>) {
         let h = HWND_LEADER.load(Ordering::SeqCst) as HWND;
         if h.is_null() {
             return;
         }
         let from = LEADER.lock().ok().and_then(|l| *l);
-        let drawn = match (from, to) {
-            (Some(f), Some((rect, color))) => {
-                let k = thickness_at(f.0, f.1);
-                leader_pixels(f, rect, color, 2 * k).map(|(win, px)| blit(h, win, &px)).unwrap_or(false)
+        let (rows, row_color) = LEADER_ROWS.lock().map(|l| l.clone()).unwrap_or_default();
+        let mut targets: Vec<(i32, i32, i32, i32)> = canvas.map(|c| c.0).into_iter().collect();
+        targets.extend(rows.iter().take(8).copied());
+        let color = canvas.map(|c| c.1).or(row_color);
+        let drawn = match (from, color) {
+            (Some(f), Some(color)) if !targets.is_empty() => {
+                let k = thickness_at(f.0, f.2);
+                leader_pixels(f, &targets, color, 2 * k).map(|(win, px)| blit(h, win, &px)).unwrap_or(false)
             }
             _ => false,
         };
@@ -426,7 +471,7 @@ mod imp {
         let tint = TINT.lock().ok().and_then(|t| t.clone());
         let Some(t) = tint else {
             ShowWindow(h, SW_HIDE);
-            apply_leader(None);
+            apply_leader(None); // the lines to the panel rows still go
             return;
         };
         let k = thickness_at(((t.rect.left + t.rect.right) / 2.0) as i32, ((t.rect.top + t.rect.bottom) / 2.0) as i32);
@@ -623,14 +668,17 @@ mod tests {
     #[test]
     fn the_leader_runs_from_the_row_to_the_nearest_point_of_the_shape() {
         // from the right (the check window) to a shape on the left
-        let (win, px) = leader_pixels((500, 50), (100, 40, 200, 80), (0xEC, 0x7A, 0x69), 2).unwrap();
-        assert!(win.0 <= 199 && win.2 >= 500);
+        // the row spans x 500–800 at y 50; a shape on the left, a panel row on the right
+        let (win, px) = leader_pixels((500, 800, 50), &[(100, 40, 200, 80), (900, 30, 1200, 70)], (0xEC, 0x7A, 0x69), 2).unwrap();
+        assert!(win.0 <= 199 && win.2 >= 900);
         let w = (win.2 - win.0) as usize;
         let at = |x: i32, y: i32| px[((y - win.1) as usize) * w + (x - win.0) as usize];
-        assert!(at(350, 50) >> 24 > 200); // on the line
-        assert_eq!(at(350, 55) >> 24, 0); // 5 px off it
+        assert!(at(350, 50) >> 24 > 200); // the line left, from the row's left edge
+        assert!(at(850, 50) >> 24 > 200); // the line right, from the row's right edge
+        assert_eq!(at(650, 50) >> 24, 0); // nothing across the row itself
+        assert_eq!(at(350, 55) >> 24, 0); // 5 px off a line
         // from inside the shape: nothing to point at
-        assert!(leader_pixels((150, 50), (100, 40, 200, 80), (0, 0, 0), 2).is_none());
+        assert!(leader_pixels((150, 150, 50), &[(100, 40, 200, 80)], (0, 0, 0), 2).is_none());
     }
 
     #[test]

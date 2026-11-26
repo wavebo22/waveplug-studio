@@ -550,12 +550,35 @@ export function createLayerTreeView(tree: LayerTree, status: Status, tools?: Lay
   let issueMark: { ids: Set<number>; sev: "error" | "warn" | "info" } | null = null, issueRun = 0;
   // the same two colours as the window and the canvas: red for 错误, yellow for 警告 and 提示
   const issueClass = (id: number) => issueMark?.ids.has(id) ? (issueMark.sev === "error" ? " chk-error" : " chk-warn") : "";
+  /** the lines from the helper's window also go to the item's rows here: each layer's row (or, inside
+   *  a closed group, the group's), the first one scrolled into view; where they are on this page */
+  function sendIssueRows() {
+    if (!overlay?.assistReady) return;
+    if (!issueMark) { overlay.issueRows(null); return; }
+    const want: number[] = [];
+    for (const id of issueMark.ids) {
+      let idx = rows.findIndex(r => !r.filter && r.layer.id === id);
+      for (const a of idx < 0 ? ancestors(layers, id) : []) { idx = rows.findIndex(r => !r.filter && r.layer.id === a); if (idx >= 0) break; }
+      if (idx >= 0 && !want.includes(idx)) want.push(idx);
+      if (want.length >= 8) break;
+    }
+    if (!want.length) { overlay.issueRows(null); return; }
+    want.sort((a, b) => a - b);
+    const h0 = yOf(want[0]);
+    if (h0 < 0 || h0 + heightOf(rows[want[0]]) > listH()) scrollTo(rows[want[0]].layer.id);
+    const at = offsetIn(list, document.body ?? document.documentElement);
+    if (!at) { overlay.issueRows(null); return; }
+    const spans = want.map(i => ({ top: at.y + yOf(i), bottom: at.y + yOf(i) + heightOf(rows[i]) }))
+      .filter(s => s.bottom > at.y && s.top < at.y + listH());
+    overlay.issueRows({ left: at.x, right: at.x + list.clientWidth, rows: spans, color: SEVERITY_COLOR[issueMark.sev] });
+  }
   async function markIssue(ids: number[], sev: "error" | "warn" | "info" | null) {
     const run = ++issueRun;
     issueMark = sev && ids.length ? { ids: new Set(ids), sev } : null;
     // only the issue's colour on the canvas: the row-hover frame (blue) goes
     if (issueMark) hideFrame();
     draw();
+    sendIssueRows();
     const d = docId;
     if (!issueMark || d === null || !overlay?.tintReady || !canvasView) { overlay?.hoverTint(null); return; }
     const v = await viewOf(d);
@@ -3270,7 +3293,7 @@ export function createLayerTreeView(tree: LayerTree, status: Status, tools?: Lay
     else if (kind === "dist") void run("distribute", ids, arg);
     else if (kind === "arrange") arrange(arg as "forward" | "backward" | "front" | "back");
     else if (kind === "tool") void runTool(arg, ids);
-    else if (kind === "assist" && arg === "organize") aiOrganize?.open();
+    else if (kind === "assist" && arg === "organize") aiOrganize?.button.click();
     else if (kind === "send" && arg === "ai") void sendToIllustrator(ids);
     else if (kind === "send" && arg === "aiboard") void sendBoardToIllustrator();
     else if (kind === "ai" && docId !== null) {
@@ -3554,50 +3577,18 @@ export function createLayerTreeView(tree: LayerTree, status: Status, tools?: Lay
   const bar = h("div", { class: "lt-bar" }, linkBtn, fxBtn, maskBtn, adjBtn, groupBtn, newBtn, trashBtn, stampBtn);
 
   // ── AI 整理 (DeepSeek): the button beside ☰ and the right-click menu's row (aiOrganize.ts) ──
+  // AI 整理 and 检查 share the helper's window beside the panel: opening one closes the other
   const aiOrganize = assistant ? createAiOrganize({
-    tree, status, fetch: assistant.fetch, settings: assistant.settings,
+    overlay, tree, status, fetch: assistant.fetch, settings: assistant.settings,
     state: () => ({ docId, layers, selected, width: canvas.width, height: canvas.height }),
-    refresh: () => void refresh(),
-    host: () => sheetHost(),
+    refresh: () => void refresh(), mark: (ids, sev) => void markIssue(ids, sev), opening: () => docCheck?.close(),
   }) : null;
   // ── 文档检查: the button beside AI 整理; its list is the helper's window beside the panel (docCheck.ts) ──
   const docCheck = assistant?.checker ? createDocCheck({
     overlay, checker: assistant.checker, tree, tools, status, fetch: assistant.fetch, settings: assistant.settings, composite: assistant.composite,
-    docId: () => docId, docVersion, refresh: () => void refresh(), mark: (ids, sev) => void markIssue(ids, sev),
+    docId: () => docId, docVersion, refresh: () => void refresh(), mark: (ids, sev) => void markIssue(ids, sev), opening: () => aiOrganize?.close(),
   }) : null;
 
-  // Any sheet over the panel (AI 整理, 检查, later ones) goes through sheetHost(): UXP draws native
-  // text fields above everything whatever the z-index, so while a sheet is up the panel's own fields
-  // are taken out of the page and put back where they were when the last sheet closes. Taken out,
-  // not hidden: a visibility toggle coincided with a host crash in 0.1.4 (DEVELOPMENT.md). Same
-  // approach as the Studio panel (app.ts syncSheets).
-  let parked: { node: Element; parent: Node; next: Node | null }[] = [];
-  let patched: HTMLElement | null = null;
-  const sheetHost = (): HTMLElement => {
-    const host = el.parentElement ?? el;
-    if (patched === host) return host;
-    patched = host;
-    const sync = () => {
-      const open = !!Array.from(host.children).some(c => c.classList.contains("sheet"));
-      if (open && !parked.length) {
-        parked = Array.from(el.querySelectorAll("input, textarea")).filter(n => n.parentNode).map(node => ({ node, parent: node.parentNode!, next: node.nextSibling }));
-        for (const p of parked) p.node.remove();
-      } else if (!open && parked.length) {
-        for (const p of [...parked].reverse()) p.parent.insertBefore(p.node, p.next && p.next.parentNode === p.parent ? p.next : null);
-        parked = [];
-      }
-    };
-    const append = host.append.bind(host);
-    host.append = (...nodes: (Node | string)[]) => {
-      for (const n of nodes) if (n instanceof HTMLElement && n.classList.contains("sheet")) {
-        const detach = n.remove.bind(n);
-        n.remove = () => { detach(); sync(); };
-      }
-      append(...nodes);
-      sync();
-    };
-    return host;
-  };
 
   // ── the panel menu (☰, as the menu at the top right of Photoshop's Layers panel) ──
   const SHORTCUT_KEY = "wp.layers.shortcuts";
@@ -3642,7 +3633,7 @@ export function createLayerTreeView(tree: LayerTree, status: Status, tools?: Lay
   }
   listen(document, "keydown", e => {
     const k = e as KeyboardEvent;
-    if (!shortcutsOn || docId === null || drag?.active || renaming !== null || deleting || !pointerIn || typing(document.activeElement) || aiOrganize?.isOpen()) return;
+    if (!shortcutsOn || docId === null || drag?.active || renaming !== null || deleting || !pointerIn || typing(document.activeElement)) return;
     const ctrl = k.ctrlKey || k.metaKey, key = (k.key ?? "").toLowerCase(), code = k.code ?? "";
     const left = code === "BracketLeft" || key === "[" || key === "{", right = code === "BracketRight" || key === "]" || key === "}";
     const sel = selectedLayers(), now = sel.map(l => l.id), doc = docId;

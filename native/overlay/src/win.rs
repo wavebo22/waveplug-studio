@@ -2562,10 +2562,12 @@ static CHECK_OWNER: AtomicIsize = AtomicIsize::new(0);
 /// where the window was last put (to skip moves to the same place)
 static CHECK_AT: Mutex<Option<(i32, i32, i32, i32)>> = Mutex::new(None);
 static CHECK_GUARD_HWND: AtomicIsize = AtomicIsize::new(0);
+/// AI 整理's text field has the keyboard: clicks may activate the window
+static CHECK_TYPING: AtomicBool = AtomicBool::new(false);
 static CHECK_ORIGINAL_WNDPROC: AtomicIsize = AtomicIsize::new(0);
 
 unsafe extern "system" fn check_wnd_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
-    if msg == WM_MOUSEACTIVATE {
+    if msg == WM_MOUSEACTIVATE && !CHECK_TYPING.load(Ordering::SeqCst) {
         return MA_NOACTIVATE; // clicks go in, the keyboard stays with Photoshop
     }
     let original = CHECK_ORIGINAL_WNDPROC.load(Ordering::SeqCst);
@@ -2691,15 +2693,46 @@ pub fn check_place() -> bool {
     true
 }
 
-/// The check window on screen (left, top) and whether it is left of the panel (the canvas is
-/// then further left); None while hidden or parked.
-pub fn check_origin() -> Option<(i32, i32, bool)> {
+/// The check window on screen (left, top); None while hidden or parked.
+pub fn check_origin() -> Option<(i32, i32)> {
     if !CHECK_SHOWN.load(Ordering::SeqCst) || CHECK_PARKED.load(Ordering::SeqCst) {
         return None;
     }
-    let (x, y, w, _) = (*CHECK_AT.lock().ok()?)?;
-    let left_of_panel = check_panel_rect().map(|p| x + w <= p.0 + 1).unwrap_or(true);
-    Some((x, y, left_of_panel))
+    let (x, y, _, _) = (*CHECK_AT.lock().ok()?)?;
+    Some((x, y))
+}
+
+/// The plugin's rows (CSS px of the 图层 panel's page) on screen: the anchored panel window's
+/// corner plus CSS px × the display scale. None of them without an anchor.
+pub fn leader_rows(left: f64, right: f64, rows: &[crate::protocol::RowSpan]) -> Vec<(i32, i32, i32, i32)> {
+    let a = CHECK_ANCHOR.load(Ordering::SeqCst) as HWND;
+    if a.is_null() || unsafe { IsWindow(a) } == 0 {
+        return Vec::new();
+    }
+    let Some(r) = window_rect(a) else { return Vec::new() };
+    let k = dpi_at(POINT { x: (r.left + r.right) / 2, y: (r.top + r.bottom) / 2 }) / 96.0;
+    let at = |v: f64| (v * k).round() as i32;
+    rows.iter()
+        .map(|s| (r.left + at(left), r.top + at(s.top), r.left + at(right), r.top + at(s.bottom)))
+        .filter(|q| q.3 > r.top && q.1 < r.bottom)
+        .collect()
+}
+
+/// AI 整理's text field got / lost the keyboard: the window takes it from Photoshop (as the generate
+/// panel's prompt does) and gives it back.
+pub fn check_set_typing(on: bool) {
+    let h = check_hwnd();
+    if h.is_null() {
+        return;
+    }
+    CHECK_TYPING.store(on, Ordering::SeqCst);
+    log::line(format!("check window typing {on}"));
+    set_style(h, !on);
+    if on {
+        unsafe { SetForegroundWindow(h) };
+    } else {
+        give_back_focus();
+    }
 }
 
 /// 收起 / 展开: only the title bar, or as tall as the panel.

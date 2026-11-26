@@ -91,6 +91,9 @@ export type OverlayCommand =
    *  now (the user just clicked 检查 in it); the helper takes the window there and keeps the check
    *  window beside it */
   | { type: "panel-anchor" }
+  /** the hovered item's layer rows in the 图层 panel (CSS px of its page) and their colour: the
+   *  window's lines go to them too (helper ≥ ASSIST_HELPER_VERSION); no rows: none */
+  | { type: "issue-rows"; left: number; right: number; rows: { top: number; bottom: number }[]; color?: string }
   /** 按键 (helper ≥ KEYS_HELPER_VERSION): report Ctrl / Shift / Alt while on (renew within 3 s) */
   | { type: "watch-keys"; on: boolean }
   /** 快捷键 (native/overlay/src/hotkey.rs): while on, Ctrl+F in Photoshop is taken from Photoshop
@@ -198,11 +201,13 @@ export type OverlayEvent =
 /** The helper build this plugin's protocol needs (native/overlay/Cargo.toml). Bump both together:
  *  an older helper still connects, but e.g. can't arbitrate drag verdicts (drag_target.rs), and
  *  without this check a stale exe looks exactly like a bug in new code. */
-export const EXPECTED_HELPER_VERSION = "0.32.0";
+export const EXPECTED_HELPER_VERSION = "0.33.0";
 /** the native 编辑工作台 window (panel/shelf.rs) needs at least this helper; older: the in-panel workbench */
 export const WORKBENCH_HELPER_VERSION = "0.11.0";
 /** the 检查结果 window, panel-anchor and coloured hover-tint need at least this helper (native/overlay/HANDOFF.md 3.5b) */
 export const CHECK_HELPER_VERSION = "0.31.0";
+/** issue-rows (lines to the 图层 panel's rows) and the AI 整理 window need at least this helper */
+export const ASSIST_HELPER_VERSION = "0.33.0";
 /** the 外置删除区 (layer-drag-trash) needs at least this helper; older: the panel's left red rail */
 export const TRASH_HELPER_VERSION = "0.12.0";
 /** 性能监视 (monitor) needs at least this helper; an older one ignores the message */
