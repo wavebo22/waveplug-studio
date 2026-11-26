@@ -2,7 +2,7 @@
 // missing fonts, oversized / blurry / broken smart objects, delivery settings (colour mode,
 // resolution, safe margin, rich black), text (tiny, maybe cut off, low contrast, near-identical
 // sizes), tidiness (empty, off-canvas, invisible layers, unused AI variants) and design consistency
-// (near-identical colours, 1–2 px misalignment, uneven spacing). Pure (tests/check_rules.test.ts);
+// (near-identical colours and sizes, uneven spacing). Pure (tests/check_rules.test.ts);
 // the copy and the visual checks are DeepSeek's (core/check/ai.ts).
 
 import type { Rect } from "../image/region.ts";
@@ -63,6 +63,8 @@ export interface CheckText {
   /** 段落文字: its box on the canvas (px), when it could be worked out */
   box?: Rect;
   visible: boolean;
+  /** shown layer style that recolours the text (颜色叠加 / 渐变叠加 / 图案叠加 / 描边) */
+  overlay?: boolean;
 }
 
 export interface CheckDoc {
@@ -251,7 +253,8 @@ export function runChecks(doc: CheckDoc, purpose: Purpose): Issue[] {
   const lowContrast: { id: number; ratio: number }[] = [];
   for (const t of doc.texts) {
     const bg = doc.backgrounds.get(t.id);
-    if (!t.visible || !t.rgb || !bg || !t.contents.trim()) continue;
+    // a colour / gradient / pattern overlay or a stroke draws the text in other colours than its own
+    if (!t.visible || !t.rgb || !bg || !t.contents.trim() || t.overlay) continue;
     const large = Math.max(...t.sizesPx, 0) >= (purpose === "print" ? 18 / 72 * doc.ppi : purpose === "mobile" ? 24 * (doc.width / 375) : 24);
     const ratio = contrast(t.rgb, bg);
     if (ratio < (large ? 3 : 4.5)) lowContrast.push({ id: t.id, ratio });
@@ -266,7 +269,8 @@ export function runChecks(doc: CheckDoc, purpose: Purpose): Issue[] {
   const sizes = [...sizeUsers.keys()].sort((a, b) => a - b);
   for (let i = 1; i < sizes.length; i++) {
     const a = sizes[i - 1], b = sizes[i];
-    if (b - a > 0 && b - a <= Math.max(0.6, a * 0.02)) out.push({ key: `text:size:${a}:${b}`, category: "design", severity: "warn", ids: [...sizeUsers.get(a)!, ...sizeUsers.get(b)!],
+    // only slips (23.8 / 24): bigger differences are usually meant
+    if (b - a >= 0.05 && b - a <= 0.5) out.push({ key: `text:size:${a}:${b}`, category: "design", severity: "warn", ids: [...sizeUsers.get(a)!, ...sizeUsers.get(b)!],
       title: `字号 ${fmt(a, 1)} 和 ${fmt(b, 1)} px 很接近`, detail: `${names(sizeUsers.get(a)!, nameOf, 2)}用 ${fmt(a, 1)}，${names(sizeUsers.get(b)!, nameOf, 2)}用 ${fmt(b, 1)}：多半应该是同一个字号` });
   }
 
@@ -306,7 +310,6 @@ export function runChecks(doc: CheckDoc, purpose: Purpose): Issue[] {
     out.push({ key: "design:colour:" + key, category: "design", severity: "warn", ids: [...main[1].ids, ...odd[1].ids],
       title: `颜色 ${main[0]} 和 ${odd[0]} 几乎一样`, detail: `${names(main[1].ids, nameOf, 2)}用 ${main[0]}，${names(odd[1].ids, nameOf, 2)}用 ${odd[0]}：多半应该统一成一个颜色` });
   }
-  out.push(...alignment(layers, shown, inAi, nameOf));
   out.push(...spacing(layers, shown, inAi, nameOf));
 
   const order: Record<Severity, number> = { error: 0, warn: 1, info: 2 };
@@ -314,37 +317,6 @@ export function runChecks(doc: CheckDoc, purpose: Purpose): Issue[] {
 }
 
 function overlaps(a: Rect, b: Rect) { return a.left < b.right && b.left < a.right && a.top < b.bottom && b.top < a.bottom; }
-
-/** 1–2 px off: two neighbouring layers whose edges or centres almost line up. */
-function alignment(layers: ScanLayer[], shown: (l: ScanLayer) => boolean, inAi: (l: ScanLayer) => boolean, nameOf: (id: number) => string): Issue[] {
-  const items = layers.filter(l => l.kind !== "group" && shown(l) && !inAi(l) && l.bounds && w(l.bounds) >= 8 && hgt(l.bounds) >= 8);
-  const out: Issue[] = [];
-  const done = new Set<string>();
-  const byParent = new Map<number | null, ScanLayer[]>();
-  for (const l of items) { const p = l.parentId ?? null; const a = byParent.get(p); if (a) a.push(l); else byParent.set(p, [l]); }
-  for (const sibs of byParent.values()) {
-    if (sibs.length > 200) continue; // too many to compare meaningfully
-    for (let i = 0; i < sibs.length; i++) for (let j = i + 1; j < sibs.length; j++) {
-      const a = sibs[i].bounds!, b = sibs[j].bounds!;
-      // stacked (one above the other, close): left / right / centre x; side by side: top / bottom / centre y
-      const vGap = Math.max(a.top, b.top) - Math.min(a.bottom, b.bottom);
-      const hGap = Math.max(a.left, b.left) - Math.min(a.right, b.right);
-      const checks: [string, number, number][] = [];
-      if (vGap >= 0 && vGap <= Math.max(hgt(a), hgt(b)) * 1.5) checks.push(["左边", a.left, b.left], ["右边", a.right, b.right], ["水平居中", (a.left + a.right) / 2, (b.left + b.right) / 2]);
-      if (hGap >= 0 && hGap <= Math.max(w(a), w(b)) * 1.5) checks.push(["顶边", a.top, b.top], ["底边", a.bottom, b.bottom], ["垂直居中", (a.top + a.bottom) / 2, (b.top + b.bottom) / 2]);
-      const hit = checks.find(([, x, y]) => { const d = Math.abs(x - y); return d >= 1 && d <= 2; });
-      // only when nothing else lines up exactly (then the near miss is likely meant)
-      if (!hit || checks.some(([, x, y]) => Math.abs(x - y) < 0.5)) continue;
-      const key = [sibs[i].id, sibs[j].id].sort().join("/");
-      if (done.has(key)) continue;
-      done.add(key);
-      out.push({ key: "design:align:" + key, category: "design", severity: "info", ids: [sibs[i].id, sibs[j].id],
-        title: `「${nameOf(sibs[i].id)}」和「${nameOf(sibs[j].id)}」${hit[0]}差 ${fmt(Math.abs(hit[1] - hit[2]))} px`, detail: "看起来想对齐但差了一点；用「对齐」对齐一下" });
-      if (out.length >= 20) return out;
-    }
-  }
-  return out;
-}
 
 /** Same-size siblings in a row or a column whose gaps differ by a few px. */
 function spacing(layers: ScanLayer[], shown: (l: ScanLayer) => boolean, inAi: (l: ScanLayer) => boolean, nameOf: (id: number) => string): Issue[] {
@@ -365,7 +337,8 @@ function spacing(layers: ScanLayer[], shown: (l: ScanLayer) => boolean, inAi: (l
         const gaps = line.slice(1).map((o, i) => axis === "x" ? o.bounds!.left - line[i].bounds!.right : o.bounds!.top - line[i].bounds!.bottom);
         if (gaps.some(g => g < 0)) continue;
         const spread = Math.max(...gaps) - Math.min(...gaps);
-        if (spread < 1 || spread > 4) continue;
+        // 1–2 px is rounding, more than 6 px is usually meant
+        if (spread < 3 || spread > 6) continue;
         line.forEach(o => used.add(o.id));
         out.push({ key: "design:gap:" + line.map(o => o.id).join("-"), category: "design", severity: "info", ids: line.map(o => o.id),
           title: `${line.length} 个同样大小的元素${axis === "x" ? "横向" : "纵向"}间距不统一`, detail: `从「${nameOf(line[0].id)}」起，间距是 ${gaps.map(g => fmt(g)).join(" / ")} px；用「分布」或统一成一个数` });

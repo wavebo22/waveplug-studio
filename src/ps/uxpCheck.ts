@@ -37,6 +37,16 @@ const rectOf = (b: any): Rect | null => {
   return [r.left, r.top, r.right, r.bottom].every(Number.isFinite) && r.right > r.left && r.bottom > r.top ? r : null;
 };
 
+/** a shown layer style draws the text in other colours (颜色 / 渐变 / 图案叠加, 描边) */
+function recolours(r: any): boolean {
+  const fx = r?.layerEffects;
+  if (!fx || r.layerFXVisible === false) return false;
+  return ["solidFill", "gradientFill", "patternFill", "frameFX"].some(k => {
+    const one = fx[k], many = fx[k + "Multi"];
+    return (one && one.enabled !== false) || (Array.isArray(many) && many.some((e: any) => e?.enabled !== false));
+  });
+}
+
 export class UxpChecker implements DocChecker {
   constructor(private tools: UxpTools) {}
 
@@ -93,6 +103,7 @@ export class UxpChecker implements DocChecker {
           fonts: styles.map(s => String(s.fontPostScriptName ?? "")), fontNames: styles.map(s => String(s.fontName ?? s.fontPostScriptName ?? "")),
           sizesPx: sizes, ...first, ranges: Math.max(1, ranges.length),
           bounds: rectOf(r.boundsNoEffects ?? r.bounds), ...(box ? { box } : {}), visible: visible.get(id) !== false,
+          ...(recolours(r) ? { overlay: true } : {}),
         });
       });
     }

@@ -35,7 +35,7 @@ const keep = (k: string, v: string) => { try { localStorage.setItem(k, v); } cat
 
 export function createDocCheck(d: DocCheckDeps) {
   let sheet: HTMLElement | null = null;
-  const button = h("button", { class: "lt-head-btn", title: "文档检查：缺失字体、太大或发糊的智能对象、丢失的链接、交付设置（颜色模式、分辨率、出血和安全边距、四色黑）、文字（太小、可能截断、对比度低、占位文字）、图层整洁、颜色 / 字号 / 对齐 / 间距是否统一；可选让 DeepSeek 检查文案（错别字、标点、前后不一致、广告法用语、翻译）和看画面（AI 生成瑕疵、排版问题）。只列出问题，点了按钮才会修改" }, "检查");
+  const button = h("button", { class: "lt-head-btn", title: "文档检查：缺失字体、太大或发糊的智能对象、丢失的链接、交付设置（颜色模式、分辨率、出血和安全边距、四色黑）、文字（太小、可能截断、对比度低、占位文字）、图层整洁、颜色 / 字号 / 间距是否统一；可选让 DeepSeek 检查文案（错别字、标点、前后不一致、广告法用语、翻译）和看画面（AI 生成瑕疵、排版问题）。只列出问题，点了按钮才会修改" }, "检查");
   button.addEventListener("click", () => open());
   const close = () => { sheet?.remove(); sheet = null; };
 

@@ -73,6 +73,10 @@ test("文字：太小、占位文字、对比度低、字号几乎一样", () =>
   });
   const k = keys(d);
   assert.ok(k.includes("text:tiny") && k.includes("text:placeholder:2") && k.includes("text:contrast:3") && k.includes("text:size:23.8:24"));
+  // a colour overlay recolours the text: its own colour says nothing about contrast
+  assert.ok(!keys({ ...d, texts: d.texts.map(t => t.id === 3 ? { ...t, overlay: true } : t) }).includes("text:contrast:3"));
+  // 31.8 / 32.4: a real difference, not a slip
+  assert.ok(!keys(doc({ texts: [text(6, { sizesPx: [31.8] }), text(7, { sizesPx: [32.4] })] })).some(k => k.startsWith("text:size")));
   assert.ok(contrast({ r: 0, g: 0, b: 0 }, { r: 255, g: 255, b: 255 }) > 20);
 });
 
@@ -97,14 +101,13 @@ test("整洁：空图层、画布外、AI 没用的变体、默认名", () => {
   assert.equal(by("hyg:names").ids.length, 5);
 });
 
-test("一致性：几乎一样的颜色、差 1～2 px 的对齐、不均匀的间距", () => {
+test("一致性：几乎一样的颜色、明显不均匀的间距（1～2 px 不报）", () => {
   const d = doc({ texts: [text(1, { rgb: { r: 255, g: 90, b: 31 } }), text(2, { rgb: { r: 255, g: 91, b: 32 }, bounds: { left: 200, top: 300, right: 400, bottom: 340 } })] });
   assert.ok(keys(d).some(k => k.startsWith("design:colour:")));
-  const a = layer(1, "卡片 A", "shape", { bounds: { left: 100, top: 100, right: 300, bottom: 200 } });
-  const b = layer(2, "卡片 B", "shape", { bounds: { left: 101, top: 220, right: 280, bottom: 300 } });
-  assert.ok(keys(doc({}, [a, b])).some(k => k.startsWith("design:align:")));
-  const row = [0, 1, 2, 3].map(i => layer(10 + i, "格 " + i, "shape", { bounds: { left: 100 + i * 124 + (i === 3 ? 2 : 0), top: 500, right: 200 + i * 124 + (i === 3 ? 2 : 0), bottom: 600 } }));
-  assert.ok(keys(doc({}, row)).some(k => k.startsWith("design:gap:")));
+  // 1–2 px differences are not reported (rounding); 4 px is
+  const row = (d: number) => [0, 1, 2, 3].map(i => layer(10 + i, "格 " + i, "shape", { bounds: { left: 100 + i * 124 + (i === 3 ? d : 0), top: 500, right: 200 + i * 124 + (i === 3 ? d : 0), bottom: 600 } }));
+  assert.ok(!keys(doc({}, row(2))).some(k => k.startsWith("design:gap:")));
+  assert.ok(keys(doc({}, row(4))).some(k => k.startsWith("design:gap:")));
 });
 
 test("背景取色：文字外圈的中位色", () => {
