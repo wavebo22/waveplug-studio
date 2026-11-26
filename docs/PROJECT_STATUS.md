@@ -80,6 +80,7 @@ dev/          开发版加载器（注册两个面板，eval 最新构建）
 - 操作：拖动排序；右键菜单；底部工具栏；双击（缩略图 → 图层样式，名字 → 重命名，智能对象图标 → 打开内容）。
 - 顶部：搜索和类型筛选、混合模式、不透明度和填充、锁定。
 - AI 整理（DeepSeek，2026-11-26）：左下角「AI 整理」按钮 / 右键菜单。`src/core/assistant/`（deepseek.ts 请求、organize.ts 范围 / 提示词 / 校验方案，有测试）、`src/ui/aiOrganize.ts`（预览勾选页）、`UxpLayerTree.texts / organize`（一步历史记录）。Key 和模型在 WavePlug 程序 › 功能设置 › AI 助手（`deepseekKey` / `deepseekModel`，日志和诊断里只写「已填写」）。校验保证不改画面：新组只收相邻同级、不拆剪贴蒙版、不动背景 / 画板 / AI 结果组内部。**PS 里待实测**。
+- 文档检查（2026-11-26）：左下角「检查」。规则在 `src/core/check/rules.ts`（纯逻辑，`tests/check_rules.test.ts`），AI 文案 / 看图在 `src/core/check/ai.ts`（看图用 `deepseek-flash`，不开 JSON 模式），PS 读取在 `src/ps/uxpCheck.ts`（复用 `scanDoc`；前 3 个文字图层的原始描述写进日志 `check text raw`，用来核对字号和文本框换算），界面 `src/ui/docCheck.ts`。**PS 里待实测**：字号单位、文本框位置、缺失字体名、`linkMissing` / `linkChanged` 字段都还没在真实文档上确认。
 - 性能：只画放得下的行，自绘滚动条，不用原生滚动区域；缩略图按图层内容读（细长图层补边到 4:1），按图层缓存。
 - 11-02 新增（多数还没在 PS 里确认）：缩略图大小「无 / 小 / 中 / 大」、组和子行用矮行高、PS 风格图标、画板圆角彩框、Ctrl+单击载入选区；只改了源码的有图层颜色、拖过眼睛列批量显示 / 隐藏、矢量蒙版、蒙版链接、Alt 看蒙版、双击智能滤镜。确认程度见 `LAYER_PANEL_HANDOFF.md` 第 3 节。
 

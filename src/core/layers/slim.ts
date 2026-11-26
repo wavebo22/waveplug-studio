@@ -20,6 +20,11 @@ export interface ScanSmart {
   /** content size in its own pixels */
   width: number;
   height: number;
+  /** smartObjectMore.ID: instances share it */
+  contentId?: string;
+  /** linked: the file is gone / changed since it was placed */
+  linkMissing?: boolean;
+  linkChanged?: boolean;
 }
 
 export interface ScanLayer {

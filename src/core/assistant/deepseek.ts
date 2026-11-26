@@ -4,6 +4,8 @@
 
 export const DEEPSEEK_BASE = "https://api.deepseek.com";
 export const DEEPSEEK_DEFAULT_MODEL = "deepseek-chat";
+/** the model that reads images (https://api-docs.deepseek.com/guides/vision) */
+export const DEEPSEEK_VISION_MODEL = "deepseek-flash";
 
 export interface DeepSeekConfig {
   key: string;
@@ -19,6 +21,12 @@ export interface JsonRequest {
   /** the answer's length limit in tokens (default 8000, DeepSeek's maximum for deepseek-chat) */
   maxTokens?: number;
   temperature?: number;
+  /** images (data:image/png;base64,… or https://…) sent after the text; they need a model that
+   *  reads images (DEEPSEEK_VISION_MODEL) */
+  images?: string[];
+  /** DeepSeek's JSON output mode; default on without images. With images it is left off (its docs
+   *  don't say the two work together) and the JSON is read out of the answer. */
+  jsonMode?: boolean;
 }
 
 /** What the request cost, for the log and the status line. */
@@ -47,10 +55,13 @@ export function statusMessage(status: number, detail = ""): string {
 /** The JSON object in an answer; tolerates a ```json fence around it. */
 export function parseJsonAnswer(text: string): unknown {
   let t = text.trim();
-  const fence = /^```(?:json)?\s*([\s\S]*?)\s*```$/i.exec(t);
+  const fence = /```(?:json)?\s*([\s\S]*?)\s*```/i.exec(t);
   if (fence) t = fence[1];
   try { return JSON.parse(t); }
-  catch { throw new DeepSeekError("DeepSeek 的回复不是有效的 JSON，请重试"); }
+  catch { /* maybe text around it */ }
+  const a = t.indexOf("{"), b = t.lastIndexOf("}");
+  if (a >= 0 && b > a) { try { return JSON.parse(t.slice(a, b + 1)); } catch { /* not JSON */ } }
+  throw new DeepSeekError("DeepSeek 的回复不是有效的 JSON，请重试");
 }
 
 /** Sends one request (JSON output mode) and returns the parsed object. */
@@ -68,8 +79,10 @@ export async function deepseekJson(
       headers: { "Content-Type": "application/json", Authorization: `Bearer ${key}` },
       body: JSON.stringify({
         model,
-        messages: [{ role: "system", content: req.system }, { role: "user", content: req.user }],
-        response_format: { type: "json_object" },
+        messages: [{ role: "system", content: req.system }, { role: "user", content: req.images?.length
+          ? [{ type: "text", text: req.user }, ...req.images.map(url => ({ type: "image_url", image_url: { url } }))]
+          : req.user }],
+        ...((req.jsonMode ?? !req.images?.length) ? { response_format: { type: "json_object" } } : {}),
         temperature: req.temperature ?? 0.3,
         max_tokens: req.maxTokens ?? 8000,
         stream: false,

@@ -20,6 +20,8 @@ export interface Services {
   comfy(base: string): Comfy;
   /** fetch for the AI assistant's requests (DeepSeek); without it the AI features are not shown */
   aiFetch?: typeof fetch;
+  /** 文档检查's reader (src/ps/uxpCheck.ts); without it the check isn't shown */
+  checker?: import("../ps/host.ts").DocChecker;
   pickJson(): Promise<{ name: string; text: string } | null>;
   pickImage(): Promise<PickedImage | null>;
   saveImage(png: Uint8Array, suggested: string): Promise<boolean>;

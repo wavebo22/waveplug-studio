@@ -198,10 +198,18 @@ export interface LayerTools {
   renameLayers(names: { id: number; name: string }[]): Promise<ToolResult>;
   /** 文档优化: what the active document holds that could go, or null without a document */
   scanDoc(): Promise<DocScan | null>;
-  /** 文档优化: removes the given kinds of items (one undo step) */
-  slim(kinds: SlimKind[]): Promise<ToolResult>;
+  /** 文档优化: removes the given kinds of items (one undo step); `only`: just these layers of them (文档检查) */
+  slim(kinds: SlimKind[], only?: number[]): Promise<ToolResult>;
   /** Photoshop's 清理 → 全部 (history, clipboard, caches); can't be undone */
   purgeMemory(): Promise<void>;
+}
+
+/** 文档检查: what the local checks need from the active document (core/check/rules.ts). */
+export interface DocChecker {
+  /** null without a document or when `docId` isn't the active one */
+  read(docId: number): Promise<import("../core/check/rules.ts").CheckDoc | null>;
+  /** replaces `from` with `to` once in a text layer (one undo step); false when `from` is gone */
+  setText(docId: number, id: number, from: string, to: string): Promise<boolean>;
 }
 
 export interface LayerDeleteResult {

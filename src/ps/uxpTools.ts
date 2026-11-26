@@ -659,6 +659,8 @@ export class UxpTools implements LayerTools {
           shared: !!contentIds[i] && contentIds.filter((c: string) => c === contentIds[i]).length > 1,
           styled: !!r.layerEffects || !!r.hasUserMask, quad: q as Quad,
           width: Number(more.size?.width ?? 0), height: Number(more.size?.height ?? 0),
+          ...(contentIds[i] ? { contentId: contentIds[i] } : {}),
+          ...(so.linkMissing ? { linkMissing: true } : {}), ...(so.linkChanged ? { linkChanged: true } : {}),
         };
       });
     }
@@ -672,10 +674,11 @@ export class UxpTools implements LayerTools {
     return { width: Math.round(d.width), height: Math.round(d.height), bytesPerPixel: (colour + 1) * bits / 8, bits, layers, alphaChannels, maxCompatibility };
   }
 
-  async slim(kinds: SlimKind[]): Promise<ToolResult> {
+  async slim(kinds: SlimKind[], only?: number[]): Promise<ToolResult> {
     const doc = activeDoc(), scan = await this.scanDoc();
     if (!scan) return { done: 0, skipped: [] };
-    const items = planSlim(scan).filter(i => kinds.includes(i.kind));
+    const items = planSlim(scan).filter(i => kinds.includes(i.kind))
+      .map(i => only ? { ...i, ids: i.ids.filter(id => only.includes(id)) } : i).filter(i => !only || i.ids.length);
     const skipped: string[] = [];
     let saved = 0;
     const order: SlimKind[] = ["variations", "hidden", "transparent", "bigSmart", "empty", "offCanvas", "channels"];

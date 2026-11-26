@@ -38,3 +38,12 @@ test("回复外面包了 ```json 也能读", () => {
   assert.deepEqual(parseJsonAnswer("```json\n{\"a\":1}\n```"), { a: 1 });
   assert.throws(() => parseJsonAnswer("好的"), /不是有效的 JSON/);
 });
+
+test("DeepSeek 看图：图片放在 user 消息的 image_url 块里，不开 JSON 模式", async () => {
+  let body: any = null;
+  const f = (async (_u: string, init: RequestInit) => { body = JSON.parse(String(init.body)); return reply(200, { choices: [{ finish_reason: "stop", message: { content: "```json\n{\"issues\":[]}\n```" } }] }); }) as unknown as typeof fetch;
+  const r = await deepseekJson(f, { key: "k", model: "deepseek-flash" }, { system: "s", user: "看图", images: ["data:image/png;base64,AAAA"] });
+  assert.deepEqual(body.messages[1].content, [{ type: "text", text: "看图" }, { type: "image_url", image_url: { url: "data:image/png;base64,AAAA" } }]);
+  assert.equal("response_format" in body, false);
+  assert.deepEqual(r.value, { issues: [] });
+});

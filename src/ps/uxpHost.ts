@@ -174,7 +174,7 @@ async function selectLayer(layerId: number) {
   await play([{ _obj: "select", _target: [{ _ref: "layer", _id: layerId }], makeVisible: false, _options: DONT }]);
 }
 
-async function readPixels(opts: object): Promise<Pixels> {
+export async function readPixels(opts: object): Promise<Pixels> {
   const r = await ps().imaging.getPixels({ componentSize: 8, colorSpace: "RGB", colorProfile: SRGB, ...opts });
   try {
     const d = r.imageData;

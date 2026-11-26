@@ -6,6 +6,7 @@ import { UxpHost } from "./ps/uxpHost.ts";
 import { UxpTools } from "./ps/uxpTools.ts";
 import { UxpLayerTree } from "./ps/uxpLayers.ts";
 import { log, setLogContext, setLogSink } from "./app/log.ts";
+import { UxpChecker } from "./ps/uxpCheck.ts";
 import { mountApp } from "./ui/app.ts";
 import { mountLayersPanel } from "./ui/layersPanel.ts";
 import { disposeGlobals } from "./ui/dom.ts";
@@ -115,9 +116,11 @@ if (DEV) {
 }
 (globalThis as any).__waveplugDispose =() => { if (devWatch) clearInterval(devWatch); host.dispose(); layerTree.dispose(); disposeGlobals(); };
 
+const tools = new UxpTools();
 const services: Services = {
   host,
-  tools: new UxpTools(),
+  tools,
+  checker: new UxpChecker(tools),
   layers: layerTree,
   bridgePs,
   comfy: base => new ComfyClient(base, { fetch: uxpFetch, WebSocket }),

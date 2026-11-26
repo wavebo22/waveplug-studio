@@ -28,7 +28,8 @@ export function mountLayersPanel(root: HTMLElement, svc: Services, isShown: () =
       ask: (kind, link) => { if (svc.overlay) askIllustrator(svc.overlay, kind, link); },
     } : undefined, hintBar,
     // AI 整理: the key and the model come from 功能设置 (the Studio panel keeps them in its settings)
-    svc.aiFetch ? { fetch: svc.aiFetch, settings: () => { const s = store.settings(); return { key: s.deepseekKey ?? "", model: s.deepseekModel ?? "" }; } } : undefined);
+    svc.aiFetch ? { fetch: svc.aiFetch, settings: () => { const s = store.settings(); return { key: s.deepseekKey ?? "", model: s.deepseekModel ?? "" }; },
+      checker: svc.checker, composite: (docId, edge) => svc.host.docThumbnail(docId, edge) } : undefined);
   const dropEl = h("div", { class: "lp-drop" });
   const panel = h("div", { class: "lp" }, view.el, hintBar.el, dropEl);
   replace(root, panel);

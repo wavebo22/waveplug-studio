@@ -440,8 +440,22 @@ async function boot() {
     localStorage.setItem("wp.profiles", JSON.stringify([p]));
     localStorage.setItem("wp.state." + p.id, JSON.stringify({ prompt: "磨砂玻璃瓶，瓶身有细小水珠，柔和侧光", params: {}, seedMode: "random", seed: 0 }));
   }
+  const tools = new MockTools(() => host.changed());
+  // 文档检查 in the preview: the 文档优化 scan plus a few made-up text layers
+  const checker: import("../ps/host.ts").DocChecker = {
+    async read() {
+      const scan = await tools.scanDoc();
+      const t = (id: number, name: string, contents: string, extra = {}) => ({ id, name, contents, fonts: ["SourceHanSansSC-Regular"], fontNames: ["思源黑体"], sizesPx: [28], ranges: 1, rgb: { r: 30, g: 30, b: 30 }, bounds: { left: 120, top: 80 + id % 10 * 60, right: 520, bottom: 120 + id % 10 * 60 }, visible: true, ...extra });
+      return { width: scan.width, height: scan.height, mode: "rgb" as const, bits: 8, ppi: 72, scan, installed: new Set(["SourceHanSansSC-Regular"]),
+        texts: [t(901, "登录提示", "欢迎登陆会员中心"), t(902, "价格", "全网最低 ¥99", { rgb: { r: 255, g: 90, b: 31 } }), t(903, "角标", "限时", { fonts: ["FZLTCHJW--GB1-0"], fontNames: ["方正兰亭粗黑"], sizesPx: [9] }),
+          t(904, "副标题", "标题文字", { rgb: { r: 255, g: 91, b: 32 }, sizesPx: [27.8] }), t(905, "浅色说明", "说明文字", { rgb: { r: 210, g: 210, b: 210 } })],
+        links: [], fills: [], backgrounds: new Map([[905, { r: 250, g: 250, b: 250 }]]), contentIds: new Map<number, string>() };
+    },
+    async setText() { await sleep(200); return true; },
+  };
   const svc: Services = {
-    host, comfy: () => comfy, tools: new MockTools(() => host.changed()), layers: new MockLayerTree(() => host.changed(), cb => host.onChange(cb)),
+    checker,
+    host, comfy: () => comfy, tools, layers: new MockLayerTree(() => host.changed(), cb => host.onChange(cb)),
     async pickJson() { return null; },
     async pickImage() { return { name: "参考.png", bytes: new Uint8Array(), url: swatch(3, 80, 80) }; },
     async saveImage() { return true; },
@@ -453,6 +467,13 @@ async function boot() {
     // a stand-in for DeepSeek: renames default-looking names and groups the first two layers listed
     aiFetch: (async (_url: string, init: RequestInit) => {
       const body = JSON.parse(String(init.body));
+      const system = String(body.messages[0].content);
+      const reply = async (value: unknown) => { await sleep(1500); return { ok: true, status: 200, text: async () => JSON.stringify({ model: body.model, choices: [{ finish_reason: "stop", message: { content: JSON.stringify(value) } }], usage: { prompt_tokens: 1, completion_tokens: 1 } }) } as unknown as Response; };
+      if (system.includes("文案校对")) return reply({ issues: [
+        { id: 901, type: "typo", original: "登陆", suggestion: "登录", reason: "登录账号用「登录」，「登陆」指登上陆地" },
+        { id: 902, type: "ad_law", original: "全网最低", suggestion: "超值", reason: "广告法禁止使用「最」等绝对化用语" },
+      ] });
+      if (system.includes("视觉设计审稿")) return reply({ issues: [{ type: "ai_artifact", where: "右侧人物的左手", problem: "手指看起来有六根", suggestion: "重新生成这只手或局部重绘" }] });
       const lines = String(body.messages[1].content).split("\n").filter(l => l.startsWith("{")).map(l => JSON.parse(l));
       const free = lines.filter(l => !l.fixed);
       const renames = free.filter(l => /^(图层|矩形|组|碎片|Layer)\s*\d|拷贝/.test(l.name)).slice(0, 40).map(l => ({ id: l.id, name: l.text ? String(l.text).slice(0, 8) : (l.kind === "group" ? "区块 " : "元素 ") + l.id }));

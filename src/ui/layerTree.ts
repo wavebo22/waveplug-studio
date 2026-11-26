@@ -7,6 +7,7 @@
 
 import { groupSelectionLayers } from "../core/layers/groupSelection.ts";
 import { createAiOrganize } from "./aiOrganize.ts";
+import { createDocCheck } from "./docCheck.ts";
 import { crumb, log } from "../app/log.ts";
 import { resultText } from "../core/layers/smart.ts";
 import { ThumbCache, thumbRetryDelay } from "../core/layers/thumbs.ts";
@@ -21,7 +22,7 @@ import { MULTI_EFFECTS } from "../core/layers/effects.ts";
 import { type AdvancedFilter, type Filter, type LayerAction, aiStrayMoves, isAiStray, type StrayMemo, type LayerKind, type LockKey, type MoveStep, type Row, type SmartAction, type TreeLayer, type Where, BLEND_MODES, ancestors, isCompactRow, queryActive, clickSelect, contentUsers, canDropToDelete, type DeleteDragPart, canDropMaskOnto, copyPlan, dropPlan, previewMoveTree, dropZone, filterCounts, isVariantLayer, layerMenu, nextLayerAfterDelete, layerTags, linkPeers, lockPlan, packChips, lockedByGroup, sharedColors, selectionAfterLocalClear, visibleRows } from "../core/layers/tree.ts";
 import { isDuplicateLayerDoubleAction, isLayerDoubleClick, type LayerClickPoint, type LayerDoubleAction } from "../core/layers/clicks.ts";
 import { matchesInlineRenameRow } from "../core/layers/rename.ts";
-import { type LayerTools, type LayerTree, type PsHost, type RunOptions, type TargetPart, ADJUSTMENTS } from "../ps/host.ts";
+import { type DocChecker, type LayerTools, type LayerTree, type PsHost, type RunOptions, type TargetPart, ADJUSTMENTS } from "../ps/host.ts";
 import type { Overlay } from "../app/overlay.ts";
 import type { CanvasView } from "../core/overlay/protocol.ts";
 import { vectorFragment } from "../core/overlay/svgFragment.ts";
@@ -179,7 +180,7 @@ function coalesce<T>(ms: number, fn: (v: T) => void): ((v: T) => void) & { cance
   return f;
 }
 
-export function createLayerTreeView(tree: LayerTree, status: Status, tools?: LayerTools, overlay?: Overlay, canvasView?: (docId: number) => Promise<CanvasView | null>, exportLayerPng?: PsHost["exportLayerPng"], docVersion?: PsHost["docVersion"], layerDragInfo?: PsHost["layerDragInfo"], illustrator?: { ready(): boolean; push(docId: number, ids: number[]): Promise<number>; pushBoard(docId: number, layers: readonly TreeLayer[], selected: readonly number[]): Promise<{ count: number; name: string; notes: string[] }>; linkOf(docId: number, layerId: number): string | null; ask(kind: "update" | "reveal", link: string): void }, hintBar?: HintBar, assistant?: { fetch: typeof fetch; settings(): { key: string; model: string } }) {
+export function createLayerTreeView(tree: LayerTree, status: Status, tools?: LayerTools, overlay?: Overlay, canvasView?: (docId: number) => Promise<CanvasView | null>, exportLayerPng?: PsHost["exportLayerPng"], docVersion?: PsHost["docVersion"], layerDragInfo?: PsHost["layerDragInfo"], illustrator?: { ready(): boolean; push(docId: number, ids: number[]): Promise<number>; pushBoard(docId: number, layers: readonly TreeLayer[], selected: readonly number[]): Promise<{ count: number; name: string; notes: string[] }>; linkOf(docId: number, layerId: number): string | null; ask(kind: "update" | "reveal", link: string): void }, hintBar?: HintBar, assistant?: { fetch: typeof fetch; settings(): { key: string; model: string }; checker?: DocChecker; composite?(docId: number, maxEdge: number): Promise<string> }) {
   let docId: number | null = null, layers: TreeLayer[] = [], users = new Map<string, number>(), canvas = { width: 0, height: 0 };
   /** the layers by id (kept with `layers`): lookups in drawing and dragging, which run for every row */
   let byId = new Map<number, TreeLayer>();
@@ -3532,6 +3533,11 @@ export function createLayerTreeView(tree: LayerTree, status: Status, tools?: Lay
       else if (!searchBox.parentNode) findRow.insertBefore(searchBox, findRow.firstChild);
     },
   }) : null;
+  // ── 文档检查: the button beside AI 整理 (docCheck.ts) ──
+  const docCheck = assistant?.checker ? createDocCheck({
+    checker: assistant.checker, tree, tools, status, fetch: assistant.fetch, settings: assistant.settings, composite: assistant.composite,
+    state: () => ({ docId }), refresh: () => void refresh(), host: () => el.parentElement ?? el,
+  }) : null;
 
   // ── the panel menu (☰, as the menu at the top right of Photoshop's Layers panel) ──
   const SHORTCUT_KEY = "wp.layers.shortcuts";
@@ -3576,7 +3582,7 @@ export function createLayerTreeView(tree: LayerTree, status: Status, tools?: Lay
   }
   listen(document, "keydown", e => {
     const k = e as KeyboardEvent;
-    if (!shortcutsOn || docId === null || drag?.active || renaming !== null || deleting || !pointerIn || typing(document.activeElement) || aiOrganize?.isOpen()) return;
+    if (!shortcutsOn || docId === null || drag?.active || renaming !== null || deleting || !pointerIn || typing(document.activeElement) || aiOrganize?.isOpen() || docCheck?.isOpen()) return;
     const ctrl = k.ctrlKey || k.metaKey, key = (k.key ?? "").toLowerCase(), code = k.code ?? "";
     const left = code === "BracketLeft" || key === "[" || key === "{", right = code === "BracketRight" || key === "]" || key === "}";
     const sel = selectedLayers(), now = sel.map(l => l.id), doc = docId;
@@ -3887,7 +3893,7 @@ export function createLayerTreeView(tree: LayerTree, status: Status, tools?: Lay
     props, lockRow,
     list,
     workbench.el,
-    h("div", { class: "lt-foot" }, h("div", { class: "lt-foot-btns" }, menuBtn, ...(aiOrganize ? [aiOrganize.button] : []), frameBtn, nativeBtn, ...(WORKBENCH_ENABLED ? [workbench.toggleButton] : [])), bar));
+    h("div", { class: "lt-foot" }, h("div", { class: "lt-foot-btns" }, menuBtn, ...(aiOrganize ? [aiOrganize.button] : []), ...(docCheck ? [docCheck.button] : []), frameBtn, nativeBtn, ...(WORKBENCH_ENABLED ? [workbench.toggleButton] : [])), bar));
   render();
   return { el, refresh, fileDropSpot, clearFileDropSpot, docId: () => docId };
 }

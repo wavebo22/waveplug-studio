@@ -1148,3 +1148,22 @@ textarea,
 .ai-org-members { flex: 1 1 auto !important; min-width: 0; margin-left: var(--sp-3); overflow: hidden; text-overflow: ellipsis; color: var(--c-text-2) !important; font-size: var(--fs-s); }
 .ai-org-wait { margin-top: var(--sp-6); color: var(--c-text-2); font-size: var(--fs); }
 .ai-org-notes { margin-top: var(--sp-5); }
+
+/* ── 文档检查 (src/ui/docCheck.ts): same sheet as AI 整理 ── */
+.doc-check .check-first { margin-top: 0; }
+.doc-check .check-seg { margin-bottom: var(--sp-3); }
+.check-summary { margin-top: var(--sp-5); }
+/* the layer panel sets nowrap; issues wrap */
+.doc-check .sheet-body { white-space: normal; }
+.check-row-item { display: flex; align-items: flex-start; padding: var(--sp-3) 0; border-bottom: 1px solid var(--c-line-row); }
+.check-row-item.is-done { opacity: var(--op-disabled); }
+.check-sev { flex: none; height: var(--h-xs); line-height: 16px; margin: var(--sp-1) var(--sp-4) 0 0; padding: 0 var(--sp-2); border: 1px solid var(--c-line); border-radius: var(--r); font-size: var(--fs-s); color: var(--c-text-2); }
+.sev-error .check-sev { color: var(--c-err); border-color: var(--c-err); }
+.sev-warn .check-sev { color: var(--c-warn); border-color: var(--c-warn); }
+.check-main { flex: 1 1 auto; min-width: 0; }
+.check-title { font-size: var(--fs); color: var(--c-text); overflow-wrap: anywhere; }
+.check-title.pickable { cursor: pointer; }
+.check-title.pickable:hover { color: var(--c-accent-hi); }
+.check-detail { margin-top: var(--sp-1); font-size: var(--fs-s); color: var(--c-text-2); overflow-wrap: anywhere; }
+.check-fix { flex: none; height: var(--h-s); margin-left: var(--sp-3); padding: 0 var(--sp-4); font-size: var(--fs-s); }
+.check-done { flex: none; margin-left: var(--sp-3); font-size: var(--fs-s); color: var(--c-ok); }
