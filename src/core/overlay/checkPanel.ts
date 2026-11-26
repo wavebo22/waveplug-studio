@@ -74,5 +74,7 @@ export function parseCheckAction(raw: unknown): CheckAction | null {
   }
 }
 
-/** The colour an issue's layers light up in (the panel rows and the tint on the canvas). */
-export const SEVERITY_COLOR: Record<Issue["severity"], string> = { error: "#FF4D4F", warn: "#E3B04B", info: "#1E8CFF" };
+/** The one colour scheme for issues, the same in the 检查结果 window (badge, row outline, the line),
+ *  the 图层 panel rows (.chk-error / .chk-warn) and the tint on the canvas: red for 错误, yellow for
+ *  警告 and 提示 (plugin/styles.css --c-err / --c-warn; native/overlay/src/panel/theme.rs ERR / WARN). */
+export const SEVERITY_COLOR: Record<Issue["severity"], string> = { error: "#EC7A69", warn: "#E3B04B", info: "#E3B04B" };

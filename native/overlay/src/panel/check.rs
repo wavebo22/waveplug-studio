@@ -45,6 +45,9 @@ pub struct Check {
     pub folded: bool,
     /// the row under the pointer, last reported
     hovered: Option<String>,
+    /// that row's left and right edge and its middle, physical px inside the window (the line to
+    /// the canvas starts at the edge facing it: frame.rs set_leader)
+    pub hover_edges: Option<(f32, f32, f32)>,
 }
 
 fn s(v: &Value, k: &str) -> String {
@@ -99,6 +102,8 @@ impl Check {
     pub fn draw(&mut self, ctx: &egui::Context) -> Vec<Value> {
         let mut actions = Vec::new();
         let mut hover_now: Option<String> = None;
+        let mut edges: Option<(f32, f32, f32)> = None;
+        let ppp = ctx.pixels_per_point();
         egui::CentralPanel::default()
             .frame(egui::Frame::new().fill(theme::BG).stroke(Stroke::new(1.0_f32, theme::LINE)).inner_margin(egui::Margin::symmetric(10, 0)))
             .show(ctx, |ui| {
@@ -196,6 +201,9 @@ impl Check {
                         let r = row.response.rect;
                         if pointer_in && ui.rect_contains_pointer(r) {
                             hover_now = Some(it.key.clone());
+                            if it.pick {
+                                edges = Some((r.left() * ppp, r.right() * ppp, r.center().y * ppp));
+                            }
                             ui.painter().rect_stroke(r, CornerRadius::same(theme::R), Stroke::new(1.0_f32, sev_color(&it.sev)), StrokeKind::Inside);
                         }
                         ui.painter().hline(r.x_range(), r.bottom(), Stroke::new(1.0_f32, theme::LINE_SOFT));
@@ -203,6 +211,7 @@ impl Check {
                     ui.add_space(8.0);
                 });
             });
+        self.hover_edges = edges;
         if hover_now != self.hovered {
             self.hovered = hover_now.clone();
             actions.push(json!({ "kind": "hover", "key": hover_now }));
@@ -215,13 +224,10 @@ fn small(text: &str) -> RichText {
     RichText::new(text).font(theme::font(theme::FS_S))
 }
 
-/// 错误 red, 警告 yellow, 提示 grey (the same colours light the layers up)
+/// 错误 red, 警告 and 提示 yellow: the same colours light the layers up in the 图层 panel and on the
+/// canvas (src/core/overlay/checkPanel.ts SEVERITY_COLOR)
 fn sev_color(sev: &str) -> Color32 {
-    match sev {
-        "error" => theme::ERR,
-        "warn" => theme::WARN,
-        _ => theme::TEXT_3,
-    }
+    if sev == "error" { theme::ERR } else { theme::WARN }
 }
 
 fn badge(ui: &mut egui::Ui, sev: &str, done: bool) {

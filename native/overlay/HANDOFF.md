@@ -125,6 +125,8 @@ src/ui/app.ts  startOverlay()      生成页提供状态和     src/panel/genera
 - `{"type":"panel-anchor"}`：插件在图层面板的「检查」按钮被点下时发；helper 用 `WindowFromPoint(光标)` 取到面板的窗口，之后每个 watch 周期读它的位置，把「检查结果」窗口放在它左边（`layout.rs check_rect`，左边放不下就放右边）。重连后没有锚点时退回 PS 窗口右侧一条。
 - 介面 `check`（`panel/check.rs`，自己的视窗，同工作台）：区块 `head` / `opts` / `issues`；操作 `hover`（null = 离开列表）、`pick`、`fix`、`opt`、`recheck`、`close`。「暂时收起」只在 helper 里，窗口缩成标题栏高度（`win::check_fold`）。
 - `hover-tint` 多了可选 `color`（"#rrggbb"），检查结果悬停时用红 / 黄；不带时仍是蓝色。
+- 颜色只有两种（0.32.0 统一）：错误红 `#EC7A69`，警告和提示黄 `#E3B04B`；检查窗口的标签和描边、图层面板的行（`.chk-error` / `.chk-warn`）、画面上的高亮都用这两个。
+- 连线（0.32.0）：带颜色的 tint 显示时，`frame.rs` 的第三个穿透窗口（「WavePlug 检查连线」）从检查窗口里悬停那一行朝向画布的边，画一条线到高亮形状最近的点（`leader_pixels`，有测试）；起点由 `host.rs` 每帧算好交给 `frame::set_leader`。
 
 ### 3.6 快捷键 Ctrl+F = 原位粘贴（2026-11-25，0.29.0，未实测）
 

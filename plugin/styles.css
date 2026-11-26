@@ -39,6 +39,8 @@
   --c-ok: #5fc58f;
   --c-warn: #e3b04b;
   --c-warn-wash: rgba(227, 176, 75, .18);
+  /* 检查结果: an error's layers (the same red as --c-err) */
+  --c-err-wash: rgba(236, 122, 105, .22);
   --c-err: #ec7a69;
   --c-info: #82b6ff;
   --c-danger: #d4574a;              /* 删除：实心底 */
@@ -1150,6 +1152,8 @@ textarea,
 .ai-org-notes { margin-top: var(--sp-5); }
 
 /* ── 文档检查 (src/ui/docCheck.ts): the hovered issue's layers in the 检查结果 window's colour ── */
-.lt .lt-list .lt-row.chk-error { background-color: var(--c-danger-wash); }
+/* red for 错误, yellow for 警告 and 提示: the same colours as the window and the canvas */
+.lt .lt-list .lt-row.chk-error { background-color: var(--c-err-wash); }
+.lt .lt-list .lt-row.chk-error .lt-stripe { background: var(--c-err); }
 .lt .lt-list .lt-row.chk-warn { background-color: var(--c-warn-wash); }
-.lt .lt-list .lt-row.chk-info { background-color: var(--c-accent-wash-strong); }
+.lt .lt-list .lt-row.chk-warn .lt-stripe { background: var(--c-warn); }

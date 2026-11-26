@@ -2691,6 +2691,17 @@ pub fn check_place() -> bool {
     true
 }
 
+/// The check window on screen (left, top) and whether it is left of the panel (the canvas is
+/// then further left); None while hidden or parked.
+pub fn check_origin() -> Option<(i32, i32, bool)> {
+    if !CHECK_SHOWN.load(Ordering::SeqCst) || CHECK_PARKED.load(Ordering::SeqCst) {
+        return None;
+    }
+    let (x, y, w, _) = (*CHECK_AT.lock().ok()?)?;
+    let left_of_panel = check_panel_rect().map(|p| x + w <= p.0 + 1).unwrap_or(true);
+    Some((x, y, left_of_panel))
+}
+
 /// 收起 / 展开: only the title bar, or as tall as the panel.
 pub fn check_fold(folded: bool) {
     if CHECK_FOLDED.swap(folded, Ordering::SeqCst) == folded {

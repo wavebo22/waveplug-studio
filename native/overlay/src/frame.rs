@@ -18,11 +18,19 @@
 // coverage, at most 256 px a side), and a second window — per-pixel alpha (UpdateLayeredWindow),
 // equally click-through — tints that shape lightly in the frame's blue over the canvas. It lies on
 // top of everything, so the parts of the layer other layers cover show too.
+//
+// 检查结果 (文档检查): the tint comes in the issue's colour (red / yellow), and a third window, as
+// click-through as the others, draws a line from the hovered row of the check window to the
+// nearest point of the tinted shape (set_leader: the row's edge on screen).
 
 use crate::protocol::ScreenRect;
 
 #[cfg(windows)]
-pub use imp::{set, set_tint};
+pub use imp::{set, set_leader, set_tint};
+
+/// The line from the check window's hovered row (`from`, screen px) to the tint; None: no line.
+#[cfg(not(windows))]
+pub fn set_leader(_from: Option<(i32, i32)>) {}
 
 /// Shows the frame around `rect` (screen px) cut to `clip`; `None` hides it (and the tint).
 #[cfg(not(windows))]
@@ -180,6 +188,47 @@ fn layout(rect: ScreenRect, clip: Option<ScreenRect>, t: i32) -> Option<((i32, i
     Some((win, outer))
 }
 
+/// The line from `from` to the nearest point of `to` (left, top, right, bottom; screen px): where
+/// its window goes and its pixels (premultiplied BGRA, top-down), `width` px wide and smoothed, a
+/// dot at each end. None when `from` is inside `to` (nothing to point at).
+#[cfg_attr(not(windows), allow(dead_code))]
+fn leader_pixels(from: (i32, i32), to: (i32, i32, i32, i32), color: (u8, u8, u8), width: i32) -> Option<((i32, i32, i32, i32), Vec<u32>)> {
+    let end = (from.0.clamp(to.0, (to.2 - 1).max(to.0)), from.1.clamp(to.1, (to.3 - 1).max(to.1)));
+    if end == from {
+        return None;
+    }
+    let half = width.max(1) as f64 / 2.0;
+    let dot = half * 2.5;
+    let pad = dot.ceil() as i32 + 2;
+    let win = (from.0.min(end.0) - pad, from.1.min(end.1) - pad, from.0.max(end.0) + pad + 1, from.1.max(end.1) + pad + 1);
+    let (w, h) = (win.2 - win.0, win.3 - win.1);
+    if w <= 0 || h <= 0 || (w as i64) * (h as i64) > 40_000_000 {
+        return None;
+    }
+    let (ax, ay, bx, by) = (from.0 as f64, from.1 as f64, end.0 as f64, end.1 as f64);
+    let (dx, dy) = (bx - ax, by - ay);
+    let len2 = (dx * dx + dy * dy).max(1e-9);
+    let mut px = vec![0u32; (w * h) as usize];
+    for y in 0..h {
+        let py = (win.1 + y) as f64 + 0.5;
+        for x in 0..w {
+            let pxf = (win.0 + x) as f64 + 0.5;
+            let t = (((pxf - ax) * dx + (py - ay) * dy) / len2).clamp(0.0, 1.0);
+            let d = ((pxf - ax - t * dx).powi(2) + (py - ay - t * dy).powi(2)).sqrt();
+            let de = ((pxf - bx).powi(2) + (py - by).powi(2)).sqrt();
+            let ds = ((pxf - ax).powi(2) + (py - ay).powi(2)).sqrt();
+            let a = (half + 0.5 - d).clamp(0.0, 1.0).max((dot + 0.5 - de).clamp(0.0, 1.0)).max((half * 1.8 + 0.5 - ds).clamp(0.0, 1.0));
+            if a <= 0.0 {
+                continue;
+            }
+            let a8 = (a * 235.0).round() as u32;
+            let c = |v: u8| (v as u32 * a8 + 127) / 255;
+            px[(y * w + x) as usize] = (a8 << 24) | (c(color.0) << 16) | (c(color.1) << 8) | c(color.2);
+        }
+    }
+    Some((win, px))
+}
+
 #[cfg(windows)]
 mod imp {
     use std::ptr::{null, null_mut};
@@ -199,7 +248,7 @@ mod imp {
         SetLayeredWindowAttributes, SetWindowPos, ShowWindow, UpdateLayeredWindow, MSG, WNDCLASSW,
     };
 
-    use super::{layout, tint_pixels, Look, Tint};
+    use super::{layout, leader_pixels, tint_pixels, Look, Tint};
     use crate::log;
     use crate::protocol::ScreenRect;
 
@@ -236,6 +285,9 @@ mod imp {
 
     static HWND_SELF: AtomicIsize = AtomicIsize::new(0);
     static HWND_TINT: AtomicIsize = AtomicIsize::new(0);
+    static HWND_LEADER: AtomicIsize = AtomicIsize::new(0);
+    /// where the check window's line starts (screen px)
+    static LEADER: Mutex<Option<(i32, i32)>> = Mutex::new(None);
     /// the latest request; the window thread takes it, older ones are simply overwritten
     static WANTED: Mutex<Option<(ScreenRect, Option<ScreenRect>)>> = Mutex::new(None);
     static TINT: Mutex<Option<Tint>> = Mutex::new(None);
@@ -284,26 +336,28 @@ mod imp {
             }
             *t = tint;
         }
+        START.call_once(|| {
+            thread::spawn(run);
+        });
         post(&TINT_POSTED, WM_APP_TINT);
     }
 
-    /// Draws the tint window from TINT (or hides it).
-    unsafe fn apply_tint() {
-        let h = HWND_TINT.load(Ordering::SeqCst) as HWND;
-        if h.is_null() {
-            return;
+    /// The check window's hovered row (its edge, screen px): a line goes from it to the tint.
+    pub fn set_leader(from: Option<(i32, i32)>) {
+        if let Ok(mut l) = LEADER.lock() {
+            if *l == from {
+                return;
+            }
+            *l = from;
         }
-        let tint = TINT.lock().ok().and_then(|t| t.clone());
-        let Some(t) = tint else {
-            ShowWindow(h, SW_HIDE);
-            return;
-        };
-        let k = thickness_at(((t.rect.left + t.rect.right) / 2.0) as i32, ((t.rect.top + t.rect.bottom) / 2.0) as i32);
-        let look = Look { color: t.color.unwrap_or(TINT_RGB), line: k, grid: 8 * k, grid_alpha: 0.5, fill_alpha: if t.color.is_some() { 0.18 } else { 0.10 } };
-        let Some((win, px)) = tint_pixels(&t, look) else {
-            ShowWindow(h, SW_HIDE);
-            return;
-        };
+        START.call_once(|| {
+            thread::spawn(run);
+        });
+        post(&TINT_POSTED, WM_APP_TINT);
+    }
+
+    /// Puts `px` (premultiplied BGRA, top-down) on screen as layered window `h` covering `win`.
+    unsafe fn blit(h: HWND, win: (i32, i32, i32, i32), px: &[u32]) -> bool {
         let (w, ht) = (win.2 - win.0, win.3 - win.1);
         let screen = GetDC(null_mut());
         let mem = CreateCompatibleDC(screen);
@@ -324,13 +378,12 @@ mod imp {
         let mut bits: *mut std::ffi::c_void = null_mut();
         let dib = CreateDIBSection(mem, &bmi, DIB_RGB_COLORS, &mut bits, null_mut(), 0);
         if dib.is_null() || bits.is_null() {
-            log::line(format!("hover tint: no bitmap {w}x{ht}"));
+            log::line(format!("layered window: no bitmap {w}x{ht}"));
             DeleteDC(mem);
             ReleaseDC(null_mut(), screen);
-            return;
+            return false;
         }
         std::ptr::copy_nonoverlapping(px.as_ptr(), bits as *mut u32, px.len());
-        drop(px);
         let old = SelectObject(mem, dib);
         let blend = BLENDFUNCTION { BlendOp: AC_SRC_OVER, BlendFlags: 0, SourceConstantAlpha: 255, AlphaFormat: AC_SRC_ALPHA };
         let at = POINT { x: win.0, y: win.1 };
@@ -341,13 +394,60 @@ mod imp {
         DeleteObject(dib);
         DeleteDC(mem);
         ReleaseDC(null_mut(), screen);
-        // under the frame, over Photoshop
         SetWindowPos(h, HWND_TOPMOST, 0, 0, 0, 0, SWP_NOACTIVATE | SWP_SHOWWINDOW | SWP_NOOWNERZORDER | SWP_NOMOVE | SWP_NOSIZE);
+        true
+    }
+
+    /// The line from the check window to the tint `to` (its window on screen), or none.
+    unsafe fn apply_leader(to: Option<((i32, i32, i32, i32), (u8, u8, u8))>) {
+        let h = HWND_LEADER.load(Ordering::SeqCst) as HWND;
+        if h.is_null() {
+            return;
+        }
+        let from = LEADER.lock().ok().and_then(|l| *l);
+        let drawn = match (from, to) {
+            (Some(f), Some((rect, color))) => {
+                let k = thickness_at(f.0, f.1);
+                leader_pixels(f, rect, color, 2 * k).map(|(win, px)| blit(h, win, &px)).unwrap_or(false)
+            }
+            _ => false,
+        };
+        if !drawn {
+            ShowWindow(h, SW_HIDE);
+        }
+    }
+
+    /// Draws the tint window from TINT (or hides it), and the check window's line to it.
+    unsafe fn apply_tint() {
+        let h = HWND_TINT.load(Ordering::SeqCst) as HWND;
+        if h.is_null() {
+            return;
+        }
+        let tint = TINT.lock().ok().and_then(|t| t.clone());
+        let Some(t) = tint else {
+            ShowWindow(h, SW_HIDE);
+            apply_leader(None);
+            return;
+        };
+        let k = thickness_at(((t.rect.left + t.rect.right) / 2.0) as i32, ((t.rect.top + t.rect.bottom) / 2.0) as i32);
+        let color = t.color.unwrap_or(TINT_RGB);
+        let look = Look { color, line: k, grid: 8 * k, grid_alpha: 0.5, fill_alpha: if t.color.is_some() { 0.18 } else { 0.10 } };
+        let Some((win, px)) = tint_pixels(&t, look) else {
+            ShowWindow(h, SW_HIDE);
+            apply_leader(None);
+            return;
+        };
+        if !blit(h, win, &px) {
+            return;
+        }
+        drop(px);
         // the outline takes the rectangle's place (it comes back with the next row's frame)
         let f = HWND_SELF.load(Ordering::SeqCst) as HWND;
         if !f.is_null() {
             ShowWindow(f, SW_HIDE);
         }
+        // only an issue's tint (coloured) gets the line from the check window
+        apply_leader(t.color.map(|c| (win, c)));
     }
 
     fn wide(s: &str) -> Vec<u16> {
@@ -474,9 +574,34 @@ mod imp {
             } else {
                 HWND_TINT.store(t as isize, Ordering::SeqCst);
             }
+            // the check window's line to the tint: the same kind of window
+            let lclass = wide("WavePlugCheckLeader");
+            let lwc = WNDCLASSW { lpszClassName: lclass.as_ptr(), hbrBackground: std::ptr::null_mut(), ..wc };
+            RegisterClassW(&lwc);
+            let ltitle = wide("WavePlug 检查连线");
+            let l = CreateWindowExW(
+                WS_EX_LAYERED | WS_EX_TRANSPARENT | WS_EX_NOACTIVATE | WS_EX_TOOLWINDOW | WS_EX_TOPMOST,
+                lclass.as_ptr(),
+                ltitle.as_ptr(),
+                WS_POPUP,
+                0,
+                0,
+                1,
+                1,
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+                inst,
+                null(),
+            );
+            if l.is_null() {
+                log::line("check leader: window not created");
+            } else {
+                HWND_LEADER.store(l as isize, Ordering::SeqCst);
+            }
             HWND_SELF.store(h as isize, Ordering::SeqCst);
             log::line("hover frame: window ready");
             apply(h);
+            apply_tint();
             let mut m: MSG = std::mem::zeroed();
             while GetMessageW(&mut m, std::ptr::null_mut(), 0, 0) > 0 {
                 DispatchMessageW(&m);
@@ -494,6 +619,19 @@ mod tests {
     }
 
     const LOOK: Look = Look { color: (0x1E, 0x8C, 0xFF), line: 1, grid: 4, grid_alpha: 0.5, fill_alpha: 0.1 };
+
+    #[test]
+    fn the_leader_runs_from_the_row_to_the_nearest_point_of_the_shape() {
+        // from the right (the check window) to a shape on the left
+        let (win, px) = leader_pixels((500, 50), (100, 40, 200, 80), (0xEC, 0x7A, 0x69), 2).unwrap();
+        assert!(win.0 <= 199 && win.2 >= 500);
+        let w = (win.2 - win.0) as usize;
+        let at = |x: i32, y: i32| px[((y - win.1) as usize) * w + (x - win.0) as usize];
+        assert!(at(350, 50) >> 24 > 200); // on the line
+        assert_eq!(at(350, 55) >> 24, 0); // 5 px off it
+        // from inside the shape: nothing to point at
+        assert!(leader_pixels((150, 50), (100, 40, 200, 80), (0, 0, 0), 2).is_none());
+    }
 
     #[test]
     fn outline_and_grid_inside_the_shape() {

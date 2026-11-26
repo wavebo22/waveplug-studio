@@ -548,10 +548,13 @@ export function createLayerTreeView(tree: LayerTree, status: Status, tools?: Lay
   // ── 检查结果: the hovered issue's layers light up (their rows, and their shapes on the canvas) in
   // the issue's colour (core/overlay/checkPanel.ts SEVERITY_COLOR) ──
   let issueMark: { ids: Set<number>; sev: "error" | "warn" | "info" } | null = null, issueRun = 0;
-  const issueClass = (id: number) => issueMark?.ids.has(id) ? " chk-" + issueMark.sev : "";
+  // the same two colours as the window and the canvas: red for 错误, yellow for 警告 and 提示
+  const issueClass = (id: number) => issueMark?.ids.has(id) ? (issueMark.sev === "error" ? " chk-error" : " chk-warn") : "";
   async function markIssue(ids: number[], sev: "error" | "warn" | "info" | null) {
     const run = ++issueRun;
     issueMark = sev && ids.length ? { ids: new Set(ids), sev } : null;
+    // only the issue's colour on the canvas: the row-hover frame (blue) goes
+    if (issueMark) hideFrame();
     draw();
     const d = docId;
     if (!issueMark || d === null || !overlay?.tintReady || !canvasView) { overlay?.hoverTint(null); return; }

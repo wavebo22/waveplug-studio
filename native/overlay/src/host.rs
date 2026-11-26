@@ -773,6 +773,7 @@ impl Host {
                     if panel == check::ID {
                         self.check_shown = false;
                         self.check_placed = false;
+                        crate::frame::set_leader(None);
                         #[cfg(windows)]
                         crate::win::check_hide();
                         continue;
@@ -1190,7 +1191,14 @@ impl Host {
                 }
             }
             crate::win::check_fold(self.check.folded);
+            // the line from the hovered row to its layers on the canvas (frame.rs)
+            let from = self.check.hover_edges.zip(crate::win::check_origin()).map(|((l, r, y), (x0, y0, left))| {
+                ((x0 as f32 + if left { l } else { r }).round() as i32, (y0 as f32 + y).round() as i32)
+            });
+            crate::frame::set_leader(from);
         }
+        #[cfg(not(windows))]
+        crate::frame::set_leader(None);
         for action in actions {
             server::send(&Event::Action { panel: check::ID.to_string(), action });
         }
