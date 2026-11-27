@@ -83,6 +83,8 @@ export interface PsHost {
   docExists(id: number): boolean;
   /** Bounds of the active selection, or null when there is none. */
   selectionBounds(docId: number): Promise<Rect | null>;
+  /** Replaces the selection with these rectangles (their union), one undo step (AI 拆层 shows a part's box). */
+  selectRects?(docId: number, rects: Rect[]): Promise<void>;
   /** Where the document's canvas is on screen (for the floating bar, native/overlay); Photoshop only. */
   canvasView?(docId: number): Promise<CanvasView | null>;
   /** Photoshop's raw view bounds only (one cheap read), to notice the canvas moving */

@@ -468,6 +468,22 @@ button, .ub { font: inherit; color: inherit; background: none; border: 0; paddin
 .rename-preview { margin: 0 0 var(--sp-4); padding: var(--sp-3) var(--sp-4); line-height: 1.6; background: var(--c-field); border-radius: var(--r); }
 .rename-row { overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
 .rename-to { color: var(--c-accent-hi); }
+/* AI 拆层（试验）: the boxes over the picture's thumbnail, and the parts list */
+.dc-seg { margin-bottom: 0; }
+.dc-view { position: relative; margin: 0 0 var(--sp-4); border-radius: var(--r-s); overflow: hidden; background: var(--c-checker); }
+.dc-thumb { display: block; width: 100%; height: auto; }
+.dc-box { position: absolute; border: 1px solid; border-radius: var(--r-s); opacity: 0.75; }
+.dc-box.on { border-width: 2px; opacity: 1; }
+.dc-box.crop { border-style: dashed; opacity: 0.9; }
+.dc-box .dc-num { position: absolute; left: 0; top: 0; padding: 0 var(--sp-1); background: var(--c-scrim); font-size: var(--fs-s); line-height: var(--h-xs); }
+.dc-list { margin: 0 0 var(--sp-4); border-top: 1px solid var(--c-line-row); }
+.dc-row { display: flex; align-items: center; min-height: var(--h-m); padding: 0 var(--sp-2); border-bottom: 1px solid var(--c-line-row); cursor: pointer; }
+.dc-row:hover { background: var(--c-hover); }
+.dc-row.on { background: var(--c-accent-wash-strong); }
+.dc-row .dc-num { width: var(--h-xs); flex: none; font-size: var(--fs-s); font-weight: var(--fw-strong); }
+.dc-name { flex: 1 1 auto; min-width: 0; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; color: var(--c-text); }
+.dc-tag { flex: none; height: var(--h-xs); margin-left: var(--sp-2); padding: 0 var(--sp-2); border: 1px solid var(--c-line); border-radius: var(--r); font-size: var(--fs-s); line-height: calc(var(--h-xs) - 2px); color: var(--c-text-2); }
+.dc-dropped { line-height: 1.5; }
 .slim-item { padding: var(--sp-3) 0; border-bottom: 1px solid var(--c-line-soft); }
 .slim-item:last-child { border-bottom: none; }
 .slim-head { display: flex; align-items: center; }

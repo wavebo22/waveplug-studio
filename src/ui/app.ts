@@ -28,6 +28,7 @@ import { downscale, onWhite } from "../core/image/compose.ts";
 import { BLEND_PREFIX, EXPAND_PREFIX, EXTRACT_PREFIX, FILL_PREFIX, GENERATE_PREFIX, UPSCALE_PREFIX } from "../ps/host.ts";
 import { RATIOS, createExpandEditor } from "./expandEditor.ts";
 import { createToolsView } from "./tools.ts";
+import { createAiDecompose } from "./aiDecompose.ts";
 import { type Overlay, connectOverlay } from "../app/overlay.ts";
 import { type GenerateSections, type PanelMode, type PanelParam, isPanelMode, shownPanelMode } from "../core/overlay/generatePanel.ts";
 import { OPEN_APP_HELPER_VERSION, appSettingsOf, hangDocs, redactSettings } from "../core/overlay/protocol.ts";
@@ -263,6 +264,11 @@ export function mountApp(root: HTMLElement, svc: Services) {
   const modeEl = h("div", { class: "seg" }, ...modeBtns);
   // 生成 (the AI modes above) | 工具 (Photoshop layer tools, no ComfyUI)
   const toolsView = createToolsView(svc.tools, (text, kind) => setStatus(text, kind));
+  // AI 拆层（试验）: first card of the 工具 page, when DeepSeek can be reached (aiDecompose.ts)
+  if (svc.aiFetch) {
+    const decompose = createAiDecompose({ host: svc.host, fetch: svc.aiFetch, key: () => settings.deepseekKey ?? "", status: (text, kind) => setStatus(text, kind) });
+    toolsView.el.insertBefore(decompose.el, toolsView.el.children[1] ?? null);
+  }
   const viewBtns = ([["generate", "生成"], ["tools", "工具"]] as const).map(([v, label]) =>
     h("button", { class: "seg-btn", onClick: () => setView(v) }, label));
   const viewEl = h("div", { class: "seg view-seg" }, ...viewBtns);

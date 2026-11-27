@@ -321,6 +321,22 @@ export class UxpHost implements PsHost {
     return { left: v(s.left), top: v(s.top), right: v(s.right), bottom: v(s.bottom) };
   }
 
+  async selectRects(docId: number, rects: Rect[]): Promise<void> {
+    if (!rects.length) return;
+    const px = (v: number) => ({ _unit: "pixelsUnit", _value: Math.round(v) });
+    const sel = { _ref: "channel", _property: "selection" };
+    await step("WavePlug 拆层选区", docId, async () => {
+      const doc = docById(docId);
+      if (ps().app.activeDocument?.id !== docId) ps().app.activeDocument = doc;
+      const out = await play(rects.map((r, i) => ({
+        _obj: i ? "addTo" : "set", _target: [sel],
+        to: { _obj: "rectangle", top: px(r.top), left: px(r.left), bottom: px(r.bottom), right: px(r.right) },
+      })));
+      const bad = out.find(r => r?._obj === "error");
+      if (bad) throw new Error(bad.message ?? "Photoshop 没有建立选区");
+    });
+  }
+
   async viewBounds(docId: number): Promise<string | null> {
     const [vi] = await play([{ _obj: "get", _target: [{ _property: "viewInfo" }, { _ref: "document", _id: docId }], _options: DONT }]);
     const b = vi?.viewInfo?.activeView?.globalBounds;

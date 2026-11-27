@@ -42,6 +42,7 @@ class MockHost implements PsHost {
   async createDocument(width: number, height: number, name: string) { this.doc = { id: this.doc.id + 1, name, width, height, mode: "RGBColorMode", bits: 8 }; this.docOpen = true; this.sel = null; this.list = []; this.groupSelected = false; return this.doc; }
   docExists() { return true; }
   async selectionBounds() { return this.sel; }
+  async selectRects(_d: number, rects: Rect[]) { this.sel = rects.length ? rects.reduce((a, r) => ({ left: Math.min(a.left, r.left), top: Math.min(a.top, r.top), right: Math.max(a.right, r.right), bottom: Math.max(a.bottom, r.bottom) })) : null; this.changed(); }
   async selectionMask(_docId: number, rect: Rect): Promise<Pixels> {
     const w = rect.right - rect.left, h = rect.bottom - rect.top, data = new Uint8Array(w * h);
     if (this.sel) {
@@ -516,6 +517,12 @@ async function boot() {
         const lines = String(body.messages[1].content).split("\n").filter(l => l.startsWith("{")).map(l => JSON.parse(l));
         return reply({ items: lines.map(l => ({ id: l.id, text: "[EN] " + l.text })) });
       }
+      if (system.includes("图像拆层助手")) return reply({ parts: [
+        { name: "白色椭圆物件", kind: "object", box: [330, 300, 670, 800] },
+        { name: "标题文字“新品上市”", kind: "text", box: [80, 60, 600, 180] },
+        { name: "右下角的价格牌", kind: "object", box: [720, 680, 950, 920] },
+        { name: "背景渐变", kind: "object", box: [0, 0, 1000, 1000] },
+      ] });
       if (system.includes("视觉设计审稿")) return reply({ issues: [{ type: "ai_artifact", where: "右侧人物的左手", problem: "手指看起来有六根", suggestion: "重新生成这只手或局部重绘" }] });
       // with pictures (参考图层画面) the message is a list: its text part has the layer lines
       const msg = body.messages[1].content, msgText = Array.isArray(msg) ? msg.map((x: any) => x.text ?? "").join("\n") : String(msg);
