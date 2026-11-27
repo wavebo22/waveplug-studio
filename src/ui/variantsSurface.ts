@@ -5,6 +5,10 @@ import type { CanvasView } from "../core/overlay/protocol.ts";
 import { NOT_SHOWN, type Shown, decide } from "../core/overlay/visibility.ts";
 import { VARIANTS_PANEL, parseVariantsAction, type VariantsSections, type VariantsAction } from "../core/overlay/variantsPanel.ts";
 
+/** The external variant rail is paused (user, 11-27): the variant bar that comes up on a
+ *  double-click is the one place for variants for now. Everything stays wired; true brings it back. */
+export const EXTERNAL_VARIANT_RAIL = false;
+
 interface VariantPage {
   sections(): VariantsSections | null;
   canvasView(docId: number): Promise<CanvasView | null>;
@@ -36,7 +40,7 @@ export function attachVariantsSurface(overlay: Overlay, page: VariantPage) {
     onAction: a => a.kind === "delete-variant" ? page.deleteVariant(a.layerId, a.groupId) : page.showVariant(a.layerId, a.groupId),
     onViewRequest: () => {
       const state = page.sections();
-      if (state) void putUp(state);
+      if (state && EXTERNAL_VARIANT_RAIL) void putUp(state);
     },
   });
 
@@ -54,7 +58,7 @@ export function attachVariantsSurface(overlay: Overlay, page: VariantPage) {
   const surface = {
     refresh() {
       if (again) { clearTimeout(again); again = null; }
-      const s = page.sections(), wanted = !!s && s.items.length > 0;
+      const s = page.sections(), wanted = EXTERNAL_VARIANT_RAIL && !!s && s.items.length > 0;
       // without a readable AI layer the document isn't known: keep the one the rail is up for
       const v = decide(vis, { docId: wanted ? s!.docId : vis.docId ?? -1, wanted, subject: wanted ? String(s!.groupId) : "" }, Date.now(), HIDE_DELAY_MS);
       vis = v.state;
