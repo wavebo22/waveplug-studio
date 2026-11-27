@@ -42,17 +42,38 @@ const keep = (v: string) => { try { localStorage.setItem(ASK_KEY, v); } catch { 
 export function createAiRewrite(d: AiRewriteDeps) {
   const button = h("button", { class: "lt-head-btn", title: "AI 改写：用 DeepSeek 批量翻译或改写文字图层（翻译成英文 / 日文、更口语、缩短…）。选中文字图层或组：改写它们；否则改写全部文字图层。新旧对照显示在图层面板左边的窗口里，勾选后一步替换，可以 Ctrl+Z 撤销；混排样式的图层只给建议" }, "改写");
 
-  let open = false, docId: number | null = null, scope: { ids: number[]; label: string } | null = null;
-  let items: RewriteItem[] = [], mixed = new Set<number>(), busy = "", error = "", run = 0, cutNote = "";
+  interface Session {
+    docId: number;
+    open: boolean;
+    scope: { ids: number[]; label: string } | null;
+    items: RewriteItem[];
+    mixed: Set<number>;
+    off: Set<number>;
+    busy: string;
+    error: string;
+    run: number;
+    cutNote: string;
+  }
+  // every document has its own (switching hides the window, coming back shows that document's again)
+  const sessions = new Map<number, Session>();
+  const sessionOf = (docId: number) => {
+    let s = sessions.get(docId);
+    if (!s) { s = { docId, open: false, scope: null, items: [], mixed: new Set(), off: new Set(), busy: "", error: "", run: 0, cutNote: "" }; sessions.set(docId, s); }
+    return s;
+  };
+  const cur = () => { const id = d.state().docId; return id === null ? null : sessions.get(id) ?? null; };
+  const front = (s: Session) => d.state().docId === s.docId;
   let ask = read();
-  const off = new Set<number>();
 
-  const sections = (): OrganizeSections => ({
-    head: { title: "AI 改写", scope: scope ? scope.label : "", busy, error },
-    opts: { extra: ask, renameOnly: false, toggle: "", hint: "改写要求，例如：翻译成英文 / 每条不超过 10 个字", presets: REWRITE_PRESETS, go: "生成" },
-    plan: { ...rewritePlanSection(items, off, mixed, ask.trim() ? "点「生成」开始改写" : "选一个预设，或写下改写要求后按 Enter"), ...(cutNote ? { dropped: [cutNote] } : {}) },
-  });
-  const sync = () => { if (open) d.overlay?.queueSync(); };
+  const sections = (): OrganizeSections => {
+    const s = cur();
+    return {
+      head: { title: "AI 改写", scope: s?.scope ? s.scope.label : "", busy: s?.busy ?? "", error: s?.error ?? "" },
+      opts: { extra: ask, renameOnly: false, toggle: "", hint: "改写要求，例如：翻译成英文 / 每条不超过 10 个字", presets: REWRITE_PRESETS, go: "生成" },
+      plan: { ...rewritePlanSection(s?.items ?? [], s?.off ?? new Set(), s?.mixed ?? new Set(), ask.trim() ? "点「生成」开始改写" : "选一个预设，或写下改写要求后按 Enter"), ...(s?.cutNote ? { dropped: [s.cutNote] } : {}) },
+    };
+  };
+  const sync = (s?: Session | null) => { if (s && s.open && front(s)) d.overlay?.queueSync(); };
 
   d.overlay?.hub.register<OrganizeSections, OrganizeAction>({
     id: REWRITE_PANEL,
@@ -65,9 +86,9 @@ export function createAiRewrite(d: AiRewriteDeps) {
     const ov = d.overlay;
     if (!ov?.connected) { d.status("AI 改写的对照表显示在 WavePlug 程序里，它现在没有运行：点 Studio 面板右上角的连接状态启动它", "error"); return; }
     if (!ov.setupReady) { d.status(`AI 改写需要 WavePlug 程序 ${SETUP_HELPER_VERSION}（现在是 ${ov.helperVersion ?? "旧版"}）：在面板顶部的更新提醒里点「更新」`, "error"); return; }
-    const s = d.state();
-    if (s.docId === null) { d.status("没有打开的文档", "error"); return; }
-    const sc = rewriteScope(s.layers, s.selected);
+    const st = d.state();
+    if (st.docId === null) { d.status("没有打开的文档", "error"); return; }
+    const sc = rewriteScope(st.layers, st.selected);
     if (!sc.ids.length) { d.status("文档里没有文字图层", "error"); return; }
     if (sc.ids.length > REWRITE_MAX_LAYERS) { d.status(`${sc.label}，一次最多改写 ${REWRITE_MAX_LAYERS} 个：先选中一部分或一个组`, "error"); return; }
     if (!d.settings().key.trim()) { d.status("还没有填写 DeepSeek API Key：在 WavePlug 程序 › 功能设置 › AI 助手 里填写", "error"); return; }
@@ -78,14 +99,16 @@ export function createAiRewrite(d: AiRewriteDeps) {
 
   /** 开始 in the settings: the text layers in scope now, then DeepSeek */
   function begin() {
-    const ov = d.overlay, s = d.state();
-    if (!ov || s.docId === null || !ask.trim()) return;
-    const sc = rewriteScope(s.layers, s.selected);
+    const ov = d.overlay, st = d.state();
+    if (!ov || st.docId === null || !ask.trim()) return;
+    const sc = rewriteScope(st.layers, st.selected);
     if (!sc.ids.length || sc.ids.length > REWRITE_MAX_LAYERS) return;
     d.opening();
-    open = true; docId = s.docId; scope = sc; items = []; mixed = new Set(); off.clear(); error = ""; busy = ""; cutNote = "";
+    const s = sessionOf(st.docId);
+    Object.assign(s, { open: true, scope: sc, items: [], mixed: new Set(), error: "", busy: "", cutNote: "" });
+    s.off.clear();
     ov.hub.show(REWRITE_PANEL, null);
-    void generate();
+    void generate(s);
   }
 
   const CUSTOM = "自定义";
@@ -114,22 +137,24 @@ export function createAiRewrite(d: AiRewriteDeps) {
     start: begin,
   });
 
+  /** closes the front document's AI 改写 */
   function close() {
     settingsPanel.close();
-    if (!open) return;
-    open = false; ++run;
+    const s = cur();
+    if (!s?.open) return;
+    s.open = false; ++s.run; s.items = []; s.busy = "";
     d.mark([], null);
     d.overlay?.hub.hide(REWRITE_PANEL);
   }
 
-  async function generate() {
-    if (!scope || docId === null) return;
-    if (!ask.trim()) { error = "先写改写要求，或点一个预设"; sync(); return; }
-    const mine = ++run, id = docId, sc = scope;
-    busy = "DeepSeek 正在改写…"; error = ""; items = []; off.clear(); cutNote = ""; sync();
+  async function generate(s: Session) {
+    if (!s.scope) return;
+    if (!ask.trim()) { s.error = "先写改写要求，或点一个预设"; sync(s); return; }
+    const mine = ++s.run, id = s.docId, sc = s.scope;
+    s.busy = "DeepSeek 正在改写…"; s.error = ""; s.items = []; s.off.clear(); s.cutNote = ""; sync(s);
     const t0 = Date.now();
     try {
-      if (d.state().docId !== id) throw new Error("文档已切换，请重新打开 AI 改写");
+      if (d.state().docId !== id) throw new Error("请在这个文档里重新生成");
       const info = await d.checker.textInfo(id, sc.ids);
       const names = new Map(d.state().layers.map(l => [l.id, l.name]));
       const texts = info.map(t => ({ id: t.id, name: names.get(t.id) ?? "", text: t.text }));
@@ -137,59 +162,74 @@ export function createAiRewrite(d: AiRewriteDeps) {
       if (!p.count) throw new Error("这些文字图层都是空的");
       const cfg = d.settings();
       const r = await withTimeout(deepseekJson(d.fetch, { key: cfg.key, model: cfg.model }, { system: REWRITE_SYSTEM, user: p.user, maxTokens: 8000 }), TIMEOUT_MS, "DeepSeek ");
-      if (mine !== run || !open) return;
-      items = parseRewrite(r.value, texts);
-      mixed = new Set(info.filter(t => t.ranges > 1).map(t => t.id));
-      if (p.cut) cutNote = `文字太多，这次只改写了前 ${p.count} 个，剩下 ${p.cut} 个请分批选中再改写`;
-      log("info", "ai rewrite plan", JSON.stringify({ model: r.model, texts: p.count, items: items.length, mixed: items.filter(i => mixed.has(i.id)).length, usage: r.usage, ms: Date.now() - t0 }));
+      if (mine !== s.run || !s.open) return;
+      s.items = parseRewrite(r.value, texts);
+      s.mixed = new Set(info.filter(t => t.ranges > 1).map(t => t.id));
+      if (p.cut) s.cutNote = `文字太多，这次只改写了前 ${p.count} 个，剩下 ${p.cut} 个请分批选中再改写`;
+      log("info", "ai rewrite plan", JSON.stringify({ doc: id, model: r.model, texts: p.count, items: s.items.length, mixed: s.items.filter(i => s.mixed.has(i.id)).length, usage: r.usage, ms: Date.now() - t0 }));
     } catch (e) {
-      if (mine !== run) return;
-      error = (e as Error)?.message ?? String(e);
-      log("warn", "ai rewrite", error);
+      if (mine !== s.run) return;
+      s.error = (e as Error)?.message ?? String(e);
+      log("warn", "ai rewrite", s.error);
     }
-    if (mine === run) { busy = ""; sync(); }
+    if (mine === s.run) { s.busy = ""; sync(s); }
   }
 
   async function apply() {
-    if (docId === null || busy) return;
-    const chosen = items.filter(i => !off.has(i.id) && !mixed.has(i.id));
+    const s = cur();
+    if (!s || s.busy) return;
+    const chosen = s.items.filter(i => !s.off.has(i.id) && !s.mixed.has(i.id));
     if (!chosen.length) return;
-    busy = "正在替换…"; error = ""; sync();
+    s.busy = "正在替换…"; s.error = ""; sync(s);
     try {
-      if (d.state().docId !== docId) throw new Error("文档已切换，没有替换");
-      const r = await d.checker.rewrite(docId, chosen);
-      close();
+      const r = await d.checker.rewrite(s.docId, chosen);
+      if (front(s)) close(); else { s.open = false; s.items = []; s.busy = ""; }
       d.status(`AI 改写完成：替换了 ${r.done} 个文字图层（Ctrl+Z 可一步撤销）${r.skipped.length ? `；${r.skipped.length} 个没替换：${r.skipped.slice(0, 2).join("；")}` : ""}`, r.skipped.length ? "error" : "ok");
       d.refresh();
     } catch (e) {
-      busy = ""; error = (e as Error)?.message ?? String(e);
-      log("warn", "ai rewrite apply", error);
-      sync();
+      s.busy = ""; s.error = (e as Error)?.message ?? String(e);
+      log("warn", "ai rewrite apply", s.error);
+      sync(s);
     }
   }
 
   async function act(a: OrganizeAction) {
+    const s = cur();
     switch (a.kind) {
       case "hover": {
         const n = a.key?.startsWith("r:") ? Number(a.key.slice(2)) : NaN;
-        const ids = items.some(i => i.id === n) ? [n] : [];
+        const ids = s?.items.some(i => i.id === n) ? [n] : [];
         d.mark(ids, ids.length ? "warn" : null);
         return;
       }
       case "toggle": {
+        if (!s) return;
         const n = Number(a.key.slice(2));
-        if (mixed.has(n)) return;
-        if (!off.delete(n)) off.add(n);
-        sync();
+        if (s.mixed.has(n)) return;
+        if (!s.off.delete(n)) s.off.add(n);
+        sync(s);
         return;
       }
-      case "extra": ask = a.text; keep(ask); sync(); return;
-      case "analyse": void generate(); return;
+      case "extra": ask = a.text; keep(ask); sync(s); return;
+      case "analyse": if (s) void generate(s); return;
       case "apply": void apply(); return;
       case "close": close(); return;
       case "rename-only": return;
     }
   }
 
-  return { button, isOpen: () => open || settingsPanel.isOpen(), close, syncSetup: () => settingsPanel.sync() };
+  return {
+    button,
+    isOpen: () => !!cur()?.open || settingsPanel.isOpen(),
+    close,
+    syncSetup: () => settingsPanel.sync(),
+    docChanged() { d.overlay?.hub.hide(REWRITE_PANEL); },
+    reshow(): boolean {
+      const s = cur();
+      if (!s?.open) return false;
+      d.overlay?.hub.show(REWRITE_PANEL, null);
+      return true;
+    },
+    forget(docId: number) { sessions.delete(docId); },
+  };
 }

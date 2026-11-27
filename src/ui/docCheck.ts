@@ -3,6 +3,9 @@
 // the panel (core/overlay/checkPanel.ts). Hovering an issue lights its layers up in the panel and on
 // the canvas; a click selects them; a fix is one undo step.
 //
+// Every document has its own check (its list, what was fixed, what is running): switching documents
+// hides the window (docChanged), coming back shows that document's list again (reshow).
+//
 // The list follows the document: whenever Photoshop's history moves (an edit, a fix, Ctrl+Z) the
 // local checks run again. A fixed issue that is gone stays listed as 已处理; one that comes back
 // (the fix was undone) is open again. Copy suggestions are checked against the text itself.
@@ -68,50 +71,79 @@ const keep = (k: string, on: boolean) => { try { localStorage.setItem(k, on ? "o
 export function createDocCheck(d: DocCheckDeps) {
   const button = h("button", { class: "lt-head-btn", title: "文档检查：缺失字体、太大或发糊的智能对象、丢失的链接、CMYK 文件的印刷设置（分辨率、出血和安全边距、四色黑、过小的字）、可能超出文本框的文字、占位文字、图层整洁、颜色 / 字号 / 间距是否统一；可选让 DeepSeek 检查文案和看画面。结果显示在图层面板左边的窗口里，鼠标停在一条上，相关图层在面板和画面上用红色 / 黄色标出；点了按钮才会修改，撤销后状态跟着恢复" }, "检查");
 
-  let open = false, docId: number | null = null, version: string | null = null;
-  let doc: CheckDoc | null = null, local: Issue[] = [], ai: Issue[] = [];
-  /** issues fixed here, shown as 已处理 while they are gone from the list */
-  const fixed = new Map<string, Issue>();
-  const working = new Set<string>();
-  let busy = "", error = "", run = 0, aiRun = 0, recheckTimer: ReturnType<typeof setTimeout> | null = null, reading = false, again = false;
+  interface Session {
+    docId: number;
+    open: boolean;
+    /** Photoshop's history state the list was read at */
+    version: string | null;
+    doc: CheckDoc | null;
+    local: Issue[];
+    ai: Issue[];
+    /** issues fixed here, shown as 已处理 while they are gone from the list */
+    fixed: Map<string, Issue>;
+    working: Set<string>;
+    busy: string;
+    error: string;
+    run: number;
+    aiRun: number;
+    reading: boolean;
+    again: boolean;
+    /** what this check covers: set when it starts (开始), kept for the re-checks */
+    cats: Set<Category>;
+    scope: Set<number> | null;
+    scopeLabel: string;
+  }
+  const sessions = new Map<number, Session>();
+  const sessionOf = (docId: number) => {
+    let s = sessions.get(docId);
+    if (!s) {
+      s = { docId, open: false, version: null, doc: null, local: [], ai: [], fixed: new Map(), working: new Set(), busy: "", error: "", run: 0, aiRun: 0,
+        reading: false, again: false, cats: new Set(), scope: null, scopeLabel: "整个文档" };
+      sessions.set(docId, s);
+    }
+    return s;
+  };
+  const cur = () => { const id = d.docId(); return id === null ? null : sessions.get(id) ?? null; };
+  const front = (s: Session) => d.docId() === s.docId;
+  let recheckTimer: ReturnType<typeof setTimeout> | null = null;
   const opts = { copy: flag(COPY_KEY, true), visual: flag(VISUAL_KEY, false) };
   const setup = loadSetup();
-  /** what this check covers: set when it starts (开始), kept for the re-checks */
-  let cats = new Set<Category>([...setup.cats, "copy", "visual"]), scope: Set<number> | null = null, scopeLabel = "整个文档";
   const saveSetup = () => { try { localStorage.setItem(SETUP_KEY, JSON.stringify(setup)); } catch { /* not kept */ } };
   const hasKey = () => !!d.settings().key.trim();
 
   /** a copy suggestion is done when the text no longer has the original and has the suggestion */
-  function copyDone(i: Issue): boolean {
-    if (i.fix?.kind !== "setText" || !doc) return false;
+  function copyDone(s: Session, i: Issue): boolean {
+    if (i.fix?.kind !== "setText" || !s.doc) return false;
     const fx = i.fix;
-    const t = doc.texts.find(x => x.id === fx.id);
+    const t = s.doc.texts.find(x => x.id === fx.id);
     const text = t?.contents.replace(/\r\n?|\u0003/g, "\n") ?? "";
     return !!t && !text.includes(fx.from) && text.includes(fx.to);
   }
   /** what the window lists: the live issues, plus fixed ones that are gone */
-  function listed(): { issues: Issue[]; states: Map<string, string> } {
+  function listed(s: Session | null): { issues: Issue[]; states: Map<string, string> } {
     const states = new Map<string, string>();
-    const live = [...local, ...ai];
+    if (!s) return { issues: [], states };
+    const live = [...s.local, ...s.ai];
     const liveKeys = new Set(live.map(i => i.key));
     for (const i of live) {
-      if (working.has(i.key)) states.set(i.key, "处理中…");
-      else if (copyDone(i)) states.set(i.key, "已处理");
+      if (s.working.has(i.key)) states.set(i.key, "处理中…");
+      else if (copyDone(s, i)) states.set(i.key, "已处理");
     }
-    const gone = [...fixed.values()].filter(i => !liveKeys.has(i.key));
-    for (const i of gone) states.set(i.key, working.has(i.key) ? "处理中…" : "已处理");
+    const gone = [...s.fixed.values()].filter(i => !liveKeys.has(i.key));
+    for (const i of gone) states.set(i.key, s.working.has(i.key) ? "处理中…" : "已处理");
     return { issues: [...live, ...gone], states };
   }
 
   const sections = (): CheckSections => {
-    const { issues, states } = listed();
+    const s = cur(), { issues, states } = listed(s);
     return {
-      head: { summary: doc ? `${scopeLabel} · ${checkSummary(issues, states)}` : "", busy, error },
+      head: { summary: s?.doc ? `${s.scopeLabel} · ${checkSummary(issues, states)}` : "", busy: s?.busy ?? "", error: s?.error ?? "" },
       opts: { copy: opts.copy && hasKey(), visual: opts.visual && hasKey(), ai: hasKey() },
       issues: checkIssues(issues, states),
     };
   };
-  const sync = () => { if (open) d.overlay?.queueSync(); };
+  /** a session changed: the window shows it when it is the front document's */
+  const sync = (s?: Session | null) => { if (s && s.open && front(s)) d.overlay?.queueSync(); };
 
   d.overlay?.hub.register<CheckSections, CheckAction>({
     id: CHECK_PANEL,
@@ -136,14 +168,15 @@ export function createDocCheck(d: DocCheckDeps) {
   function begin() {
     const id = d.docId(), ov = d.overlay;
     if (id === null || !ov) return;
+    const s = sessionOf(id);
     const sel = setup.scope === "selection" ? d.selection?.() ?? [] : [];
-    scope = sel.length ? new Set(sel) : null;
-    scopeLabel = scope ? `选中的 ${scope.size} 个图层` : "整个文档";
-    cats = new Set<Category>([...setup.cats, "copy", "visual"]);
+    s.scope = sel.length ? new Set(sel) : null;
+    s.scopeLabel = s.scope ? `选中的 ${s.scope.size} 个图层` : "整个文档";
+    s.cats = new Set<Category>([...setup.cats, "copy", "visual"]);
     d.opening?.();
-    open = true;
+    s.open = true;
     ov.hub.show(CHECK_PANEL, null);
-    void start(id, true);
+    void start(s, true);
   }
 
   const settingsPanel = createSetupPanel({
@@ -178,113 +211,114 @@ export function createDocCheck(d: DocCheckDeps) {
     start: begin,
   });
 
+  /** closes the front document's check (its list is dropped) */
   function close() {
     settingsPanel.close();
-    open = false; ++run; ++aiRun;
+    const s = cur();
     if (recheckTimer) { clearTimeout(recheckTimer); recheckTimer = null; }
+    if (!s?.open) return;
+    s.open = false; ++s.run; ++s.aiRun; s.busy = "";
     d.mark([], null);
     d.overlay?.hub.hide(CHECK_PANEL);
   }
 
-  /** a full check of document `id`; `withAi`: the ticked DeepSeek checks too */
-  async function start(id: number, withAi: boolean) {
-    // another document, or a fresh check: what DeepSeek is still checking belongs to the old one
-    if (id !== docId || withAi) { fixed.clear(); ai = []; ++aiRun; if (busy === "DeepSeek 正在检查…") busy = ""; }
-    docId = id;
-    error = "";
-    await readLocal(true);
-    if (withAi && open && doc) void runAi();
+  /** a full check of the session's document; `withAi`: the ticked DeepSeek checks too */
+  async function start(s: Session, withAi: boolean) {
+    // a fresh check: what DeepSeek is still checking belongs to the old one
+    if (withAi) { s.fixed.clear(); s.ai = []; ++s.aiRun; if (s.busy === "DeepSeek 正在检查…") s.busy = ""; }
+    s.error = "";
+    await readLocal(s, true);
+    if (withAi && s.open && s.doc) void runAi(s);
   }
 
-  /** reads the document and runs the local checks (again) */
-  async function readLocal(first = false) {
-    if (docId === null) return;
-    if (reading) { again = true; return; }
-    reading = true;
-    const mine = ++run, id = docId;
-    if (first) { busy = "正在读取文档…"; sync(); }
+  /** reads the document and runs the local checks (again); only for the document in front */
+  async function readLocal(s: Session, first = false) {
+    if (!front(s)) return; // read when it is in front again
+    if (s.reading) { s.again = true; return; }
+    s.reading = true;
+    const mine = ++s.run, id = s.docId;
+    if (first) { s.busy = "正在读取文档…"; sync(s); }
     const t0 = Date.now();
     try {
-      version = d.docVersion?.(id) ?? null;
+      s.version = d.docVersion?.(id) ?? null;
       const read = await d.checker.read(id);
-      if (mine !== run || !open) return;
-      if (!read) throw new Error("读不到文档（是不是切换了文档？）");
-      doc = read;
-      local = filterIssues(runChecks(read), cats, scope);
+      if (mine !== s.run || !s.open) return;
+      if (!read) { if (!front(s)) return; throw new Error("读不到文档"); } // switched away meanwhile: read again when back
+      s.doc = read;
+      s.local = filterIssues(runChecks(read), s.cats, s.scope);
       // a fixed issue that is back (its fix was undone) is open again
-      for (const i of local) if (fixed.has(i.key) && !working.has(i.key)) fixed.delete(i.key);
-      log("info", "check local", JSON.stringify({ issues: local.length, ms: Date.now() - t0 }));
+      for (const i of s.local) if (s.fixed.has(i.key) && !s.working.has(i.key)) s.fixed.delete(i.key);
+      log("info", "check local", JSON.stringify({ doc: id, issues: s.local.length, ms: Date.now() - t0 }));
     } catch (e) {
-      if (mine === run) { error = (e as Error)?.message ?? String(e); log("warn", "check read", e); }
+      if (mine === s.run) { s.error = (e as Error)?.message ?? String(e); log("warn", "check read", e); }
     } finally {
-      reading = false;
-      if (busy === "正在读取文档…") busy = "";
-      sync();
-      if (again) { again = false; void readLocal(); }
+      s.reading = false;
+      if (s.busy === "正在读取文档…") s.busy = "";
+      sync(s);
+      if (s.again) { s.again = false; void readLocal(s); }
     }
   }
 
-  async function runAi() {
-    if (!doc || docId === null || !hasKey()) return;
-    const mine = ++aiRun, id = docId, read = doc, cfg = d.settings();
+  async function runAi(s: Session) {
+    if (!s.doc || !hasKey()) return;
+    const mine = ++s.aiRun, id = s.docId, read = s.doc, cfg = d.settings(), scope = s.scope;
     const jobs: Promise<void>[] = [];
     if (opts.copy) {
-      const p = copyPrompt(scope ? read.texts.filter(t => scope!.has(t.id)) : read.texts);
+      const p = copyPrompt(scope ? read.texts.filter(t => scope.has(t.id)) : read.texts);
       if (p.count) jobs.push(withTimeout(deepseekJson(d.fetch, { key: cfg.key, model: cfg.model }, { system: COPY_SYSTEM, user: p.user }), TIMEOUT_MS, "DeepSeek ").then(r => {
-        if (mine !== aiRun) return;
-        ai.push(...parseCopyIssues(r.value, read.texts));
-        if (p.cut) ai.push({ key: "copy:cut", category: "copy", severity: "info", ids: [], title: "文字太多，只检查了前面一部分", detail: "选中一个组或分几次检查剩下的" });
-        log("info", "check copy", JSON.stringify({ texts: p.count, usage: r.usage }));
+        if (mine !== s.aiRun) return;
+        s.ai.push(...parseCopyIssues(r.value, read.texts));
+        if (p.cut) s.ai.push({ key: "copy:cut", category: "copy", severity: "info", ids: [], title: "文字太多，只检查了前面一部分", detail: "选中一个组或分几次检查剩下的" });
+        log("info", "check copy", JSON.stringify({ doc: id, texts: p.count, usage: r.usage }));
       }));
     }
     if (opts.visual && d.composite) {
       jobs.push((async () => {
         const png = await d.composite!(id, 1280);
         const r = await withTimeout(deepseekJson(d.fetch, { key: cfg.key, model: DEEPSEEK_VISION_MODEL }, { system: VISUAL_SYSTEM, user: "这是设计稿的画面，请检查。", images: [png], maxTokens: 4000 }), TIMEOUT_MS, "DeepSeek ");
-        if (mine !== aiRun) return;
-        ai.push(...parseVisualIssues(r.value));
-        log("info", "check visual", JSON.stringify({ usage: r.usage, model: r.model }));
+        if (mine !== s.aiRun) return;
+        s.ai.push(...parseVisualIssues(r.value));
+        log("info", "check visual", JSON.stringify({ doc: id, usage: r.usage, model: r.model }));
       })());
     }
     if (!jobs.length) return;
-    busy = "DeepSeek 正在检查…"; sync();
+    s.busy = "DeepSeek 正在检查…"; sync(s);
     const results = await Promise.allSettled(jobs);
-    if (mine !== aiRun) return;
+    if (mine !== s.aiRun) return;
     const failed = results.find(r => r.status === "rejected") as PromiseRejectedResult | undefined;
-    if (failed) { error = "AI 检查失败：" + ((failed.reason as Error)?.message ?? String(failed.reason)); log("warn", "check ai", error); }
-    busy = ""; sync();
+    if (failed) { s.error = "AI 检查失败：" + ((failed.reason as Error)?.message ?? String(failed.reason)); log("warn", "check ai", s.error); }
+    s.busy = ""; sync(s);
   }
 
-  const issueOf = (key: string) => listed().issues.find(i => i.key === key);
+  const issueOf = (s: Session | null, key: string) => listed(s).issues.find(i => i.key === key);
 
   async function act(a: CheckAction) {
+    const s = cur();
     switch (a.kind) {
       case "hover": {
-        const it = a.key ? issueOf(a.key) : undefined;
+        const it = a.key ? issueOf(s, a.key) : undefined;
         d.mark(it ? it.ids : [], it && it.ids.length ? it.severity : null);
         return;
       }
       case "pick": {
-        const it = issueOf(a.key);
-        if (it?.ids.length && docId !== null) await d.tree.select(docId, it.ids).catch(e => { error = "选不中这些图层：" + ((e as Error)?.message ?? e); sync(); });
+        const it = issueOf(s, a.key);
+        if (s && it?.ids.length) await d.tree.select(s.docId, it.ids).catch(e => { s.error = "选不中这些图层：" + ((e as Error)?.message ?? e); sync(s); });
         return;
       }
-      case "fix": return fix(a.key, a.choice);
+      case "fix": if (s) await fix(s, a.key, a.choice); return;
       case "opt":
-        opts[a.name] = a.on; keep(a.name === "copy" ? COPY_KEY : VISUAL_KEY, a.on); sync();
+        opts[a.name] = a.on; keep(a.name === "copy" ? COPY_KEY : VISUAL_KEY, a.on); sync(s);
         return;
-      case "recheck": { const id = d.docId(); if (id !== null) void start(id, true); return; }
+      case "recheck": if (s) void start(s, true); return;
       case "close": close(); return;
     }
   }
 
-  async function fix(key: string, choice?: number) {
-    const it = issueOf(key);
-    if (!it?.fix || docId === null || working.has(key)) return;
-    const f = (choice !== undefined ? it.choices?.[choice]?.fix : undefined) ?? it.fix, id = docId;
-    // the fixes work on the document in front: not on another one switched to meanwhile
-    if (d.docId() !== id) { error = "文档已切换：回到这个文档再处理，或重新检查"; sync(); return; }
-    working.add(key); fixed.set(key, it); error = ""; sync();
+  async function fix(s: Session, key: string, choice?: number) {
+    const it = issueOf(s, key);
+    if (!it?.fix || s.working.has(key) || !front(s)) return;
+    const f = (choice !== undefined ? it.choices?.[choice]?.fix : undefined) ?? it.fix, id = s.docId;
+    s.working.add(key); s.fixed.set(key, it); s.error = ""; sync(s);
     try {
       if (f.kind === "shrinkSmart" || f.kind === "deleteVariants") {
         if (!d.tools) throw new Error("这个环境不能处理");
@@ -301,29 +335,47 @@ export function createDocCheck(d: DocCheckDeps) {
       }
       d.refresh();
     } catch (e) {
-      fixed.delete(key);
-      error = `${it.fixLabel ?? "处理"}失败：${(e as Error)?.message ?? e}`;
+      s.fixed.delete(key);
+      s.error = `${it.fixLabel ?? "处理"}失败：${(e as Error)?.message ?? e}`;
       log("warn", "check fix", key, e);
     } finally {
-      working.delete(key);
-      await readLocal();
+      s.working.delete(key);
+      await readLocal(s);
     }
   }
 
-  // the document moved on (an edit, a fix, Ctrl+Z / Ctrl+Alt+Z): check again once quiet
+  // the document moved on (an edit, a fix, Ctrl+Z / Ctrl+Alt+Z): check the front one again once quiet
   d.tree.onChange(() => {
-    if (!open) return;
+    if (!cur()?.open) return;
     if (recheckTimer) clearTimeout(recheckTimer);
     recheckTimer = setTimeout(() => {
       recheckTimer = null;
-      const id = d.docId();
-      if (!open || id === null) return;
-      if (id !== docId) { void start(id, false); return; } // another document: its local checks
-      const v = d.docVersion?.(id) ?? null;
-      if (v !== null && v === version) return; // only the selection changed
-      void readLocal();
+      const s = cur();
+      if (!s?.open) return;
+      const v = d.docVersion?.(s.docId) ?? null;
+      if (v !== null && v === s.version) return; // only the selection changed
+      void readLocal(s);
     }, RECHECK_MS);
   });
 
-  return { button, isOpen: () => open || settingsPanel.isOpen(), close, syncSetup: () => settingsPanel.sync() };
+  return {
+    button,
+    isOpen: () => !!cur()?.open || settingsPanel.isOpen(),
+    close,
+    syncSetup: () => settingsPanel.sync(),
+    /** another document is in front: the window goes (its check stays) */
+    docChanged() {
+      if (recheckTimer) { clearTimeout(recheckTimer); recheckTimer = null; }
+      d.overlay?.hub.hide(CHECK_PANEL);
+    },
+    /** the front document had its check open: show it again (re-read: it may have changed meanwhile) */
+    reshow(): boolean {
+      const s = cur();
+      if (!s?.open) return false;
+      d.overlay?.hub.show(CHECK_PANEL, null);
+      void readLocal(s);
+      return true;
+    },
+    forget(docId: number) { sessions.delete(docId); },
+  };
 }

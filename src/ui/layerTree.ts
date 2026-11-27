@@ -9,6 +9,7 @@ import { groupSelectionLayers } from "../core/layers/groupSelection.ts";
 import { createAiOrganize } from "./aiOrganize.ts";
 import { createAiPick } from "./aiPick.ts";
 import { createAiRewrite } from "./aiRewrite.ts";
+import { closeSetupPanels } from "./setupPanel.ts";
 import { createDocCheck } from "./docCheck.ts";
 import { crumb, log } from "../app/log.ts";
 import { resultText } from "../core/layers/smart.ts";
@@ -1785,6 +1786,18 @@ export function createLayerTreeView(tree: LayerTree, status: Status, tools?: Lay
   listen(document, "mouseup", () => { thumbDrag = null; });
 
 
+  /** the document 检查 / AI 整理 / 改写 last followed */
+  let assistDoc: number | null = null;
+  /** Another document is in front: the window beside the panel goes with its highlight, the
+   *  settings panels close, and this document's own 检查 / AI 整理 / 改写 comes back if it had one
+   *  open (each document keeps its own: docCheck.ts / aiOrganize.ts / aiRewrite.ts). */
+  function assistDocChanged() {
+    void markIssue([], null);
+    docCheck?.docChanged(); aiOrganize?.docChanged(); aiRewrite?.docChanged();
+    closeSetupPanels();
+    if (docId === null) return;
+    if (!docCheck?.reshow() && !aiOrganize?.reshow()) aiRewrite?.reshow();
+  }
   /** the settings panels' resync (set once they exist: render runs before they are made) */
   let syncSetups = () => {};
   function render() {
@@ -1978,6 +1991,8 @@ export function createLayerTreeView(tree: LayerTree, status: Status, tools?: Lay
           if (r.docId !== docId) queueMicrotask(() => workbenchWindow?.docChanged());
           docId = r.docId; layers = r.layers; byId = new Map(layers.map(l => [l.id, l])); users = contentUsers(layers); colors = sharedColors(layers, users); canvas = { width: r.width, height: r.height };
         }
+        // another document in front: 检查 / AI 整理 / 改写 follow it (each document has its own)
+        if (docId !== assistDoc) { assistDoc = docId; queueMicrotask(assistDocChanged); }
         const now = [...selected].sort().join(",");
         if (now !== before && now !== ownSelect && selected.size) reveal(); else render();
         // a hovered layer that moved or changed size: its frame follows (the view is already read)
