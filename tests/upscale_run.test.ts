@@ -110,16 +110,3 @@ test("output aspect check allows multiple-of-32 rounding but not a crop", async 
   assert.ok(!sameAspect({ width: 3000, height: 2000 }, { width: 3000, height: 2200 }));
 });
 
-test("拆图: the cut-out's shape, grown a little, is the removal mask", async () => {
-  const { cutoutMask } = await import("../src/app/generate.ts");
-  const w = 100, h = 60, data = new Uint8Array(w * h * 4);
-  for (let y = 20; y < 40; y++) for (let x = 30; x < 70; x++) data.set([9, 9, 9, 255], (y * w + x) * 4);
-  // the PNG is at half size; the mask comes back at the covered area's size
-  const small = { width: 50, height: 30, channels: 4 as const, data: new Uint8Array(50 * 30 * 4) };
-  for (let y = 10; y < 20; y++) for (let x = 15; x < 35; x++) small.data.set([9, 9, 9, 255], (y * 50 + x) * 4);
-  const m = cutoutMask(encodePng(small), w, h);
-  assert.deepEqual([m.width, m.height, m.channels], [w, h, 1]);
-  assert.equal(m.data[30 * w + 50], 255, "inside the object");
-  assert.equal(m.data[30 * w + 26], 255, "grown past its edge");
-  assert.equal(m.data[30 * w + 5], 0, "away from it");
-});

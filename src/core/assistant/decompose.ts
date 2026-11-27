@@ -37,6 +37,8 @@ export interface DecomposePlan {
   parts: DecomposePart[];
   /** parts of the answer left out, and why (shown under the list) */
   dropped: string[];
+  /** parts merged because they plainly belong together (mergeClose), "A + B" each */
+  merged?: string[];
 }
 
 export interface Size { width: number; height: number }
@@ -205,29 +207,76 @@ export function parseDecomposeAnswer(value: unknown, size: Size, crop: CropOptio
   const ox = region?.left ?? 0, oy = region?.top ?? 0;
   const list = value && typeof value === "object" ? (value as { parts?: unknown }).parts : null;
   if (!Array.isArray(list)) return { parts: [], dropped: ["DeepSeek 没有列出任何部分"] };
-  const parts: DecomposePart[] = [];
   const dropped: string[] = [];
-  const used = new Map<string, number>();
   const area = seen.width * seen.height;
+  const raw: { name: string; kind: PartKind; box: Rect }[] = [];
   for (const item of list) {
     const o = item && typeof item === "object" ? item as { name?: unknown; kind?: unknown; box?: unknown } : {};
-    let name = typeof o.name === "string" ? o.name.replace(/\s+/g, " ").trim() : "";
+    const name = typeof o.name === "string" ? o.name.replace(/\s+/g, " ").trim() : "";
     if (!name) { dropped.push("有一项没有名字"); continue; }
-    if (name.length > MAX_NAME) name = name.slice(0, MAX_NAME);
     const got = boxOf(o.box, seen);
     if (typeof got === "string") { dropped.push(`「${name}」${got}`); continue; }
     const box = { left: got.left + ox, top: got.top + oy, right: got.right + ox, bottom: got.bottom + oy };
     if (rectW(box) * rectH(box) < area * 0.001) { dropped.push(`「${name}」太小`); continue; }
     if (rectW(box) >= seen.width * 0.95 && rectH(box) >= seen.height * 0.95) { dropped.push(`「${name}」铺满了整个${region ? "选区" : "画面"}，像是背景`); continue; }
+    raw.push({ name, kind: o.kind === "text" ? "text" : "object", box });
+  }
+  const { items, merged } = mergeClose(raw, Math.max(seen.width, seen.height) * MERGE_GAP);
+  const parts: DecomposePart[] = [];
+  const used = new Map<string, number>();
+  for (const it of items) {
+    let name = it.name.length > MAX_NAME ? it.name.slice(0, MAX_NAME) : it.name;
     if (parts.length >= DECOMPOSE_MAX_PARTS) { dropped.push(`「${name}」超过 ${DECOMPOSE_MAX_PARTS} 个`); continue; }
     const n = (used.get(name) ?? 0) + 1;
     used.set(name, n);
     if (n > 1) name = `${name}（${n}）`;
-    const kind: PartKind = o.kind === "text" ? "text" : "object";
-    const padded = padBox(box, size, crop.pad);
-    parts.push({ name, kind, box: padded, crop: cropFor(padded, size, crop) });
+    const padded = padBox(it.box, size, crop.pad);
+    parts.push({ name, kind: it.kind, box: padded, crop: cropFor(padded, size, crop) });
   }
-  return { parts, dropped };
+  return { parts, dropped, merged };
+}
+
+/** Two parts of the same kind closer than this share of the picture's longer side are one part. */
+export const MERGE_GAP = 0.01;
+/** …and so are two that overlap by at least this share of the smaller one. */
+export const MERGE_OVERLAP = 0.6;
+
+/** Parts of the same kind that plainly belong together — one mostly over the other (a cow's head and
+ *  its outline), or nearly touching — merged into one (the box around both, the names joined),
+ *  repeatedly until nothing more merges. Kept at the place of the first. `merged`: what was joined. */
+export function mergeClose<T extends { name: string; kind: PartKind; box: Rect }>(parts: readonly T[], gap: number): { items: T[]; merged: string[] } {
+  const items = parts.map(p => ({ ...p, names: [p.name] }));
+  const close = (a: Rect, b: Rect) => {
+    const iw = Math.min(a.right, b.right) - Math.max(a.left, b.left), ih = Math.min(a.bottom, b.bottom) - Math.max(a.top, b.top);
+    // overlapping (a chair under a cow's head is normal): only when one is mostly over the other
+    if (iw > 0 && ih > 0) return iw * ih >= MERGE_OVERLAP * Math.min(rectW(a) * rectH(a), rectW(b) * rectH(b));
+    const dx = Math.max(0, Math.max(a.left, b.left) - Math.min(a.right, b.right)), dy = Math.max(0, Math.max(a.top, b.top) - Math.min(a.bottom, b.bottom));
+    return Math.max(dx, dy) <= gap;
+  };
+  for (let again = true; again;) {
+    again = false;
+    for (let i = 0; i < items.length && !again; i++) for (let j = i + 1; j < items.length; j++) {
+      const a = items[i], b = items[j];
+      if (a.kind !== b.kind || !close(a.box, b.box)) continue;
+      a.box = { left: Math.min(a.box.left, b.box.left), top: Math.min(a.box.top, b.box.top), right: Math.max(a.box.right, b.box.right), bottom: Math.max(a.box.bottom, b.box.bottom) };
+      a.names.push(...b.names);
+      items.splice(j, 1);
+      again = true;
+      break;
+    }
+  }
+  const merged = items.filter(it => it.names.length > 1).map(it => it.names.join(" + "));
+  const out = items.map(({ names, ...it }) => ({ ...it, name: names.length > 1 ? joinNames(names, it.kind) : it.name }) as unknown as T);
+  return { items: out, merged };
+}
+
+/** One name for merged parts: 「奶牛头和红色奶牛轮廓线」; texts as one quoted text. */
+function joinNames(names: readonly string[], kind: PartKind): string {
+  if (kind === "text") {
+    const inner = names.map(n => /^文字“(.*)”$/.exec(n)?.[1] ?? n);
+    return `文字“${inner.join(" ")}”`;
+  }
+  return names.join("和");
 }
 
 // ── 细化: a second look, each part in a zoomed-in crop of the full-resolution picture ──

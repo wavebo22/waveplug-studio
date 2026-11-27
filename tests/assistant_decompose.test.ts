@@ -4,7 +4,7 @@ import {
   DECOMPOSE_MAX_PARTS, DECOMPOSE_MAX_PIXELS, DECOMPOSE_SYSTEM, combineAnswers, REFINE_BATCH, applyRefine, cropFor, decomposeRequest, parseDecomposeAnswer, refineRegion, refineRequest, visionSize,
 } from "../src/core/assistant/decompose.ts";
 import { withGrid } from "../src/core/image/grid.ts";
-import { clusterMasks, mergeMasks } from "../src/core/image/compose.ts";
+import { mergeMasks } from "../src/core/image/compose.ts";
 
 test("坐标网格：画在副本上，线在每十分之一处，原图不变", () => {
   const p = { width: 200, height: 100, channels: 3 as const, data: new Uint8Array(200 * 100 * 3).fill(0) };
@@ -19,7 +19,7 @@ test("坐标网格：画在副本上，线在每十分之一处，原图不变",
 
 test("细化：每个部分在自己的局部图里重新定位，换算回文档像素；找不到的保留第一次的框", () => {
   const size = { width: 2000, height: 1000 };
-  const first = parseDecomposeAnswer({ parts: Array.from({ length: REFINE_BATCH + 1 }, (_, i) => ({ name: `物件${i}`, box: [100 + i * 50, 100, 300 + i * 50, 400] })) }, size);
+  const first = parseDecomposeAnswer({ parts: Array.from({ length: REFINE_BATCH + 1 }, (_, i) => ({ name: `物件${i}`, box: [20 + i * 130, 100, 120 + i * 130, 400] })) }, size);
   const regions = first.parts.map(p => refineRegion(p.box, size));
   for (const [i, r] of regions.entries()) {
     assert.ok(r.left <= first.parts[i].box.left && r.right >= first.parts[i].box.right && r.top <= first.parts[i].box.top && r.bottom >= first.parts[i].box.bottom);
@@ -99,7 +99,7 @@ test("拆层回答：坏的项目被丢掉并说明原因，重名加编号，�
 });
 
 test("拆层回答：最多保留规定的部分数", () => {
-  const parts = Array.from({ length: DECOMPOSE_MAX_PARTS + 3 }, (_, i) => ({ name: `物件${i}`, box: [0, 0, 200, 200] }));
+  const parts = Array.from({ length: DECOMPOSE_MAX_PARTS + 3 }, (_, i) => ({ name: `物件${i}`, box: [(i % 6) * 160, Math.floor(i / 6) * 160, (i % 6) * 160 + 100, Math.floor(i / 6) * 160 + 100] }));
   const plan = parseDecomposeAnswer({ parts }, { width: 1000, height: 1000 });
   assert.equal(plan.parts.length, DECOMPOSE_MAX_PARTS);
   assert.equal(plan.dropped.length, 3);
@@ -145,15 +145,25 @@ test("合并蒙版：几个部分的轮廓合成一个，范围包住全部，�
   assert.equal(mergeMasks([]), null);
 });
 
-test("蒙版分块：挨着或相距不远的合成一块（可以传递），离得远的各自一块", () => {
-  const m = (left: number, top: number) => ({ pixels: { width: 10, height: 10, channels: 1 as const, data: new Uint8Array(100).fill(255) }, rect: { left, top, right: left + 10, bottom: top + 10 } });
-  const groups = clusterMasks([m(0, 0), m(500, 500), m(15, 0), m(30, 0)], 8);
-  assert.deepEqual(groups.map(g => g.rect), [{ left: 0, top: 0, right: 40, bottom: 10 }, { left: 500, top: 500, right: 510, bottom: 510 }]);
-});
-
 test("只分析选区：框按选区换算，再挪回文档坐标；铺满选区的算背景", () => {
   const region = { left: 1000, top: 500, right: 1500, bottom: 1000 };
   const plan = parseDecomposeAnswer({ parts: [{ name: "杯子", box: [0, 0, 500, 500] }, { name: "桌面", box: [0, 0, 1000, 1000] }] }, { width: 3000, height: 2000 }, { pad: 0 }, region);
   assert.deepEqual(plan.parts.map(p => p.box), [{ left: 1000, top: 500, right: 1250, bottom: 750 }]);
   assert.match(plan.dropped[0], /铺满了整个选区/);
+});
+
+test("自动合并：同一类里大部分重叠或几乎挨着的合成一个；不同类、离得远的不合并", () => {
+  const size = { width: 1000, height: 1000 };
+  const plan = parseDecomposeAnswer({ parts: [
+    { name: "文字“上班哪有”", kind: "text", box: [100, 50, 900, 150] },
+    { name: "文字“不疯的！”", kind: "text", box: [300, 155, 900, 300] },
+    { name: "奶牛头", box: [575, 315, 1000, 690] },
+    { name: "红色奶牛轮廓线", box: [565, 305, 1000, 690] },
+    { name: "键盘", box: [315, 568, 540, 665] },
+    { name: "文字“KPI”", kind: "text", box: [300, 600, 500, 640] },
+  ] }, size, { pad: 0 });
+  assert.deepEqual(plan.parts.map(p => p.name), ["文字“上班哪有 不疯的！”", "奶牛头和红色奶牛轮廓线", "键盘", "文字“KPI”"]);
+  assert.deepEqual(plan.parts[0].box, { left: 100, top: 50, right: 900, bottom: 300 });
+  assert.deepEqual(plan.parts[1].box, { left: 565, top: 305, right: 1000, bottom: 690 });
+  assert.equal(plan.merged?.length, 2);
 });

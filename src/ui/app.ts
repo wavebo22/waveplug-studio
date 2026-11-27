@@ -24,7 +24,7 @@ import { crumb, diagnosticReport, log, withTimeout } from "../app/log.ts";
 import { openCalibration } from "./calibrate.ts";
 import { every, h, icon, listen, replace } from "./dom.ts";
 import { encodePng } from "../core/image/png.ts";
-import { clusterMasks, downscale, mergeMasks, onWhite } from "../core/image/compose.ts";
+import { downscale, onWhite } from "../core/image/compose.ts";
 import { BLEND_PREFIX, EXPAND_PREFIX, EXTRACT_PREFIX, FILL_PREFIX, GENERATE_PREFIX, UPSCALE_PREFIX } from "../ps/host.ts";
 import { RATIOS, createExpandEditor } from "./expandEditor.ts";
 import { createToolsView } from "./tools.ts";
@@ -2024,11 +2024,15 @@ export function mountApp(root: HTMLElement, svc: Services) {
     }
   }
 
-  /** AI 拆层: each part cut out by the 抠图 mode's workflow (心宝抠图), its box standing in for the
-   *  selection and its name for the 物件名; the back parts first, so the front ones end up on top.
-   *  Each part becomes its own 「AI抠图 · 名字」 group; a part that fails is reported and the rest go on.
-   *  Uses `run`, so the generate page can't start meanwhile, and 取消 (cancel) stops it. */
-  async function decomposeCut(docId: number, parts: readonly { name: string; box: Rect }[], report: (done: number, total: number, text: string) => void, clean: "off" | "contour" | "box"): Promise<{ done: number; failed: string[]; stopped: boolean; background: { done: number; total: number; failed: string[] } | null }> {
+  /** AI 拆层: 1. cut out the text, 2. cut out the graphics, both from the original (the 抠图 mode's
+   *  workflow, 心宝抠图, with the part's box as the selection and its name as the 物件名; each its own
+   *  「AI抠图 · 名字」 group), 3. remove each part from the original, its box as the selection (局部重绘
+   *  removal workflow, empty prompt), the text first, with every cut-out hidden while it reads. One run
+   *  per part: that workflow crops around its mask, and one mask for many came back as smears; each run
+   *  reads what the earlier ones left. A whole new background (11-27 test) lost too much of it. Layers
+   *  end up text on top, then the graphics (front ones higher), then the removed background.
+   *  `clean` "off": no step 3. Uses `run`, so the generate page can't start meanwhile, and 取消 stops it. */
+  async function decomposeCut(docId: number, parts: readonly { name: string; box: Rect; kind: "object" | "text" }[], report: (done: number, total: number, text: string) => void, clean: "off" | "box"): Promise<{ done: number; failed: string[]; stopped: boolean; background: { done: number; total: number; failed: string[] } | null }> {
     if (run) throw new Error("正在生成，等它结束再拆层");
     const rp = pickFor("extract");
     if (!rp) throw new Error("先在「抠图」模式导入抠图工作流（如心宝强化抠图）");
@@ -2039,88 +2043,94 @@ export function mountApp(root: HTMLElement, svc: Services) {
     if (svc.host.activeDoc()?.id !== docId) throw new Error("拆层的文档不是当前文档：先切回那个文档");
     const err = await syncProfile(rp);
     if (err) throw new Error(err);
-    // the last step's workflow is checked first: finding out after ten cut-outs is too late
+    // the removal workflow is checked first: finding out after ten cut-outs is too late
     const bp = clean !== "off" ? pickFor("inpaint") : null;
-    if (clean !== "off" && !bp) throw new Error("要去除背景，先在「局部重绘」模式导入移除工作流（留空提示词 = 移除）；或者取消勾选「最后去除背景」");
-    if (bp && !bp.options.allowEmptyPrompt) throw new Error(`「局部重绘」当前的工作流「${bp.name}」不支持留空移除，换成移除工作流，或者取消勾选「最后去除背景」`);
-    const rps = store.state(rp.id);
+    if (clean !== "off" && !bp) throw new Error("要去除背景，先在「局部重绘」模式导入移除工作流（留空提示词 = 移除）；或者「去除背景」选「不去除」");
+    if (bp && !bp.options.allowEmptyPrompt) throw new Error(`「局部重绘」当前的工作流「${bp.name}」不支持留空移除，换成移除工作流，或者「去除背景」选「不去除」`);
+    if (bp) { const berr = await syncProfile(bp); if (berr) throw new Error(berr); }
+    const rps = store.state(rp.id), bps = bp ? store.state(bp.id) : null;
     const current = { stage: "AI 拆层准备中…", progress: null as number | null, detail: "", promptId: undefined as string | undefined, signal: { aborted: false } };
     run = current; stash = null; renderAll();
     const failed: string[] = [];
-    let done = 0, background: { done: number; total: number; failed: string[] } | null = null;
-    /** what was cut out, in the order made (back to front): the background goes below the first */
-    const cuts: { group: FillGroup; cutout: NonNullable<RunResult["cutout"]>; box: Rect }[] = [];
-    crumb(`AI 拆层：抠图 ${parts.length} 个`);
-    try {
-      for (let k = parts.length - 1; k >= 0; k--) {
-        if (current.signal.aborted) break;
-        const part = parts[k], n = parts.length - k;
-        const tag = `抠图 ${n}/${parts.length}「${part.name}」`;
+    let done = 0;
+    const background = bp ? { done: 0, total: 0, failed: [] as string[] } : null;
+    type Cut = { group: FillGroup; cutout: NonNullable<RunResult["cutout"]>; box: Rect };
+    const texts = parts.filter(p => p.kind === "text"), graphics = parts.filter(p => p.kind !== "text");
+    crumb(`AI 拆层：文字 ${texts.length} 个，图形 ${graphics.length} 个，去除背景 ${clean}`);
+    const hooks = (tag: string) => ({
+      signal: current.signal,
+      stage: (t: string) => { current.stage = tag + " · " + t; current.detail = ""; report(done, parts.length, current.stage); renderAction(); },
+      progress: (f: number | null, t?: string) => { current.progress = f; current.detail = t ?? ""; renderAction(); },
+      promptQueued: (id: string) => { current.promptId = id; },
+      debug: settings.debugFiles ? svc.debugSave : undefined,
+    });
+    const here = () => svc.host.activeDoc()?.id === docId;
+
+    /** cuts `list` out back to front; each new group goes right below `under` when given */
+    const cutAll = async (list: typeof parts, label: string, hide: FillGroup[], under: FillGroup | null): Promise<Cut[]> => {
+      const out: Cut[] = [];
+      for (let k = list.length - 1; k >= 0; k--) {
+        if (current.signal.aborted || !here()) break;
+        const part = list[k], tag = `${label} ${list.length - k}/${list.length}「${part.name}」`;
         report(done, parts.length, tag);
         try {
-          if (svc.host.activeDoc()?.id !== docId) throw new Error("拆层的文档不再是当前文档，已停止");
           const w = part.box.right - part.box.left, h = part.box.bottom - part.box.top;
           const res = await runInpaint(svc.host, comfy, {
             profile: rp, prompt: part.name, seed: null, params: effectiveParams(rp, rps), loras: rps.loras, references: {}, count: 1,
-            keepDetail: rps.keepDetail !== false,
+            keepDetail: rps.keepDetail !== false, hide,
             selectionMask: { pixels: { width: w, height: h, channels: 1, data: new Uint8Array(w * h).fill(255) }, rect: part.box },
-          }, {
-            signal: current.signal,
-            stage: t => { current.stage = tag + " · " + t; current.detail = ""; report(done, parts.length, current.stage); renderAction(); },
-            progress: (f, t) => { current.progress = f; current.detail = t ?? ""; renderAction(); },
-            promptQueued: id => { current.promptId = id; },
-            debug: settings.debugFiles ? svc.debugSave : undefined,
-          });
+          }, hooks(tag));
           done++;
-          if (res.group && res.cutout) cuts.push({ group: res.group, cutout: res.cutout, box: part.box });
-          log("info", "decompose cut", JSON.stringify({ part: part.name, box: part.box }));
+          if (res.group && res.cutout) {
+            if (under) await svc.host.placeBelow(docId, res.group.layerId, under.layerId);
+            out.push({ group: res.group, cutout: res.cutout, box: part.box });
+          }
+          log("info", "decompose cut", JSON.stringify({ part: part.name, kind: part.kind, box: part.box }));
         } catch (e) {
           if (current.signal.aborted) break;
           log("error", "decompose cut failed", part.name, e);
           failed.push(`「${part.name}」：${(e as Error).message ?? e}`);
-          if (svc.host.activeDoc()?.id !== docId) break;
         }
       }
-      // last: what was cut out is removed from the original with the 局部重绘 removal workflow (empty
-      // prompt), the cut-outs hidden while it reads. One run per cluster of nearby parts: that
-      // workflow crops around its mask, and one mask with holes all over the picture came back as
-      // green and olive smears (11-27). Each run sees the background the earlier ones made.
-      if (bp && cuts.length && !current.signal.aborted && svc.host.activeDoc()?.id === docId) {
-        const docInfo = svc.host.activeDoc()!;
-        const masks = cuts.map(c => clean === "box"
-          ? mergeMasks([c.cutout, { pixels: { width: c.box.right - c.box.left, height: c.box.bottom - c.box.top, channels: 1, data: new Uint8Array((c.box.right - c.box.left) * (c.box.bottom - c.box.top)).fill(255) }, rect: c.box }])!
-          : c.cutout);
-        const clusters = clusterMasks(masks, Math.max(16, Math.round(Math.max(docInfo.width, docInfo.height) * 0.02)));
-        const bps = store.state(bp.id);
-        const berr = await syncProfile(bp);
-        background = { done: 0, total: clusters.length, failed: berr ? [berr] : [] };
-        for (const [i, mask] of (berr ? [] : clusters).entries()) {
-          if (current.signal.aborted || svc.host.activeDoc()?.id !== docId) break;
-          const tag = `去除背景 ${i + 1}/${clusters.length}`;
-          report(done, parts.length, tag);
-          try {
-            const res = await runInpaint(svc.host, comfy, {
-              profile: bp, prompt: "", seed: null, params: effectiveParams(bp, bps), loras: bps.loras, references: {}, count: 1,
-              selectionMask: mask, hide: cuts.map(c => c.group),
-            }, {
-              signal: current.signal,
-              stage: t => { current.stage = tag + " · " + t; current.detail = ""; report(done, parts.length, current.stage); renderAction(); },
-              progress: (f, t) => { current.progress = f; current.detail = t ?? ""; renderAction(); },
-              promptQueued: id => { current.promptId = id; },
-              debug: settings.debugFiles ? svc.debugSave : undefined,
-            });
-            if (!res.group) throw new Error("局部重绘没有返回结果图层");
-            await svc.host.placeBelow(docId, res.group.layerId, cuts[0].group.layerId);
-            background.done++;
-            log("info", "decompose background", JSON.stringify({ group: res.group.layerId, rect: mask.rect, cluster: i + 1, of: clusters.length, mode: clean }));
-          } catch (e) {
-            if (current.signal.aborted) break;
-            log("error", "decompose background failed", e);
-            if (e instanceof StashedResult) stash = e.png;
-            background.failed.push(`第 ${i + 1} 块：${(e as Error).message ?? e}`);
-          }
+      return out;
+    };
+    /** removes each cut-out from what is showing (all the cut-outs hidden); the results go right below `under` */
+    const removeAll = async (cuts: Cut[], label: string, hide: FillGroup[], under: FillGroup) => {
+      if (!bp || !bps || !background) return;
+      background.total += cuts.length;
+      for (const [i, c] of cuts.entries()) {
+        if (current.signal.aborted || !here()) break;
+        const tag = `${label} ${i + 1}/${cuts.length}`;
+        report(done, parts.length, tag);
+        // the part's box: what 抠图 used as the selection (RunResult.cutout)
+        const mask = c.cutout;
+        try {
+          const res = await runInpaint(svc.host, comfy, {
+            profile: bp, prompt: "", seed: null, params: effectiveParams(bp, bps), loras: bps.loras, references: {}, count: 1,
+            selectionMask: mask, hide,
+          }, hooks(tag));
+          if (!res.group) throw new Error("局部重绘没有返回结果图层");
+          await svc.host.placeBelow(docId, res.group.layerId, under.layerId);
+          background.done++;
+          log("info", "decompose background", JSON.stringify({ group: res.group.layerId, rect: mask.rect, label, mode: clean }));
+        } catch (e) {
+          if (current.signal.aborted) break;
+          log("error", "decompose background failed", e);
+          if (e instanceof StashedResult) stash = e.png;
+          background.failed.push(`${tag}：${(e as Error).message ?? e}`);
         }
       }
+    };
+
+    try {
+      const textCuts = texts.length ? await cutAll(texts, "抠文字", [], null) : [];
+      // the lowest text cut-out (made first): the graphics go right below it, so the text stays on top
+      const textBottom = textCuts[0]?.group ?? null;
+      const graphicCuts = graphics.length && !current.signal.aborted ? await cutAll(graphics, "抠图形", [], textBottom) : [];
+      const all = [...textCuts, ...graphicCuts];
+      // the lowest cut-out of all: the background goes below it
+      const bottom = graphicCuts[0]?.group ?? textBottom;
+      if (bp && all.length && bottom) await removeAll(all, "去除背景", all.map(c => c.group), bottom);
       return { done, failed, stopped: current.signal.aborted, background };
     } finally {
       if (run === current) run = null;
@@ -2128,6 +2138,7 @@ export function mountApp(root: HTMLElement, svc: Services) {
       await refresh();
     }
   }
+
   async function cancel() {
     if (!run) return;
     run.signal.aborted = true;

@@ -5,7 +5,7 @@
 import { encodePng, type Pixels } from "../core/image/png.ts";
 import { bleedTransparent, downscale, featherInside, fullSelection, hasTransparency, resize, transferDetail, transferDetailWhereSame, imageFile, isEmptySelection, maskFile, onWhite, outpaintSeam, resizeAlpha, withAlpha } from "../core/image/compose.ts";
 import { decodePng } from "../core/image/decode.ts";
-import { dilate, keepInside } from "../core/layers/islands.ts";
+import { keepInside } from "../core/layers/islands.ts";
 import { MAX_REFERENCES } from "../core/workflow/references.ts";
 import { type Rect, clampRect, expandBy, rectH, rectW } from "../core/image/region.ts";
 import { sameMaskAt } from "../core/image/maskIdentity.ts";
@@ -64,30 +64,6 @@ export function sameAspect(out: { width: number; height: number }, sent: { width
   const a = out.width / out.height, b = sent.width / sent.height;
   return Math.abs(a - b) / b <= Math.max(0.01, 48 / Math.min(out.width, out.height));
 }
-
-/**
- * 抠图 → removal: where the cut-out is (alpha > 16), at the size of the area it covers, grown by
- * ~1 % of that area (≥ 6 px) so the removal also takes the object's soft edge and shadow line.
- */
-export function cutoutMask(png: Uint8Array, width: number, height: number, grow = CUTOUT_GROW): Pixels {
-  const a = resizeAlpha(decodePng(png), width, height), n = width * height, solid = new Uint8Array(n);
-  let l = width, t = height, r = -1, bt = -1;
-  for (let i = 0; i < n; i++) if (a.data[i] > 16) {
-    solid[i] = 1;
-    const x = i % width, y = (i - x) / width;
-    if (x < l) l = x; if (x > r) r = x; if (y < t) t = y; if (y > bt) bt = y;
-  }
-  // grown by a share of the object's own size: the removal must take its soft edge, outline and the
-  // shadow next to it too (1% of the crop left a ring of shadow and text outline behind, 11-27)
-  const long = r < 0 ? 0 : Math.max(r - l + 1, bt - t + 1);
-  const grown = dilate(solid, width, height, Math.max(8, Math.round(long * grow)));
-  const out = new Uint8Array(n);
-  for (let i = 0; i < n; i++) out[i] = grown[i] ? 255 : 0;
-  return { width, height, channels: 1, data: out };
-}
-
-/** 拆图 / 补充背景: the cut-out's shape is grown by this share of its longer side (at least 8 px). */
-export const CUTOUT_GROW = 0.035;
 
 /** 抠图: context sent around the selection, in multiples of its shorter side. */
 const EXTRACT_MARGIN = 0.15;
@@ -321,7 +297,9 @@ export async function runInpaint(host: PsHost, comfy: Comfy, input: RunInput, ho
         png = encodePng(withAlpha(transferDetailWhereSame(resize(r.pixels, W, H), cap.image, sigma), resizeAlpha(r.pixels, W, H)));
         log("info", "extract keep detail", `sigma ${sigma.toFixed(1)}`, `${W}x${H}`);
       } else png = encodePng(r.pixels);
-      cutout = { pixels: cutoutMask(png, rectW(sendRect), rectH(sendRect)), rect: sendRect };
+      // 从原图移除 / 补充背景 later take the selection the user drew around it, not the cut-out's own
+      // outline (that left its soft edge and shadow behind, 11-27)
+      cutout = { pixels: crop(cap.selection, sendRect, groupRect), rect: groupRect };
     }
     // 融图 · 保留原图细节: light, shadow and colour from the result, fine detail from the original at
     // full resolution (the workflow samples at ≤ 2048 px, so a large selection came back soft)

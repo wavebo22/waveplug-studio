@@ -341,18 +341,3 @@ export function mergeMasks(masks: readonly { pixels: Pixels; rect: Rect }[]): { 
   }
   return { pixels: { width: w, height: h, channels: 1, data: out }, rect };
 }
-
-/** Masks that touch or come within `gap` px of each other (their rects, transitively) merged into
- *  one, the rest kept apart (AI 拆层 removes each cluster in its own run: a removal workflow that
- *  crops around its mask can't take holes all over the picture at once). In the masks' order of
- *  first appearance. */
-export function clusterMasks(masks: readonly { pixels: Pixels; rect: Rect }[], gap: number): { pixels: Pixels; rect: Rect }[] {
-  const parent = masks.map((_, i) => i);
-  const root = (i: number): number => parent[i] === i ? i : (parent[i] = root(parent[i]));
-  const near = (a: Rect, b: Rect) => a.left - gap < b.right && b.left - gap < a.right && a.top - gap < b.bottom && b.top - gap < a.bottom;
-  for (let i = 0; i < masks.length; i++) for (let j = i + 1; j < masks.length; j++)
-    if (near(masks[i].rect, masks[j].rect)) parent[root(j)] = root(i);
-  const groups = new Map<number, { pixels: Pixels; rect: Rect }[]>();
-  masks.forEach((m, i) => { const r = root(i); groups.set(r, [...(groups.get(r) ?? []), m]); });
-  return [...groups.values()].map(g => mergeMasks(g)!);
-}
