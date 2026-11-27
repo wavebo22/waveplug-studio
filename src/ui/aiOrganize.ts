@@ -8,7 +8,7 @@ import type { Overlay } from "../app/overlay.ts";
 import type { LayerTree } from "../ps/host.ts";
 import type { TreeLayer } from "../core/layers/tree.ts";
 import { deepseekJson } from "../core/assistant/deepseek.ts";
-import { type OrganizePlan, type OrganizeScope, ORGANIZE_MAX_LAYERS, ORGANIZE_SYSTEM, chosenPlan, describeLayers, organizeScope, organizeUserPrompt, parseOrganizePlan } from "../core/assistant/organize.ts";
+import { type OrganizePlan, type OrganizeScope, ORGANIZE_MAX_LAYERS, ORGANIZE_SYSTEM, chosenPlan, describeLayers, organizeScope, organizeUserPrompt, parseOrganizePlan, textRenames } from "../core/assistant/organize.ts";
 import { ORGANIZE_PANEL, type OrganizeAction, type OrganizeSections, organizeItemIds, organizePlanSection, parseOrganizeAction } from "../core/overlay/organizePanel.ts";
 import { log, withTimeout } from "../app/log.ts";
 import { h } from "./dom.ts";
@@ -42,6 +42,8 @@ export function createAiOrganize(d: AiOrganizeDeps) {
 
   let open = false, docId: number | null = null, scope: OrganizeScope | null = null;
   let plan: OrganizePlan | null = null, busy = "", error = "", run = 0;
+  /** the text layers' words as read for the plan (their names come from them) */
+  let texts = new Map<number, string>();
   let extra = read(EXTRA_KEY), renameOnly = read(RENAME_ONLY_KEY) === "on";
   const offRenames = new Set<number>(), offGroups = new Set<number>();
 
@@ -98,12 +100,16 @@ export function createAiOrganize(d: AiOrganizeDeps) {
       const now = d.state();
       if (now.docId !== id) throw new Error("文档已切换，请重新打开 AI 整理");
       const textIds = sc.ids.filter(x => now.layers.find(l => l.id === x)?.kind === "text");
-      const texts = textIds.length ? await d.tree.texts(id, textIds).catch(e => { log("warn", "ai organize texts", e); return new Map<number, string>(); }) : new Map<number, string>();
+      texts = textIds.length ? await d.tree.texts(id, textIds).catch(e => { log("warn", "ai organize texts", e); return new Map<number, string>(); }) : new Map<number, string>();
       const user = organizeUserPrompt(describeLayers(now.layers, sc.ids, texts), { width: now.width, height: now.height, renameOnly, extra });
       const cfg = d.settings();
       const r = await withTimeout(deepseekJson(d.fetch, { key: cfg.key, model: cfg.model }, { system: ORGANIZE_SYSTEM, user }), TIMEOUT_MS, "DeepSeek ");
       if (mine !== run || !open) return;
-      const p = parseOrganizePlan(r.value, d.state().layers, sc.ids);
+      const fresh = d.state().layers;
+      const p = parseOrganizePlan(r.value, fresh, sc.ids, { texts });
+      // text layers: named by their words, not by DeepSeek
+      const fromText = textRenames(fresh, sc.ids, texts).filter(t => !p.renames.some(x => x.id === t.id));
+      p.renames = [...fromText, ...p.renames];
       if (renameOnly) p.groups = [];
       plan = p;
       log("info", "ai organize plan", JSON.stringify({ model: r.model, layers: sc.ids.length, renames: p.renames.length, groups: p.groups.length, dropped: p.dropped.length, usage: r.usage, ms: Date.now() - started }));
@@ -124,7 +130,7 @@ export function createAiOrganize(d: AiOrganizeDeps) {
       const fresh = await d.tree.read();
       if (!fresh || fresh.docId !== id) throw new Error("文档已切换，没有应用");
       const chosen = chosenPlan(plan, offRenames, offGroups);
-      const checked = parseOrganizePlan(chosen, fresh.layers, sc.ids);
+      const checked = parseOrganizePlan(chosen, fresh.layers, sc.ids, { texts });
       const final = chosenPlan(checked, new Set(), new Set());
       const lost = chosen.renames.length + chosen.groups.length - (final.renames.length + final.groups.length);
       const res = await d.tree.organize(id, final);

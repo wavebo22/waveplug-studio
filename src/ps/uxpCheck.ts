@@ -6,11 +6,11 @@
 
 import { log } from "../app/log.ts";
 import type { CheckDoc, CheckText, CMYK, RGB, StyleEdit } from "../core/check/rules.ts";
-import { replaceOnce } from "../core/check/ai.ts";
+import { replaceInTextKey, toPsText } from "../core/check/textEdit.ts";
 import type { Rect } from "../core/image/region.ts";
 import type { DocChecker } from "./host.ts";
 import { docById, findLayer, play, step } from "./uxpHost.ts";
-import { act, type UxpTools } from "./uxpTools.ts";
+import { act, selectLayers, type UxpTools } from "./uxpTools.ts";
 
 declare const require: (m: string) => any;
 
@@ -188,13 +188,11 @@ export class UxpChecker implements DocChecker {
     let done = 0;
     const norm = (x: string) => x.replace(/\r\n?|\u0003/g, "\n");
     await step("WavePlug AI 改写文字", docId, async () => {
-      const doc = docById(docId);
       for (const e of edits) {
-        const layer = findLayer(doc.layers, e.id);
-        if (!layer?.textItem) { skipped.push(`#${e.id}：文字图层已不存在`); continue; }
-        if (norm(String(layer.textItem.contents ?? "")) !== norm(e.from)) { skipped.push(`「${layer.name}」：文字已经改过`); continue; }
-        try { layer.textItem.contents = e.to.replace(/\n/g, "\r"); done++; }
-        catch (err) { skipped.push(`「${layer.name}」：${(err as Error)?.message ?? err}`); }
+        try {
+          const r = await editText(docId, e.id, k => norm(String(k.textKey ?? "")) === norm(e.from) ? replaceInTextKey(k, "", e.to, true) : null);
+          if (r === "changed") skipped.push(`#${e.id}：文字已经改过`); else done++;
+        } catch (err) { skipped.push(`#${e.id}：${(err as Error)?.message ?? err}`); }
       }
     });
     log("info", "ai rewrite", JSON.stringify({ edits: edits.length, done, skipped: skipped.length }));
@@ -202,13 +200,30 @@ export class UxpChecker implements DocChecker {
   }
 
   async setText(docId: number, id: number, from: string, to: string): Promise<boolean> {
-    return step("WavePlug 采用文案建议", docId, async () => {
-      const layer = findLayer(docById(docId).layers, id);
-      if (!layer?.textItem) throw new Error("文字图层已不存在");
-      const next = replaceOnce(String(layer.textItem.contents ?? ""), from, to);
-      if (next === null) return false;
-      layer.textItem.contents = next;
-      return true;
-    });
+    return step("WavePlug 采用文案建议", docId, async () => await editText(docId, id, k => replaceInTextKey(k, from, to)) === "done");
   }
+}
+
+/** Edits a text layer's descriptor (string and style runs together: core/check/textEdit.ts) and sets
+ *  it back whole, so fonts, sizes, colours, the box and the position stay. Inside a step.
+ *  "changed": `edit` found the text isn't what it expected. */
+async function editText(docId: number, id: number, edit: (textKey: Record<string, unknown>) => Record<string, unknown> | null): Promise<"done" | "changed"> {
+  const [r] = await play([{ _obj: "get", _target: [{ _property: "textKey" }, { _ref: "layer", _id: id }, { _ref: "document", _id: docId }] }]);
+  const key = r?.textKey;
+  if (!key || typeof key.textKey !== "string") throw new Error("文字图层已不存在");
+  const next = edit(key);
+  if (!next) return "changed";
+  try {
+    await act({ _obj: "set", _target: [{ _ref: "textLayer", _id: id }], to: next });
+  } catch (e) {
+    // some versions only take the target layer: select it and set that one
+    log("info", "text edit by id failed, by selection", id, e);
+    await selectLayers([id]);
+    await act({ _obj: "set", _target: [{ _ref: "textLayer", _enum: "ordinal", _value: "targetEnum" }], to: next });
+  }
+  const [after] = await play([{ _obj: "get", _target: [{ _property: "textKey" }, { _ref: "layer", _id: id }, { _ref: "document", _id: docId }] }]);
+  const same = (x: unknown) => toPsText(String(x ?? "")).replace(/\r+$/, "");
+  if (same(after?.textKey?.textKey) !== same(next.textKey)) throw new Error("Photoshop 没有接受修改");
+  log("info", "text edit", JSON.stringify({ id, runs: Array.isArray(next.textStyleRange) ? next.textStyleRange.length : 0, chars: String(next.textKey).length }));
+  return "done";
 }

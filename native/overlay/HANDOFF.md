@@ -132,6 +132,7 @@ src/ui/app.ts  startOverlay()      生成页提供状态和     src/panel/genera
 - 0.34.0：介面 `rewrite`（AI 改写文字）用同一个 `Organize` 结构和同一个视窗（`organize::REWRITE_ID`，`host.rs assist_id` 列出三者）；插件在区块里带自己的标题、输入提示、复选框文字（空 = 不显示）、预设按钮（点一下 = 发 `extra` 再发 `analyse`）、开始按钮文字和列表标题；行可以 `lock`（不能勾，只是建议）并带一行 `note`。`check` 的问题可以带 `choices`（多个处理方式），按钮变成菜单，回传 `{"kind":"fix","key","choice":i}`。
 - 0.34.0 修复：AI 整理输入框获得键盘后，`watch_check` 不再每轮把窗口改回不接收键盘（`needs_noactivate_style` 用 `CHECK_TYPING`）。
 - 0.35.0：外置生成面板区块 `ai`（`{busy, blocked, undo}`，null = 这个模式没有提示词可优化），收藏栏里显示「✦ AI 优化」/「↶ 还原」，回传 `optimize-prompt` / `restore-prompt`；功能设置 › AI 助手 多了 `deepseekPromptImage`（默认开）。
+- 0.36.0：检查结果窗口里双击一行 = 处理（有 `choices` 时回传 `choice: 0`）。
 
 ### 3.6 快捷键 Ctrl+F = 原位粘贴（2026-11-25，0.29.0，未实测）
 

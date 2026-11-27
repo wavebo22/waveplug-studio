@@ -4,7 +4,8 @@
 //
 // - hovering a row: {"kind":"hover","key":…} (null when the pointer leaves the list) — the plugin
 //   lights the issue's layers up in red / yellow in the panel and on the canvas;
-// - clicking a title: "pick" (select the layers); the button: "fix"; the two AI boxes: "opt";
+// - clicking a title: "pick" (select the layers); the button, or double-clicking the row: "fix"
+//   (with several ways to fix, the first); the two AI boxes: "opt";
 //   重新检查: "recheck"; ×: "close".
 // - 收起 is this window's own: only the title bar stays (win.rs makes the window that short).
 use eframe::egui::{self, Color32, CornerRadius, RichText, Sense, Stroke, StrokeKind, Vec2};
@@ -186,7 +187,8 @@ impl Check {
                                     ui.set_width(text_w);
                                     let ink = if done { theme::TEXT_3 } else { theme::TEXT };
                                     let title = ui.add(egui::Label::new(RichText::new(&it.title).font(theme::font(theme::FS)).color(ink)).wrap().sense(if it.pick { Sense::click() } else { Sense::hover() }));
-                                    if it.pick && title.on_hover_text("单击选中相关图层").clicked() {
+                                    let tip = if it.fix.is_some() && it.state.is_none() { "单击选中相关图层，双击直接处理" } else { "单击选中相关图层" };
+                                    if it.pick && title.on_hover_text(tip).clicked() {
                                         actions.push(json!({ "kind": "pick", "key": it.key }));
                                     }
                                     if !it.detail.is_empty() {
@@ -197,7 +199,7 @@ impl Check {
                                     ui.label(RichText::new(st).font(theme::font(theme::FS_S)).color(theme::OK));
                                 } else if let Some(fix) = &it.fix {
                                     if it.choices.is_empty() {
-                                        if ui.add(egui::Button::new(small(fix))).on_hover_text("处理这一项（可以 Ctrl+Z 撤销）").clicked() {
+                                        if ui.add(egui::Button::new(small(fix))).on_hover_text("处理这一项（也可以双击这一行；可以 Ctrl+Z 撤销）").clicked() {
                                             actions.push(json!({ "kind": "fix", "key": it.key }));
                                         }
                                     } else {
@@ -215,6 +217,10 @@ impl Check {
                         });
                         let r = row.response.rect;
                         if pointer_in && ui.rect_contains_pointer(r) {
+                            // double-click: fix it right away (the same as its button / the menu's first)
+                            if it.fix.is_some() && it.state.is_none() && ui.input(|i| i.pointer.button_double_clicked(egui::PointerButton::Primary)) {
+                                actions.push(if it.choices.is_empty() { json!({ "kind": "fix", "key": it.key }) } else { json!({ "kind": "fix", "key": it.key, "choice": 0 }) });
+                            }
                             hover_now = Some(it.key.clone());
                             if it.pick {
                                 edges = Some((r.left() * ppp, r.right() * ppp, r.center().y * ppp));
