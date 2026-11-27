@@ -5,8 +5,11 @@
 
 import { DEEPSEEK_VISION_MODEL, deepseekJson } from "../core/assistant/deepseek.ts";
 import {
-  DECOMPOSE_SYSTEM, type DecomposeDetail, type DecomposePlan, decomposeRequest, isDecomposeDetail, parseDecomposeAnswer, visionSize,
+  DECOMPOSE_SYSTEM, type DecomposeDetail, type DecomposePlan, REFINE_BATCH, REFINE_MAX_PIXELS, REFINE_SYSTEM, applyRefine,
+  decomposeRequest, isDecomposeDetail, parseDecomposeAnswer, refineRegion, refineRequest, visionSize,
 } from "../core/assistant/decompose.ts";
+import { withGrid } from "../core/image/grid.ts";
+import { type Pixels, encodePng } from "../core/image/png.ts";
 import type { Rect } from "../core/image/region.ts";
 import type { PsHost } from "../ps/host.ts";
 import { crumb, log, withTimeout } from "../app/log.ts";
@@ -26,8 +29,8 @@ const DETAIL_KEY = "wp.decompose.detail";
 const TIMEOUT_MS = 180_000;
 const DETAILS: [DecomposeDetail, string, string][] = [
   ["coarse", "粗", "只拆 2～4 个最主要的部分"],
-  ["medium", "中", "每个独立的物件、每块文字各一个，约 4～8 个"],
-  ["fine", "细", "能单独移动的都拆出来，约 8～15 个"],
+  ["medium", "中", "每个独立的物件、装饰图形、每块文字各一个，约 5～10 个"],
+  ["fine", "细", "能单独移动的都拆出来，包括小图标、logo、每块文字，约 10～20 个"],
 ];
 /** box colours, in turn (the panel's palette tokens) */
 const COLORS = 8;
@@ -38,7 +41,16 @@ interface Result {
   size: { width: number; height: number };
   thumb: string;
   plan: DecomposePlan;
+  /** what the second look couldn't do */
+  notes: string[];
   note: string;
+}
+
+function dataUrl(p: Pixels): string {
+  const bytes = encodePng(p);
+  let bin = "";
+  for (let i = 0; i < bytes.length; i += 0x8000) bin += String.fromCharCode(...bytes.subarray(i, i + 0x8000));
+  return "data:image/png;base64," + btoa(bin);
 }
 
 export function createAiDecompose(d: AiDecomposeDeps) {
@@ -50,7 +62,7 @@ export function createAiDecompose(d: AiDecomposeDeps) {
 
   const detailBtns = DETAILS.map(([k, label, tip]) => h("button", { class: "seg-btn", title: tip, onClick: () => { detail = k; try { localStorage.setItem(DETAIL_KEY, k); } catch { /* not kept */ } render(); } }, label));
   const hint = h("input", { class: "field", type: "text", placeholder: "补充要求（可选），例如：文字不用拆" }) as HTMLInputElement;
-  const runBtn = h("button", { class: "btn tool-btn wide primary", title: "把画面的缩略图发给 DeepSeek（deepseek-flash），列出可以拆成独立图层的部分和大致范围。只分析，不改动文档", onClick: () => void run() }, "分析画面");
+  const runBtn = h("button", { class: "btn tool-btn wide primary", title: "把画面发给 DeepSeek（deepseek-flash）：先看整个画面列出可以拆成独立图层的部分，再把每个部分放大看一次，框得更准。只分析，不改动文档", onClick: () => void run() }, "分析画面");
   const info = h("div", { class: "tool-info muted" });
   const view = h("div", { class: "dc-view" });
   const list = h("div", { class: "dc-list" });
@@ -64,17 +76,47 @@ export function createAiDecompose(d: AiDecomposeDeps) {
     if (!d.key().trim()) { d.status("先在 WavePlug 程序 › 功能设置 › AI 助手 里填写 DeepSeek API Key", "error"); return; }
     busy = true; render();
     crumb("工具：AI 拆层 分析");
-    d.status("AI 拆层：DeepSeek 正在看画面…");
+    d.status("AI 拆层：DeepSeek 正在看整个画面…");
     const started = Date.now();
+    const size = { width: doc.width, height: doc.height };
+    const cfg = { key: d.key(), model: DEEPSEEK_VISION_MODEL };
+    let tokens = 0;
+    const ask = async (system: string, user: string, images: string[]) => {
+      const r = await withTimeout(deepseekJson(d.fetch, cfg, { system, user, images, maxTokens: 8000, temperature: 0.2 }), TIMEOUT_MS, "DeepSeek ");
+      if (r.usage) tokens += r.usage.prompt + r.usage.completion;
+      return r.value;
+    };
     try {
+      // 1. the whole picture (with a grid to read positions against): what the parts are, roughly where
       const t = visionSize(doc.width, doc.height);
-      const thumb = await d.host.docThumbnail(doc.id, Math.max(t.width, t.height));
-      const r = await withTimeout(deepseekJson(d.fetch, { key: d.key(), model: DEEPSEEK_VISION_MODEL },
-        { system: DECOMPOSE_SYSTEM, user: decomposeRequest(detail, t, hint.value), images: [thumb], maxTokens: 8000, temperature: 0.2 }), TIMEOUT_MS, "DeepSeek ");
-      const plan = parseDecomposeAnswer(r.value, { width: doc.width, height: doc.height });
+      let thumb: string, sent: string;
+      if (d.host.docPixels) {
+        const px = await d.host.docPixels(doc.id, null, t.width * t.height);
+        thumb = dataUrl(px); sent = dataUrl(withGrid(px));
+      } else thumb = sent = await d.host.docThumbnail(doc.id, Math.max(t.width, t.height));
+      const first = await ask(DECOMPOSE_SYSTEM, decomposeRequest(detail, t, hint.value), [sent]);
+      let plan = parseDecomposeAnswer(first, size);
+      log("info", "decompose", JSON.stringify({ doc: doc.name, size: [doc.width, doc.height], thumb: [t.width, t.height], detail, parts: plan.parts.length, dropped: plan.dropped, answer: JSON.stringify(first).slice(0, 3000) }));
+      // 2. each part again in a zoomed-in crop of the full-resolution picture: a box that fits
+      let notes: string[] = [];
+      if (plan.parts.length && d.host.docPixels) {
+        d.status(`AI 拆层：找到 ${plan.parts.length} 个部分，正在放大细化每个部分的范围…`);
+        const regions = plan.parts.map(p => refineRegion(p.box, size));
+        const crops: string[] = [];
+        for (const r of regions) crops.push(dataUrl(withGrid(await d.host.docPixels(doc.id, r, REFINE_MAX_PIXELS))));
+        const batches: Promise<unknown>[] = [];
+        for (let i = 0; i < plan.parts.length; i += REFINE_BATCH) {
+          const names = plan.parts.slice(i, i + REFINE_BATCH).map(p => p.name);
+          batches.push(ask(REFINE_SYSTEM, refineRequest(names), crops.slice(i, i + REFINE_BATCH)).catch(e => { log("warn", "decompose refine", e); return null; }));
+        }
+        const answers = await Promise.all(batches);
+        log("info", "decompose refine", JSON.stringify({ regions, answers: JSON.stringify(answers).slice(0, 4000) }));
+        const refined = applyRefine(plan.parts, regions, answers, size);
+        plan = { ...plan, parts: refined.parts };
+        notes = refined.notes;
+      }
       const secs = ((Date.now() - started) / 1000).toFixed(0);
-      log("info", "decompose", JSON.stringify({ doc: doc.name, size: [doc.width, doc.height], thumb: [t.width, t.height], detail, parts: plan.parts.length, dropped: plan.dropped, usage: r.usage, answer: JSON.stringify(r.value).slice(0, 3000) }));
-      result = { docId: doc.id, docName: doc.name, size: { width: doc.width, height: doc.height }, thumb, plan, note: `${secs} 秒` + (r.usage ? ` · ${r.usage.prompt + r.usage.completion} tokens` : "") };
+      result = { docId: doc.id, docName: doc.name, size, thumb, plan, notes, note: `${secs} 秒` + (tokens ? ` · ${tokens} tokens` : "") };
       shown = null;
       d.status(plan.parts.length ? `AI 拆层：找到 ${plan.parts.length} 个部分，点一项在画面上选中它` : "AI 拆层：DeepSeek 没有找到可以拆的部分", plan.parts.length ? "ok" : "error");
     } catch (e) {
@@ -124,14 +166,16 @@ export function createAiDecompose(d: AiDecomposeDeps) {
         onClick: () => void select(i, shown?.i === i && !shown.crop) },
         h("span", { class: "dc-num", style: `color:var(--lc-${i % COLORS})` }, String(i + 1)),
         h("span", { class: "dc-name" }, p.name),
-        p.kind === "text" ? h("span", { class: "dc-tag" }, "文字") : null);
+        p.kind === "text" ? h("span", { class: "dc-tag" }, "文字") : null,
+        p.refined === false ? h("span", { class: "dc-tag", title: "放大细化时没找到它，框是第一次看整个画面时估的，可能不准" }, "未细化") : null);
       row.addEventListener("mouseenter", () => boxes[i].classList.add("on"));
       row.addEventListener("mouseleave", () => { if (shown?.i !== i) boxes[i].classList.remove("on"); });
       return row;
     }));
     allBtn.hidden = r.plan.parts.length < 2 || !d.host.selectRects;
-    dropped.hidden = !r.plan.dropped.length;
-    replace(dropped, r.plan.dropped.length ? `没采用：${r.plan.dropped.join("；")}` : "");
+    const extra = [...(r.plan.dropped.length ? [`没采用：${r.plan.dropped.join("；")}`] : []), ...(r.notes.length ? [r.notes.join("；")] : [])];
+    dropped.hidden = !extra.length;
+    replace(dropped, extra.join("\n"));
   }
 
   const el = h("section", { class: "card" },

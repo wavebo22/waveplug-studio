@@ -1,8 +1,43 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import {
-  DECOMPOSE_MAX_PARTS, DECOMPOSE_MAX_PIXELS, cropFor, decomposeRequest, parseDecomposeAnswer, visionSize,
+  DECOMPOSE_MAX_PARTS, DECOMPOSE_MAX_PIXELS, REFINE_BATCH, applyRefine, cropFor, decomposeRequest, parseDecomposeAnswer, refineRegion, refineRequest, visionSize,
 } from "../src/core/assistant/decompose.ts";
+import { withGrid } from "../src/core/image/grid.ts";
+
+test("坐标网格：画在副本上，线在每十分之一处，原图不变", () => {
+  const p = { width: 200, height: 100, channels: 3 as const, data: new Uint8Array(200 * 100 * 3).fill(0) };
+  const g = withGrid(p);
+  assert.equal(p.data.some(v => v !== 0), false);
+  const at = (x: number, y: number) => Array.from(g.data.subarray((y * 200 + x) * 3, (y * 200 + x) * 3 + 3));
+  assert.deepEqual(at(100, 55), [128, 0, 128]);
+  assert.deepEqual(at(55, 55), [0, 0, 0]);
+  const gray = { width: 2, height: 2, channels: 1 as const, data: new Uint8Array(4) };
+  assert.equal(withGrid(gray), gray);
+});
+
+test("细化：每个部分在自己的局部图里重新定位，换算回文档像素；找不到的保留第一次的框", () => {
+  const size = { width: 2000, height: 1000 };
+  const first = parseDecomposeAnswer({ parts: Array.from({ length: REFINE_BATCH + 1 }, (_, i) => ({ name: `物件${i}`, box: [100 + i * 50, 100, 300 + i * 50, 400] })) }, size);
+  const regions = first.parts.map(p => refineRegion(p.box, size));
+  for (const [i, r] of regions.entries()) {
+    assert.ok(r.left <= first.parts[i].box.left && r.right >= first.parts[i].box.right && r.top <= first.parts[i].box.top && r.bottom >= first.parts[i].box.bottom);
+    assert.ok(r.bottom - r.top >= 200);
+  }
+  const answers = [
+    { boxes: [{ i: 1, box: [0, 0, 500, 500] }, { i: 2, box: null }] },
+    null,
+  ];
+  const r = applyRefine(first.parts, regions, answers, size);
+  const r0 = regions[0];
+  assert.deepEqual(r.parts[0].box, { left: r0.left, top: r0.top, right: r0.left + Math.ceil((r0.right - r0.left) / 2), bottom: r0.top + Math.ceil((r0.bottom - r0.top) / 2) });
+  assert.equal(r.parts[0].refined, true);
+  assert.deepEqual(r.parts[1].box, first.parts[1].box);
+  assert.equal(r.parts[1].refined, false);
+  assert.equal(r.parts[REFINE_BATCH].refined, false);
+  assert.ok(r.notes.some(n => /没找到/.test(n)) && r.notes.some(n => /请求失败/.test(n)));
+  assert.match(refineRequest(["奶牛头", "键盘"]), /第 2 张：找「键盘」/);
+});
 
 test("拆层缩略图：不超过 1300×1300 像素数，保持比例，小图不放大", () => {
   assert.deepEqual(visionSize(800, 600), { width: 800, height: 600 });

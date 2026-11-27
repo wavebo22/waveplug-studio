@@ -26,6 +26,8 @@ export interface DecomposePart {
   kind: PartKind;
   /** where the model says the part is, in document pixels */
   box: Rect;
+  /** the box came from the second, zoomed-in look (applyRefine) */
+  refined?: boolean;
   /** what is sent to 心宝抠图: the box grown by a margin, in document pixels */
   crop: Rect;
 }
@@ -47,27 +49,46 @@ export function visionSize(width: number, height: number): Size {
 }
 
 const DETAIL_GUIDE: Record<DecomposeDetail, string> = {
-  coarse: "拆分粒度：粗。只拆出 2～4 个最主要的部分（主体、大的前景物件、大标题），小东西归到它所在的大部分里，不单独列出。",
-  medium: "拆分粒度：中。拆出 4～8 个部分：每个独立的物件、每块独立的文字各算一个；紧贴在一起、明显属于同一个东西的（例如瓶子和瓶盖）算一个。",
-  fine: "拆分粒度：细。拆出 8～15 个部分：能单独移动的东西都单独列出，包括小装饰、小图标、每块文字。",
+  coarse: "拆分粒度：粗。只拆出 2～4 个最主要的部分（主体、大的前景物件、整片标题区），小东西归到它所在或挨着的大部分里，不单独列出。",
+  medium: "拆分粒度：中。拆出 5～10 个部分：每个独立的物件、每个明显的装饰图形、每块排版上分开的文字各算一个；紧贴在一起、明显属于同一个东西的（例如瓶子和瓶盖、一行标题和它的下划线）算一个。",
+  fine: "拆分粒度：细。尽量拆细，一般 10～20 个：能单独移动的东西都单独列出，包括小装饰、小图标、logo、线框、对话气泡、每块文字（不同颜色、字号、方向或中间有空白的文字分别列出）。画面里确实没那么多东西时才可以少于 10 个。",
 };
 
-export const DECOMPOSE_SYSTEM = `你是图像拆层助手。用户要把一张平面图拆成 Photoshop 里的独立图层：每个部分会被单独抠出来、补全被挡住的部分，放到自己的图层上；背景另外处理。你的任务是列出要拆出的部分。只输出 JSON。
+export const DECOMPOSE_SYSTEM = `你是图像拆层助手。用户要把一张平面图拆成 Photoshop 里的独立图层：每个部分会被单独抠出来、补全被挡住的部分，放到自己的图层上；背景另外处理。你的任务是列出要拆出的部分和它们的位置。只输出 JSON。
+
+附图上叠了一层品红色的细网格线，把宽和高各分成 10 格；上边和左边的数字 1～9 是网格线的位置，表示 100～900。网格线不是画面内容，只是帮你读坐标。
+
+先按下面几类逐一清点画面，不要漏：
+- 主体和物件（人物、动物、产品、家具、器物……）
+- 装饰图形（对话气泡、线框、色块、贴纸、图标、logo、印章、箭头……）
+- 文字（每一块排版上独立的文字）
 
 规则：
-1. 不要列背景（天空、墙面、地面、纯色或渐变底等铺满画面的东西）。
-2. 名字用中文，是一个简短的名词短语（不超过 12 个字），要能在这张图里唯一指认这个部分：有相似的东西时加上位置或颜色区分，例如「左边的红色瓶子」「右边的红色瓶子」。不要写动作和描述句。
-3. 文字单独成一个部分，kind 写 "text"，名字写成「标题文字“……”」这样，引号里是文字内容（太长就写开头几个字）；其他部分 kind 写 "object"。
+1. 不要列背景（天空、墙面、地面、桌面、纯色或渐变底、铺满画面的纹理等）。
+2. 名字用中文，是一个简短的名词短语（不超过 12 个字），说清它是什么，例如「奶牛头」「绿色办公椅」「白色键盘」。只有画面里有相似的东西时，才加位置或颜色区分，例如「左边的红色瓶子」「右边的红色瓶子」。不要写动作和描述句。
+3. 文字的 kind 写 "text"，名字写成「文字“……”」，引号里是文字内容（太长就写开头几个字）；其他部分 kind 写 "object"。
 4. 按从前到后的顺序排列：挡住别人的写在前面，被挡住的写在后面。
-5. box 是这个部分完整外形的范围 [左, 上, 右, 下]，按附图的宽和高换算成 0～1000 的整数（0 是左边或上边，1000 是右边或下边）。被别的东西挡住的部分也估算进去。框要贴着物件，不要留太多空白。
+5. box 是这个部分完整外形的范围 [左, 上, 右, 下]，按附图的宽和高换算成 0～1000 的整数（0 是左边或上边，1000 是右边或下边），对照网格线读数。框要贴着这个部分的边缘：左边对齐它最左的一点，右边对齐最右的一点，上下也一样。被别的东西挡住的部分也估算进去。
 6. 看不清、太小（不到画面的百分之一）的东西不要列。
 
 输出格式：{"parts":[{"name":"名字","kind":"object","box":[左,上,右,下]}]}`;
 
+export const REFINE_SYSTEM = `你是图像定位助手。用户会给你几张从同一张大图里裁出来的局部图，每张图说明要找的是哪个东西。请在每张局部图里找到它，给出贴边的范围。只输出 JSON。
+
+每张局部图上叠了一层品红色的细网格线，把宽和高各分成 10 格；上边和左边的数字 1～9 是网格线的位置，表示 100～900。网格线不是画面内容。
+
+规则：
+1. box 是这个东西在这张局部图里的完整外形 [左, 上, 右, 下]，按这张局部图的宽和高换算成 0～1000 的整数，对照网格线读数。框要贴着它的边缘，不要留空白；被别的东西挡住的部分也估算进去。东西超出局部图边缘时，那一边写 0 或 1000。
+2. 名字里的位置词（左边、右上角……）指的是在整张大图里的位置，不是在局部图里。
+3. 局部图里找不到这个东西时，box 写 null。
+4. i 是局部图的编号，每张图都要回答。
+
+输出格式：{"boxes":[{"i":1,"box":[左,上,右,下]},{"i":2,"box":null}]}`;
+
 /** The user message that goes with the thumbnail. */
 export function decomposeRequest(detail: DecomposeDetail, thumb: Size, hint = ""): string {
   const parts = [
-    `附图是要拆层的画面（${thumb.width}×${thumb.height} 像素）。`,
+    `附图是要拆层的画面（${thumb.width}×${thumb.height} 像素，叠了读坐标用的网格线）。`,
     DETAIL_GUIDE[detail],
   ];
   const h = hint.replace(/\s+/g, " ").trim().slice(0, 300);
@@ -147,4 +168,47 @@ export function parseDecomposeAnswer(value: unknown, size: Size, crop: CropOptio
     parts.push({ name, kind, box, crop: cropFor(box, size, crop) });
   }
   return { parts, dropped };
+}
+
+// ── 细化: a second look, each part in a zoomed-in crop of the full-resolution picture ──
+
+/** Crops per refine request (the request body is limited to 48 MiB; PNG crops are ~1–2 MB each). */
+export const REFINE_BATCH = 6;
+/** A refine crop is read at most this many pixels. */
+export const REFINE_MAX_PIXELS = 900 * 900;
+
+/** What the second look sees for one part: its first box with plenty of room around it (the first
+ *  box may be off), at least a fifth of the picture's short side. */
+export function refineRegion(box: Rect, size: Size): Rect {
+  const long = Math.max(rectW(box), rectH(box), 1);
+  const m = Math.max(long * 0.5, Math.max(size.width, size.height) * 0.06);
+  return cropFor(box, size, { margin: m / long, minSide: Math.round(Math.min(size.width, size.height) * 0.2) });
+}
+
+/** The text of the refine request for these parts' crops (numbered from 1 in this request). */
+export function refineRequest(names: readonly string[]): string {
+  return [`下面 ${names.length} 张是从同一张大图里裁出来的局部图，按顺序编号：`,
+    ...names.map((n, i) => `第 ${i + 1} 张：找「${n}」`)].join("\n");
+}
+
+/** The parts with their boxes from the refine answers (one per batch of REFINE_BATCH parts, null
+ *  where the request failed); a part whose crop got no usable box keeps its first box. `regions`
+ *  are refineRegion's, in the parts' order. Crops are worked out again from the new boxes. */
+export function applyRefine(parts: readonly DecomposePart[], regions: readonly Rect[], answers: readonly unknown[], size: Size, crop: CropOptions = {}): { parts: DecomposePart[]; notes: string[] } {
+  const notes: string[] = [];
+  const out = parts.map((p, j) => {
+    const answer = answers[Math.floor(j / REFINE_BATCH)];
+    const list = answer && typeof answer === "object" ? (answer as { boxes?: unknown }).boxes : null;
+    const want = j % REFINE_BATCH + 1;
+    const item = Array.isArray(list) ? list.find(x => x && typeof x === "object" && Number((x as { i?: unknown }).i) === want) as { box?: unknown } | undefined : undefined;
+    const r = regions[j];
+    const b = item && item.box != null && r ? boxOf(item.box, { width: rectW(r), height: rectH(r) }) : null;
+    if (!b || typeof b === "string") {
+      notes.push(`「${p.name}」${answer == null ? "细化请求失败" : item?.box === null ? "细化时没找到" : "细化没有给出范围"}，用第一次的框`);
+      return { ...p, refined: false };
+    }
+    const box = { left: r.left + b.left, top: r.top + b.top, right: r.left + b.right, bottom: r.top + b.bottom };
+    return { ...p, box, crop: cropFor(box, size, crop), refined: true };
+  });
+  return { parts: out, notes };
 }

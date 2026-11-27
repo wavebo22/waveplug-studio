@@ -337,6 +337,15 @@ export class UxpHost implements PsHost {
     });
   }
 
+  async docPixels(docId: number, rect: Rect | null, maxPixels: number): Promise<Pixels> {
+    const doc = docById(docId);
+    const r = rect ?? { left: 0, top: 0, right: Math.round(doc.width), bottom: Math.round(doc.height) };
+    const w = rectW(r), h = rectH(r);
+    const s = Math.min(1, Math.sqrt(maxPixels / Math.max(1, w * h)));
+    const target = w >= h ? { width: Math.max(1, Math.floor(w * s)) } : { height: Math.max(1, Math.floor(h * s)) };
+    return modal("WavePlug 读取画面", () => readPixels({ documentID: docId, sourceBounds: r, ...(s < 1 ? { targetSize: target } : {}) }));
+  }
+
   async viewBounds(docId: number): Promise<string | null> {
     const [vi] = await play([{ _obj: "get", _target: [{ _property: "viewInfo" }, { _ref: "document", _id: docId }], _options: DONT }]);
     const b = vi?.viewInfo?.activeView?.globalBounds;

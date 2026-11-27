@@ -42,6 +42,14 @@ class MockHost implements PsHost {
   async createDocument(width: number, height: number, name: string) { this.doc = { id: this.doc.id + 1, name, width, height, mode: "RGBColorMode", bits: 8 }; this.docOpen = true; this.sel = null; this.list = []; this.groupSelected = false; return this.doc; }
   docExists() { return true; }
   async selectionBounds() { return this.sel; }
+  async docPixels(_d: number, rect: Rect | null, maxPixels: number): Promise<Pixels> {
+    const img = new Image(); img.src = await this.docThumbnail(); await img.decode();
+    const sx = img.width / this.doc.width, sy = img.height / this.doc.height, r = rect ?? { left: 0, top: 0, right: this.doc.width, bottom: this.doc.height };
+    const s = Math.min(1, Math.sqrt(maxPixels / ((r.right - r.left) * (r.bottom - r.top))));
+    const c = document.createElement("canvas"); c.width = Math.max(1, Math.round((r.right - r.left) * s)); c.height = Math.max(1, Math.round((r.bottom - r.top) * s));
+    const g = c.getContext("2d")!; g.drawImage(img, r.left * sx, r.top * sy, (r.right - r.left) * sx, (r.bottom - r.top) * sy, 0, 0, c.width, c.height);
+    return { width: c.width, height: c.height, channels: 4, data: new Uint8Array(g.getImageData(0, 0, c.width, c.height).data.buffer) };
+  }
   async selectRects(_d: number, rects: Rect[]) { this.sel = rects.length ? rects.reduce((a, r) => ({ left: Math.min(a.left, r.left), top: Math.min(a.top, r.top), right: Math.max(a.right, r.right), bottom: Math.max(a.bottom, r.bottom) })) : null; this.changed(); }
   async selectionMask(_docId: number, rect: Rect): Promise<Pixels> {
     const w = rect.right - rect.left, h = rect.bottom - rect.top, data = new Uint8Array(w * h);
@@ -516,6 +524,10 @@ async function boot() {
       if (system.includes("文案助手")) {
         const lines = String(body.messages[1].content).split("\n").filter(l => l.startsWith("{")).map(l => JSON.parse(l));
         return reply({ items: lines.map(l => ({ id: l.id, text: "[EN] " + l.text })) });
+      }
+      if (system.includes("图像定位助手")) {
+        const n = body.messages[1].content.filter((x: any) => x.type === "image_url").length;
+        return reply({ boxes: Array.from({ length: n }, (_, k) => ({ i: k + 1, box: k === 1 ? null : [300, 280, 700, 720] })) });
       }
       if (system.includes("图像拆层助手")) return reply({ parts: [
         { name: "白色椭圆物件", kind: "object", box: [330, 300, 670, 800] },

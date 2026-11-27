@@ -85,6 +85,9 @@ export interface PsHost {
   selectionBounds(docId: number): Promise<Rect | null>;
   /** Replaces the selection with these rectangles (their union), one undo step (AI 拆层 shows a part's box). */
   selectRects?(docId: number, rects: Rect[]): Promise<void>;
+  /** The composite of `rect` (null: the whole document), scaled down to at most `maxPixels`
+   *  pixels, RGB or RGBA (AI 拆层's thumbnail and zoomed-in crops). Read only. */
+  docPixels?(docId: number, rect: Rect | null, maxPixels: number): Promise<Pixels>;
   /** Where the document's canvas is on screen (for the floating bar, native/overlay); Photoshop only. */
   canvasView?(docId: number): Promise<CanvasView | null>;
   /** Photoshop's raw view bounds only (one cheap read), to notice the canvas moving */
