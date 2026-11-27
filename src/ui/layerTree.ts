@@ -3602,7 +3602,7 @@ export function createLayerTreeView(tree: LayerTree, status: Status, tools?: Lay
     overlay, tree, status, fetch: assistant.fetch, settings: assistant.settings,
     state: () => ({ docId, layers, selected, width: canvas.width, height: canvas.height }),
     refresh: () => void refresh(), mark: (ids, sev) => void markIssue(ids, sev), opening: () => { docCheck?.close(); aiRewrite?.close(); },
-    view: canvasView,
+    view: canvasView, composite: assistant.composite,
   }) : null;
   // ── 文档检查: the button beside AI 整理; its list is the helper's window beside the panel (docCheck.ts) ──
   const docCheck = assistant?.checker ? createDocCheck({

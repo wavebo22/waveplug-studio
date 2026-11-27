@@ -98,12 +98,17 @@ test("只发送勾选的项", () => {
   assert.deepEqual(chosenPlan(p, new Set(), new Set([0])).groups, []);
 });
 
-test("参考图层画面：只给范围内看不出内容的像素图层和智能对象附图，最多 N 张；提示里说清第几张是哪个图层", () => {
+test("参考图层画面：只给范围内看不出内容的像素图层和智能对象上总览图；提示里说清编号、第几张第几格对应哪个图层", () => {
   const t2 = buildTree([L(1, "图层 1", 1), L(2, "产品主图", 1), L(3, "形状 1", 4), L(4, "IMG_2041.jpg", 5), L(5, "图层 9", 1), L(6, "标题", 3)]);
   assert.deepEqual(organizeLookIds(t2, [1, 2, 3, 4, 5, 6]), { ids: [1, 4, 5], more: 0 });
   assert.deepEqual(organizeLookIds(t2, [1, 2, 3, 4, 5, 6], 2), { ids: [1, 4], more: 1 });
   assert.deepEqual(organizeLookIds(t2, [2, 6]).ids, []);
-  const u = organizeUserPrompt("{}", { width: 100, height: 100, renameOnly: false, extra: "", pictures: [1, 4] });
-  assert.match(u, /第 1 张 = id 1，第 2 张 = id 4/);
+  const cells = [{ n: 1, id: 1, sheet: 0, row: 0, col: 0 }, { n: 2, id: 4, sheet: 0, row: 0, col: 1 }];
+  const u = organizeUserPrompt("{}", { width: 100, height: 100, renameOnly: false, extra: "", pictures: { overview: true, cells } });
+  assert.match(u, /第 1 张附图是整个画面/);
+  assert.match(u, /第 2 张附图是图层缩略图拼成的总览图/);
+  assert.match(u, /编号 1 = id 1（第 2 张第 1 行第 1 格），编号 2 = id 4（第 2 张第 1 行第 2 格）/);
+  // no whole picture: the sheet is the first
+  assert.match(organizeUserPrompt("{}", { width: 100, height: 100, renameOnly: false, extra: "", pictures: { overview: false, cells } }), /编号 2 = id 4（第 1 张第 1 行第 2 格）/);
   assert.ok(!/附图/.test(organizeUserPrompt("{}", { width: 100, height: 100, renameOnly: false, extra: "" })));
 });

@@ -309,6 +309,33 @@ class MockLayerTree implements LayerTree {
     await sleep(60); this.changed();
   }
   async select(_d: number, ids: number[]) { await sleep(60); this.selected = ids; this.changed(); }
+  /** 总览图 with made-up pictures (a coloured blob per layer), drawn by the real sheet code */
+  async layerSheets(_d: number, layers: { id: number }[]) {
+    const { cellOf, drawSheet, fitCell, sheetLayouts } = await import("../core/image/contactSheet.ts");
+    const layouts = sheetLayouts(layers.length);
+    const pic = (i: number) => {
+      const w = 60 + (i * 37) % 80, h = 40 + (i * 53) % 90, data = new Uint8Array(w * h * 4);
+      for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) {
+        const d = (y * w + x) * 4, inside = ((x - w / 2) / (w / 2)) ** 2 + ((y - h / 2) / (h / 2)) ** 2 < 1;
+        data[d] = (i * 70) % 256; data[d + 1] = (i * 140 + 60) % 256; data[d + 2] = 200; data[d + 3] = inside ? 255 : 0;
+      }
+      return { width: w, height: h, channels: 4, data };
+    };
+    const images: string[] = [];
+    let first = 1, i = 0;
+    for (const lay of layouts) {
+      const cells = Array.from({ length: lay.count }, () => fitCell(pic(i++), lay.cell));
+      const sheet = drawSheet(lay, cells, first);
+      first += lay.count;
+      const c = document.createElement("canvas"); c.width = sheet.width; c.height = sheet.height;
+      const g = c.getContext("2d")!, img = g.createImageData(sheet.width, sheet.height);
+      for (let k = 0; k < sheet.width * sheet.height; k++) { img.data[k * 4] = sheet.data[k * 3]; img.data[k * 4 + 1] = sheet.data[k * 3 + 1]; img.data[k * 4 + 2] = sheet.data[k * 3 + 2]; img.data[k * 4 + 3] = 255; }
+      g.putImageData(img, 0, 0);
+      images.push(c.toDataURL("image/jpeg", 0.9));
+    }
+    (window as any).__lastSheets = images;
+    return { images, cells: layers.map((_, k) => cellOf(layouts, k)) };
+  }
   async texts(_d: number, ids: number[]) { return new Map(this.raw.filter(l => l.kind === 3 && ids.includes(l.id)).map(l => [l.id, l.name])); }
   async organize(_d: number, plan: { renames: { id: number; name: string }[]; groups: { name: string; ids: number[] }[] }) {
     for (const r of plan.renames) { const l = this.raw.find(x => x.id === r.id && x.section !== "end"); if (l) l.name = r.name; }

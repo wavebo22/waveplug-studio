@@ -8,7 +8,8 @@ import type { Overlay } from "../app/overlay.ts";
 import type { LayerTree } from "../ps/host.ts";
 import type { TreeLayer } from "../core/layers/tree.ts";
 import { DEEPSEEK_VISION_MODEL, deepseekJson } from "../core/assistant/deepseek.ts";
-import { type OrganizePlan, type OrganizeScope, ORGANIZE_MAX_LAYERS, ORGANIZE_MAX_PICTURES, ORGANIZE_SYSTEM, chosenPlan, describeLayers, organizeLookIds, organizeScope, organizeUserPrompt, parseOrganizePlan, textRenames } from "../core/assistant/organize.ts";
+import { SHEET_EDGE } from "../core/image/contactSheet.ts";
+import { type OrganizePictures, type OrganizePlan, type OrganizeScope, ORGANIZE_MAX_LAYERS, ORGANIZE_MAX_PICTURES, ORGANIZE_SYSTEM, chosenPlan, describeLayers, organizeLookIds, organizeScope, organizeUserPrompt, parseOrganizePlan, textRenames } from "../core/assistant/organize.ts";
 import { ORGANIZE_PANEL, type OrganizeAction, type OrganizeSections, organizeItemIds, organizePlanSection, parseOrganizeAction } from "../core/overlay/organizePanel.ts";
 import { log, withTimeout } from "../app/log.ts";
 import { ORGANIZE_SETUP, type SetupSections } from "../core/overlay/setupPanel.ts";
@@ -35,11 +36,12 @@ export interface AiOrganizeDeps {
   opening(): void;
   /** the canvas view, to put the settings panel in the corner */
   view?(docId: number): Promise<CanvasView | null>;
+  /** the whole picture as a data URL, at most `maxEdge` px a side (参考图层画面) */
+  composite?(docId: number, maxEdge: number): Promise<string>;
 }
 
 const EXTRA_KEY = "wp.ai.organize.extra", RENAME_ONLY_KEY = "wp.ai.organize.renameOnly", TEXT_NAMES_KEY = "wp.ai.organize.textNames", LOOK_KEY = "wp.ai.organize.look";
-/** a layer picture's long edge (px) for 参考图层画面 */
-const PICTURE_PX = 160;
+
 /** DeepSeek can take a while for a long list; give up after this long */
 const TIMEOUT_MS = 180_000;
 const read = (k: string) => { try { return localStorage.getItem(k) ?? ""; } catch { return ""; } };
@@ -113,7 +115,7 @@ export function createAiOrganize(d: AiOrganizeDeps) {
         fields: [
           { key: "textNames", kind: "toggle", label: "文字图层用文字内容命名", value: textNames, tip: "不交给 AI：文字图层的名字直接换成它的文字（第一行）" },
           { key: "renameOnly", kind: "toggle", label: "只改名字，不新建组", value: renameOnly },
-          { key: "look", kind: "toggle", label: "参考图层画面（上传缩略图）", value: look, tip: `把看不出内容的像素图层和智能对象的小缩略图（每次最多 ${ORGANIZE_MAX_PICTURES} 张）发给 DeepSeek，按画的内容命名；会更慢一些，保密的稿子不要勾` },
+          { key: "look", kind: "toggle", label: "参考图层画面（上传缩略图）", value: look, tip: "把整个画面的缩略图，和看不出内容的像素图层、智能对象拼成的带编号总览图发给 DeepSeek，按画的内容命名；会慢一些，保密的稿子不要勾" },
           { key: "extra", kind: "text", label: "补充要求（可选）", hint: "例如：按钮统一叫「按钮-…」", value: extra },
         ],
         start: sc.ids.length && !tooMany ? "开始分析" : "",
@@ -148,20 +150,27 @@ export function createAiOrganize(d: AiOrganizeDeps) {
       if (now.docId !== id) throw new Error("文档已切换，请重新打开 AI 整理");
       const textIds = sc.ids.filter(x => now.layers.find(l => l.id === x)?.kind === "text");
       texts = textIds.length ? await d.tree.texts(id, textIds).catch(e => { log("warn", "ai organize texts", e); return new Map<number, string>(); }) : new Map<number, string>();
-      // 参考图层画面: pictures of the layers whose name says nothing (pixel / smart object)
-      const pictures: number[] = [], images: string[] = [];
+      // 参考图层画面: the whole picture, and the layers whose name says nothing (pixel / smart
+      // object) numbered on 总览图 sheets — a picture costs the same however much is on it
+      const images: string[] = [];
+      const pictures: OrganizePictures = { overview: false, cells: [] };
       let picturesLeft = 0;
       if (look) {
         const want = organizeLookIds(now.layers, sc.ids);
         picturesLeft = want.more;
-        if (want.ids.length) {
-          busy = `正在读取 ${want.ids.length} 个图层的缩略图…`; sync();
+        busy = want.ids.length ? `正在拼 ${want.ids.length} 个图层的缩略图…` : "正在读取画面…"; sync();
+        const whole = await d.composite?.(id, SHEET_EDGE).catch(e => { log("warn", "ai organize overview", e); return null; });
+        if (whole) { images.push(whole); pictures.overview = true; }
+        if (want.ids.length && d.tree.layerSheets) {
           const byId = new Map(now.layers.map(l => [l.id, l]));
-          const urls = await d.tree.thumbnails(id, want.ids.map(x => { const l = byId.get(x)!; return { id: x, bounds: { left: l.left, top: l.top, right: l.left + l.width, bottom: l.top + l.height } }; }), { width: now.width, height: now.height }, PICTURE_PX)
-            .catch(e => { log("warn", "ai organize pictures", e); return [] as (string | null | undefined)[]; });
-          urls.forEach((u, i) => { if (typeof u === "string" && u.startsWith("data:image/")) { pictures.push(want.ids[i]); images.push(u); } });
-          busy = "DeepSeek 正在看图分析图层…"; sync();
+          const sheets = await d.tree.layerSheets(id, want.ids.map(x => { const l = byId.get(x)!; return { id: x, bounds: { left: l.left, top: l.top, right: l.left + l.width, bottom: l.top + l.height } }; }))
+            .catch(e => { log("warn", "ai organize sheets", e); return null; });
+          if (sheets?.images.length) {
+            images.push(...sheets.images);
+            sheets.cells.forEach((c, i) => { if (c && c.sheet < sheets.images.length) pictures.cells.push({ ...c, id: want.ids[i] }); });
+          }
         }
+        if (images.length) { busy = "DeepSeek 正在看图分析图层…"; sync(); }
       }
       if (mine !== run || !open) return;
       const user = organizeUserPrompt(describeLayers(now.layers, sc.ids, texts), { width: now.width, height: now.height, renameOnly, extra, pictures });
@@ -174,10 +183,10 @@ export function createAiOrganize(d: AiOrganizeDeps) {
       // text layers: named by their words, not by DeepSeek
       const fromText = textNames ? textRenames(fresh, sc.ids, texts).filter(t => !p.renames.some(x => x.id === t.id)) : [];
       p.renames = [...fromText, ...p.renames];
-      if (picturesLeft) p.dropped.push(`看不出内容的图层太多，只给前 ${pictures.length} 个附了缩略图，剩下 ${picturesLeft} 个只按图层信息判断：可以分组选中再整理一次`);
+      if (picturesLeft) p.dropped.push(`看不出内容的图层太多，只给前 ${pictures.cells.length} 个附了缩略图，剩下 ${picturesLeft} 个只按图层信息判断：可以分组选中再整理一次`);
       if (renameOnly) p.groups = [];
       plan = p;
-      log("info", "ai organize plan", JSON.stringify({ model: r.model, layers: sc.ids.length, pictures: pictures.length, renames: p.renames.length, groups: p.groups.length, dropped: p.dropped.length, usage: r.usage, ms: Date.now() - started }));
+      log("info", "ai organize plan", JSON.stringify({ model: r.model, layers: sc.ids.length, pictures: pictures.cells.length, overview: pictures.overview, images: images.length, renames: p.renames.length, groups: p.groups.length, dropped: p.dropped.length, usage: r.usage, ms: Date.now() - started }));
     } catch (e) {
       if (mine !== run) return;
       error = (e as Error)?.message ?? String(e);

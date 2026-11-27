@@ -14,6 +14,7 @@ import { act, selectLayers, UxpTools } from "./uxpTools.ts";
 import { type MaskKind, maskTransferDescriptors } from "./maskTransfer.ts";
 import { type StagedLayer, snapName } from "../core/layers/workbench.ts";
 import { encodePng } from "../core/image/png.ts";
+import { type Cell, type Pixels, cellOf, drawSheet, fitCell, sheetLayouts } from "../core/image/contactSheet.ts";
 import { placeWorkbenchLayers, snapshotFolder } from "./uxpWorkbench.ts";
 import { readLayerImage } from "./uxpHost.ts";
 import { isNativeCommand, nativeDeleteOutcome, NATIVE_ACTIONS, NATIVE_COMMANDS_KEY, NATIVE_MENU, pickMenuId } from "../core/layers/nativeCommands.ts";
@@ -782,6 +783,48 @@ export class UxpLayerTree implements LayerTree {
         return alpha ? { bounds, width: d.width, height: d.height, alpha } : null;
       } finally { r?.imageData?.dispose?.(); }
     });
+  }
+
+  async layerSheets(docId: number, layers: { id: number; bounds: Bounds }[]): Promise<{ images: string[]; cells: (Cell | null)[] }> {
+    const imaging = ps().imaging;
+    // read every picture first (one modal call), at about its cell's size; then lay out only the readable ones
+    const plan = sheetLayouts(layers.length);
+    const pics = await modal(THUMBS, async () => {
+      const out: (Pixels | null)[] = [];
+      for (const [i, l] of layers.entries()) {
+        const cell = plan[Math.floor(i / Math.max(1, plan[0]?.count ?? 1))]?.cell ?? 128;
+        const b = l.bounds, w = b.right - b.left, h = b.bottom - b.top;
+        const opts: Record<string, unknown> = { documentID: docId, layerID: l.id, componentSize: 8, colorSpace: "RGB", colorProfile: "sRGB IEC61966-2.1",
+          sourceBounds: { left: Math.floor(b.left), top: Math.floor(b.top), right: Math.ceil(b.right), bottom: Math.ceil(b.bottom) } };
+        if (Math.max(w, h) > cell) opts.targetSize = w >= h ? { width: cell } : { height: cell };
+        try {
+          const r = await imaging.getPixels(opts);
+          try {
+            const d = r?.imageData;
+            out.push(d ? { width: d.width, height: d.height, channels: d.components, data: new Uint8Array(await d.getData({ chunky: true })) } : null);
+          } finally { r?.imageData?.dispose?.(); }
+        } catch (e) { out.push(null); log("info", "layer sheet picture", l.id, e); }
+      }
+      return out;
+    });
+    const ok = pics.map((p, i) => ({ p, i })).filter(x => x.p);
+    const layouts = sheetLayouts(ok.length);
+    const cells: (Cell | null)[] = layers.map(() => null);
+    ok.forEach((x, k) => { cells[x.i] = cellOf(layouts, k); });
+    const images: string[] = [];
+    let first = 1;
+    for (const [s, lay] of layouts.entries()) {
+      const mine = ok.filter((_, k) => cells[ok[k].i]?.sheet === s).map(x => fitCell(x.p, lay.cell));
+      const sheet = drawSheet(lay, mine, first);
+      first += lay.count;
+      const img = await imaging.createImageDataFromBuffer(sheet.data, { width: sheet.width, height: sheet.height, components: 3, colorSpace: "RGB", colorProfile: "sRGB IEC61966-2.1", chunky: true });
+      try {
+        const b64 = await imaging.encodeImageData({ imageData: img, base64: true });
+        if (typeof b64 === "string" && b64) images.push("data:image/jpeg;base64," + b64);
+      } finally { img.dispose(); }
+    }
+    log("info", "layer sheets", JSON.stringify({ layers: layers.length, read: ok.length, sheets: layouts.map(l => `${l.cols}x${l.rows}@${l.cell}`) }));
+    return { images, cells };
   }
 
   async thumbnails(docId: number, layers: { id: number; mask?: boolean | "vector"; bounds?: Bounds }[], canvas: { width: number; height: number }, size: number): Promise<(string | null | undefined)[]> {

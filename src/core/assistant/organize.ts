@@ -166,8 +166,15 @@ export const ORGANIZE_SYSTEM = `你是 Photoshop 图层整理助手。根据图�
 输出格式：{"renames":[{"id":数字,"name":"新名字"}],"groups":[{"name":"组名","ids":[数字,…]}]}`;
 
 /** The user message: canvas size, the layer lines, and the user's own wishes. */
-/** 参考图层画面: at most this many layer pictures go with one request */
-export const ORGANIZE_MAX_PICTURES = 24;
+/** 参考图层画面: at most this many layers get a picture (on 总览图 sheets, core/image/contactSheet.ts) */
+export const ORGANIZE_MAX_PICTURES = ORGANIZE_MAX_LAYERS;
+
+/** what went with the request: the whole picture first (when there is one), then the sheets */
+export interface OrganizePictures {
+  overview: boolean;
+  /** per numbered layer: its id and where it is (sheet 0-based, row / col 0-based) */
+  cells: { n: number; id: number; sheet: number; row: number; col: number }[];
+}
 
 /** The layers worth a picture: in scope, a picture of their own (pixel / smart object) and a name
  *  that says nothing (the model can rename only those), top to bottom, at most `max`. */
@@ -178,9 +185,20 @@ export function organizeLookIds(layers: readonly TreeLayer[], scopeIds: readonly
   return { ids: want.slice(0, max), more: Math.max(0, want.length - max) };
 }
 
-export function organizeUserPrompt(lines: string, opts: { width: number; height: number; renameOnly: boolean; extra: string; pictures?: readonly number[] }): string {
+export function organizeUserPrompt(lines: string, opts: { width: number; height: number; renameOnly: boolean; extra: string; pictures?: OrganizePictures }): string {
   const parts = [`画布 ${Math.round(opts.width)}×${Math.round(opts.height)} 像素。图层从上到下（和 Photoshop 图层面板顺序相同），每行一个：`, lines];
-  if (opts.pictures?.length) parts.push(`附图依次是这些图层自己的缩略图（只有这个图层，不含别的图层）：${opts.pictures.map((id, i) => `第 ${i + 1} 张 = id ${id}`).join("，")}。看图判断它们画的是什么来命名（例如「商品主图」「人物」「背景纹理」「装饰线」），也可以据此判断哪些图层属于同一个元素。`);
+  const pic = opts.pictures;
+  if (pic && (pic.overview || pic.cells.length)) {
+    const base = pic.overview ? 2 : 1, sheets = new Set(pic.cells.map(c => c.sheet)).size;
+    const say: string[] = [];
+    if (pic.overview) say.push("第 1 张附图是整个画面的缩略图，用来看这些图层在画面里是什么、彼此是什么关系");
+    if (pic.cells.length) {
+      say.push(`${sheets > 1 ? `第 ${base}～${base + sheets - 1} 张` : `第 ${base} 张`}附图是图层缩略图拼成的总览图：每格只有一个图层自己的内容（灰色是透明处），格子左上角黑底白字的数字是编号，对应下面的图层`);
+      say.push(pic.cells.map(c => `编号 ${c.n} = id ${c.id}（第 ${base + c.sheet} 张第 ${c.row + 1} 行第 ${c.col + 1} 格）`).join("，"));
+      say.push("看图判断这些图层画的是什么来命名（例如「商品主图」「人物」「背景纹理」「装饰线」），也可以据此判断哪些图层属于同一个元素");
+    }
+    parts.push(say.join("。") + "。");
+  }
   if (opts.renameOnly) parts.push("这次只重命名：groups 返回空数组。");
   const extra = oneLine(opts.extra);
   if (extra) parts.push(`用户的补充要求（不违反上面的规则时照做）：${extra}`);
