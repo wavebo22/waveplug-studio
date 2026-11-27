@@ -136,6 +136,8 @@ src/ui/app.ts  startOverlay()      生成页提供状态和     src/panel/genera
 - 0.37.0 更新提醒（`src/autoupdate.rs`）：启动 30 秒后检查、之后每 3 小时（开发机：源码文件夹每 10 分钟 `git fetch`）。找到新版本发 `{"type":"update-available","version","notes","dev"}`（新连上的面板也会收到）；面板的「更新」发 `{"type":"update-now"}`，进度和结果用 `{"type":"update-progress","text","done","ok"}`。发布版：下载校验安装包 → 插件代码放进 `<data>\plugin-live\`（写到 `.new` 再整体换上，build-stamp.txt 最后写）→ Illustrator 面板 → `install_app` 换 WavePlug.exe（life.rs 自动重启）。`ready` 多了 `liveRoot` / `appExe`；`plugin/loader.js` 在开发文件夹之后、插件自带版本之前读 liveRoot：版本更新且 manifest（除 version）完全相同时才用。开发机：「更新」跑 `node scripts\update.mjs`。
 - 0.38.0 设置面板：通用窗口（画布角落，原来只放生图面板）多了三个介面 `check-setup` / `organize-setup` / `rewrite-setup`（`panel/setup.rs`，同一个表单：区块 `form` = title / scope / fields[toggle·choice·text·heading] / start / note；操作 `set` / `start` / `close`；不折叠成条）。谁出现在这个窗口由插件统一决定（`src/core/overlay/corner.ts` + `src/app/cornerSlot.ts`）：没文档 → 无；打开的设置面板（优先级 20）> 生图面板（10，有选区或正在生成时才要）；换人时先显示新的再隐藏旧的；不再被需要时按 450 ms 延迟收起。
 
+- 0.38.3：设置面板（id 以 `-setup` 结尾）显示时，`win::watch_outside_clicks` 每 40 ms 看一次鼠标：显示 400 ms 后在窗口外按下左 / 右键 → 替插件发 `{"kind":"close"}`。插件在画出新选区时也会关掉设置面板（`closeSetupPanels`）。
+
 ### 3.6 快捷键 Ctrl+F = 原位粘贴（2026-11-25，0.29.0，未实测）
 
 `src/hotkey.rs`：独立线程上的 `WH_KEYBOARD_LL` 键盘钩子（钩子要求所在线程有消息循环）。插件每次连上发 `{"type":"hotkeys","on":true}`，断开时 `on_disconnect` 关掉。打开期间，Photoshop 进程的窗口在前台时按 Ctrl+F（不带 Shift / Alt / Win）：这次按键被吞掉（PS 自己的「上次滤镜」不会执行），发 `{"type":"paste-in-place"}` 给插件；按住的重复和抬起也吞掉，每按一次只发一次。其他程序、小程序自己的窗口、其他按键都不动。插件没连上时 Ctrl+F 照旧给 PS。判断是纯函数 `verdict()`，有测试。

@@ -23,6 +23,12 @@ export interface SetupPanel { open(): void; close(quiet?: boolean): void; isOpen
 /** the settings panels: one open at a time */
 const all = new Set<SetupPanel>();
 
+/** A new selection was drawn: the generate panel is what the user wants now, the settings go
+ *  (a click elsewhere closes them in the helper the same way). */
+export function closeSetupPanels() {
+  for (const p of all) p.close();
+}
+
 export function createSetupPanel(d: SetupPanelDeps): SetupPanel {
   let open = false, openFor: number | null = null;
   const ov = d.overlay;

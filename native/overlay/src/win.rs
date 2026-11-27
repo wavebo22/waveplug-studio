@@ -86,6 +86,46 @@ static IS_TOPMOST: AtomicBool = AtomicBool::new(false);
 /// Re-request the canvas once if we launched while Photoshop was minimised.
 static VIEW_REQUESTED: AtomicBool = AtomicBool::new(false);
 static CURRENT_PANEL: Mutex<Option<String>> = Mutex::new(None);
+/// when the corner window last showed a surface (a settings panel ignores the click that opened it)
+static SHOWN_AT: Mutex<Option<std::time::Instant>> = Mutex::new(None);
+static OUTSIDE_WATCH: std::sync::Once = std::sync::Once::new();
+
+/// A settings panel (检查 / AI 整理 / 改写 before they start: surface ids ending in "-setup") closes
+/// when the user clicks anywhere else: the plugin gets its "close" as if × was clicked, and the
+/// corner window goes back to nothing (or to the generate panel when there is a selection).
+/// Polled every 40 ms while one is up; the click that opened it doesn't count (OUTSIDE_GRACE).
+fn watch_outside_clicks() {
+    const OUTSIDE_GRACE: Duration = Duration::from_millis(400);
+    OUTSIDE_WATCH.call_once(|| {
+        thread::spawn(|| {
+            let mut latched = false;
+            loop {
+                thread::sleep(Duration::from_millis(40));
+                let panel = CURRENT_PANEL.lock().ok().and_then(|p| p.clone()).filter(|p| p.ends_with("-setup"));
+                let up = panel.is_some() && SHOWN.load(Ordering::SeqCst) && !PARKED.load(Ordering::SeqCst)
+                    && SHOWN_AT.lock().ok().and_then(|t| *t).is_some_and(|t| t.elapsed() > OUTSIDE_GRACE);
+                use windows_sys::Win32::UI::Input::KeyboardAndMouse::GetAsyncKeyState;
+                let down = unsafe { GetAsyncKeyState(0x01) < 0 || GetAsyncKeyState(0x02) < 0 };
+                if !down {
+                    latched = false;
+                    continue;
+                }
+                if !up || latched {
+                    continue;
+                }
+                latched = true;
+                let mut p = POINT { x: 0, y: 0 };
+                unsafe { GetCursorPos(&mut p) };
+                let inside = window_rect(own_window()).is_some_and(|r| p.x >= r.left && p.x < r.right && p.y >= r.top && p.y < r.bottom);
+                if !inside {
+                    let panel = panel.unwrap_or_default();
+                    log::line(format!("click outside {panel} at {},{}: closing it", p.x, p.y));
+                    crate::server::send(&crate::protocol::Event::Action { panel, action: serde_json::json!({ "kind": "close" }) });
+                }
+            }
+        });
+    });
+}
 static ORIGINAL_WNDPROC: AtomicIsize = AtomicIsize::new(0);
 static TYPING: AtomicBool = AtomicBool::new(false);
 static FOCUS_LOST: AtomicBool = AtomicBool::new(false);
@@ -1936,6 +1976,12 @@ pub fn show(panel: &str, view: Option<ScreenRect>, size: Vec2) {
     }
     if let Ok(mut current) = CURRENT_PANEL.lock() {
         *current = Some(panel.to_string());
+    }
+    if let Ok(mut at) = SHOWN_AT.lock() {
+        *at = Some(std::time::Instant::now());
+    }
+    if panel.ends_with("-setup") {
+        watch_outside_clicks();
     }
     let (x, y, w, h, owner_rect, bounds, snap) = unsafe {
         let pt = match view {

@@ -9,6 +9,7 @@ import { MAX_SEED, randomSeed } from "../core/workflow/inject.ts";
 import { normalizeVariationCount, stepVariationCountByWheel } from "../core/workflow/variationCount.ts";
 import { type Binding, type Profile, type TaskType, ROLE_LABEL, carryOver, inpaintLike, newProfile, validateProfile } from "../core/workflow/profile.ts";
 import { stripOptimizer, withoutOptimizer } from "../core/workflow/stripOptimizer.ts";
+import { closeSetupPanels } from "./setupPanel.ts";
 import { PROMPT_SYSTEM, isPromptMode, optimizeBlocked, parsePromptAnswer, promptRequest } from "../core/assistant/promptOptimize.ts";
 import { DEEPSEEK_VISION_MODEL, deepseekJson } from "../core/assistant/deepseek.ts";
 import { isBlendGraph, recognize } from "../core/workflow/recognize.ts";
@@ -143,6 +144,8 @@ export function mountApp(root: HTMLElement, svc: Services) {
   let doc: DocInfo | null = null, sel: Rect | null = null, group: FillGroup | null = null;
   // Variations follow the selected Photoshop AI layer.
   let lastGroupKey = "";
+  /** the last selection seen (doc:rect), for telling a newly drawn one from a blink */
+  let lastSelKey = "";
   /** 外置生成面板 (native/overlay): only in Photoshop; null while not set up */
   let overlay: Overlay | null = null, genSurface: ReturnType<typeof attachGenerateSurface> | null = null;
   let variantSurface: ReturnType<typeof attachVariantsSurface> | null = null;
@@ -769,6 +772,10 @@ export function mountApp(root: HTMLElement, svc: Services) {
       doc = svc.host.activeDoc();
       if (previousDocId !== doc?.id) lastCutout = null;
       sel = doc ? await svc.host.selectionBounds(doc.id) : null;
+      // a new selection drawn: the generate panel takes the corner (an open settings panel goes);
+      // the same selection back after Photoshop's brief "no selection" isn't a new one
+      const selKey = sel ? `${doc?.id}:${sel.left},${sel.top},${sel.right},${sel.bottom}` : "";
+      if (selKey && selKey !== lastSelKey) { lastSelKey = selKey; closeSetupPanels(); }
       const active = doc ? await svc.host.activeFillGroup() : null;
       group = active;
       variations = group ? await svc.host.variations(group) : [];
