@@ -79,7 +79,14 @@ fn should_expand_generate_panel(
 
 /// Every surface the helper can show. A new one is added here (and on the plugin's side).
 fn surfaces() -> Vec<Box<dyn Surface>> {
-    vec![Box::new(GenerateSurface::new())]
+    use crate::panel::setup::{self, SetupSurface};
+    vec![
+        Box::new(GenerateSurface::new()),
+        // the features' settings panels share the corner window with it (one up at a time: the plugin decides)
+        Box::new(SetupSurface::new(setup::CHECK_ID)),
+        Box::new(SetupSurface::new(setup::ORGANIZE_ID)),
+        Box::new(SetupSurface::new(setup::REWRITE_ID)),
+    ]
 }
 
 static INBOX: Mutex<VecDeque<Command>> = Mutex::new(VecDeque::new());

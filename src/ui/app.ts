@@ -147,7 +147,8 @@ export function mountApp(root: HTMLElement, svc: Services) {
   let overlay: Overlay | null = null, genSurface: ReturnType<typeof attachGenerateSurface> | null = null;
   let variantSurface: ReturnType<typeof attachVariantsSurface> | null = null;
   /** the page's state may have changed: the external panel gets what differs (cheap when nothing did) */
-  const outSync = () => overlay?.queueSync();
+  // also lets the corner window look again: a run starting / ending changes whether the generate panel is wanted
+  const outSync = () => { if (genSurface) genSurface.refresh(); else overlay?.queueSync(); };
   const near = (a: Rect, b: Rect) => a.left === b.left && a.top === b.top && a.right === b.right && a.bottom === b.bottom;
   const willAdd = () => {
     if (!group || group.kind !== mode || mode === "upscale") return false;

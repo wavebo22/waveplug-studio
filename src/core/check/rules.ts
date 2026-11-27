@@ -309,6 +309,13 @@ export function runChecks(doc: CheckDoc): Issue[] {
   return out.sort((a, b) => order[a.severity] - order[b.severity] || (b.bytes ?? 0) - (a.bytes ?? 0));
 }
 
+/** 检查 settings: the categories ticked, and the layers it covers (null: the whole document).
+ *  With layers, only issues about those layers stay (document-wide ones — resolution, 16 位,
+ *  how many fonts — are about the whole file and go). */
+export function filterIssues(issues: readonly Issue[], categories: ReadonlySet<Category>, scope: ReadonlySet<number> | null): Issue[] {
+  return issues.filter(i => categories.has(i.category) && (!scope || i.ids.some(id => scope.has(id))));
+}
+
 function overlaps(a: Rect, b: Rect) { return a.left < b.right && b.left < a.right && a.top < b.bottom && b.top < a.bottom; }
 
 /** Same-size siblings in a row or a column whose gaps differ by a few px. */

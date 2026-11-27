@@ -8,6 +8,7 @@
 pub mod check;
 pub mod generate;
 pub mod organize;
+pub mod setup;
 pub mod shelf;
 pub mod theme;
 pub mod variants;

@@ -134,6 +134,7 @@ src/ui/app.ts  startOverlay()      生成页提供状态和     src/panel/genera
 - 0.35.0：外置生成面板区块 `ai`（`{busy, blocked, undo}`，null = 这个模式没有提示词可优化），收藏栏里显示「✦ AI 优化」/「↶ 还原」，回传 `optimize-prompt` / `restore-prompt`；功能设置 › AI 助手 多了 `deepseekPromptImage`（默认开）。
 - 0.36.0：检查结果窗口里双击一行 = 处理（有 `choices` 时回传 `choice: 0`）。
 - 0.37.0 更新提醒（`src/autoupdate.rs`）：启动 30 秒后检查、之后每 3 小时（开发机：源码文件夹每 10 分钟 `git fetch`）。找到新版本发 `{"type":"update-available","version","notes","dev"}`（新连上的面板也会收到）；面板的「更新」发 `{"type":"update-now"}`，进度和结果用 `{"type":"update-progress","text","done","ok"}`。发布版：下载校验安装包 → 插件代码放进 `<data>\plugin-live\`（写到 `.new` 再整体换上，build-stamp.txt 最后写）→ Illustrator 面板 → `install_app` 换 WavePlug.exe（life.rs 自动重启）。`ready` 多了 `liveRoot` / `appExe`；`plugin/loader.js` 在开发文件夹之后、插件自带版本之前读 liveRoot：版本更新且 manifest（除 version）完全相同时才用。开发机：「更新」跑 `node scripts\update.mjs`。
+- 0.38.0 设置面板：通用窗口（画布角落，原来只放生图面板）多了三个介面 `check-setup` / `organize-setup` / `rewrite-setup`（`panel/setup.rs`，同一个表单：区块 `form` = title / scope / fields[toggle·choice·text·heading] / start / note；操作 `set` / `start` / `close`；不折叠成条）。谁出现在这个窗口由插件统一决定（`src/core/overlay/corner.ts` + `src/app/cornerSlot.ts`）：没文档 → 无；打开的设置面板（优先级 20）> 生图面板（10，有选区或正在生成时才要）；换人时先显示新的再隐藏旧的；不再被需要时按 450 ms 延迟收起。
 
 ### 3.6 快捷键 Ctrl+F = 原位粘贴（2026-11-25，0.29.0，未实测）
 

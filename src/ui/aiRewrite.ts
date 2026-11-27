@@ -10,8 +10,11 @@ import type { TreeLayer } from "../core/layers/tree.ts";
 import { deepseekJson } from "../core/assistant/deepseek.ts";
 import { REWRITE_MAX_LAYERS, REWRITE_PRESETS, REWRITE_SYSTEM, type RewriteItem, parseRewrite, rewriteScope, rewriteUserPrompt } from "../core/assistant/rewrite.ts";
 import { type OrganizeAction, type OrganizeSections, REWRITE_PANEL, parseOrganizeAction, rewritePlanSection } from "../core/overlay/organizePanel.ts";
-import { REWRITE_HELPER_VERSION } from "../core/overlay/protocol.ts";
+import { SETUP_HELPER_VERSION } from "../core/overlay/protocol.ts";
 import { log, withTimeout } from "../app/log.ts";
+import { REWRITE_SETUP, type SetupSections } from "../core/overlay/setupPanel.ts";
+import type { CanvasView } from "../core/overlay/protocol.ts";
+import { createSetupPanel } from "./setupPanel.ts";
 import { h } from "./dom.ts";
 
 type Status = (text: string, kind?: "info" | "ok" | "error" | "busy") => void;
@@ -27,6 +30,8 @@ export interface AiRewriteDeps {
   mark(ids: number[], sev: "warn" | null): void;
   /** the window is about to show AI 改写: whatever else it showed closes */
   opening(): void;
+  /** the canvas view, to put the settings panel in the corner */
+  view?(docId: number): Promise<CanvasView | null>;
 }
 
 const ASK_KEY = "wp.ai.rewrite.ask";
@@ -59,21 +64,58 @@ export function createAiRewrite(d: AiRewriteDeps) {
   button.addEventListener("click", () => {
     const ov = d.overlay;
     if (!ov?.connected) { d.status("AI 改写的对照表显示在 WavePlug 程序里，它现在没有运行：点 Studio 面板右上角的连接状态启动它", "error"); return; }
-    if (!ov.rewriteReady) { d.status(`AI 改写窗口需要 WavePlug 程序 ${REWRITE_HELPER_VERSION}（现在是 ${ov.helperVersion ?? "旧版"}）：双击 update.cmd 更新`, "error"); return; }
+    if (!ov.setupReady) { d.status(`AI 改写需要 WavePlug 程序 ${SETUP_HELPER_VERSION}（现在是 ${ov.helperVersion ?? "旧版"}）：在面板顶部的更新提醒里点「更新」`, "error"); return; }
     const s = d.state();
     if (s.docId === null) { d.status("没有打开的文档", "error"); return; }
     const sc = rewriteScope(s.layers, s.selected);
     if (!sc.ids.length) { d.status("文档里没有文字图层", "error"); return; }
     if (sc.ids.length > REWRITE_MAX_LAYERS) { d.status(`${sc.label}，一次最多改写 ${REWRITE_MAX_LAYERS} 个：先选中一部分或一个组`, "error"); return; }
     if (!d.settings().key.trim()) { d.status("还没有填写 DeepSeek API Key：在 WavePlug 程序 › 功能设置 › AI 助手 里填写", "error"); return; }
-    d.opening();
+    // the click is in this panel: the helper takes the window under the cursor as the panel
     ov.anchorPanel();
+    settingsPanel.open();
+  });
+
+  /** 开始 in the settings: the text layers in scope now, then DeepSeek */
+  function begin() {
+    const ov = d.overlay, s = d.state();
+    if (!ov || s.docId === null || !ask.trim()) return;
+    const sc = rewriteScope(s.layers, s.selected);
+    if (!sc.ids.length || sc.ids.length > REWRITE_MAX_LAYERS) return;
+    d.opening();
     open = true; docId = s.docId; scope = sc; items = []; mixed = new Set(); off.clear(); error = ""; busy = ""; cutNote = "";
     ov.hub.show(REWRITE_PANEL, null);
-    sync();
+    void generate();
+  }
+
+  const CUSTOM = "自定义";
+  const settingsPanel = createSetupPanel({
+    overlay: d.overlay, id: REWRITE_SETUP, docId: () => d.state().docId,
+    view: id => d.view?.(id) ?? Promise.resolve(null),
+    form: (): SetupSections["form"] => {
+      const s = d.state(), sc = rewriteScope(s.layers, s.selected);
+      const preset = REWRITE_PRESETS.includes(ask) ? ask : CUSTOM;
+      const tooMany = sc.ids.length > REWRITE_MAX_LAYERS;
+      return {
+        title: "AI 翻译 / 改写文字",
+        scope: `${sc.label}（选中文字图层或组：改写它们；否则改写全部文字图层）`,
+        fields: [
+          { key: "preset", kind: "choice", label: "怎么改", value: preset, options: [...REWRITE_PRESETS, CUSTOM].map(v => ({ value: v, label: v })) },
+          { key: "ask", kind: "text", label: "改写要求", hint: "例如：每条不超过 10 个字，语气活泼", value: ask },
+        ],
+        start: sc.ids.length && !tooMany && ask.trim() ? "开始改写" : "",
+        note: !sc.ids.length ? "文档里没有文字图层" : tooMany ? `一次最多改写 ${REWRITE_MAX_LAYERS} 个：先选中一部分或一个组` : !ask.trim() ? "选一种改法，或写下改写要求" : "保留原有字体、字号和颜色；混排样式的图层只给建议",
+      };
+    },
+    set(k, v) {
+      if (k === "preset" && typeof v === "string") { if (v !== CUSTOM) ask = v; else if (REWRITE_PRESETS.includes(ask)) ask = ""; keep(ask); }
+      else if (k === "ask" && typeof v === "string") { ask = v; keep(ask); }
+    },
+    start: begin,
   });
 
   function close() {
+    settingsPanel.close();
     if (!open) return;
     open = false; ++run;
     d.mark([], null);
@@ -149,5 +191,5 @@ export function createAiRewrite(d: AiRewriteDeps) {
     }
   }
 
-  return { button, isOpen: () => open, close };
+  return { button, isOpen: () => open || settingsPanel.isOpen(), close, syncSetup: () => settingsPanel.sync() };
 }

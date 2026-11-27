@@ -1,7 +1,8 @@
 // The generate page as an external surface (外置生成面板, native/overlay): registers it with the
-// overlay hub, puts it up at the corner of Photoshop's canvas while the document has a selection
-// (in any mode — only the selection decides) and hands the user's actions to the page's own
-// handlers. The page (app.ts) stays the one place with the logic; this file only reads its state
+// overlay hub, claims the canvas-corner window (app/cornerSlot.ts) while the document has a
+// selection or a generation is running — in any mode, only those decide; a settings panel the
+// user opened (检查 / AI 整理 / 改写) takes the window first — and hands the user's actions to the
+// page's own handlers. The page (app.ts) stays the one place with the logic; this file only reads its state
 // and calls into it through `GeneratePage`.
 
 import { log } from "../app/log.ts";
@@ -9,10 +10,10 @@ import type { Overlay } from "../app/overlay.ts";
 import type { Rect } from "../core/image/region.ts";
 import { GENERATE_PANEL, type GenerateAction, type GenerateSections, type PanelMode, modeBeforeAction, parseGenerateAction } from "../core/overlay/generatePanel.ts";
 import type { CanvasView } from "../core/overlay/protocol.ts";
-import { NOT_SHOWN, type Shown, decide } from "../core/overlay/visibility.ts";
+import type { Wish } from "../core/overlay/visibility.ts";
 
-/** How long the panel stays after it stops being wanted (core/overlay/visibility.ts). */
-const HIDE_DELAY_MS = 450;
+/** its claim on the corner window: below a settings panel the user opened (app/cornerSlot.ts) */
+export const GENERATE_PRIORITY = 10;
 
 /** What the external panel needs from the generate page. */
 export interface GeneratePage {
@@ -47,28 +48,14 @@ export interface GeneratePage {
 }
 
 export function attachGenerateSurface(overlay: Overlay, page: GeneratePage) {
-  const { hub } = overlay;
-  /** what is up (core/overlay/visibility.ts decides); `asking`: the latest request for the canvas */
-  let vis: Shown = NOT_SHOWN, asking = 0;
-  let again: ReturnType<typeof setTimeout> | null = null;
-  /** The panel stays for as long as a document is open (user, 11-12): without a selection it is
-   *  simply collapsed to its bar — the helper folds it whenever the pointer isn't on it and
-   *  nothing runs (host.rs) — instead of leaving and coming back. Only "no document" takes it away. */
-  const wish = () => { const { docId } = page.where(); return { docId, wanted: docId !== null }; };
-  /** the canvas the panel was last put up against (kept after it goes away, for the notice) */
-  let lastView: import("../core/overlay/protocol.ts").ScreenRect | null = null;
-
-  async function putUp(docId: number) {
-    const ask = ++asking, t0 = Date.now();
-    const view = await page.canvasView(docId).catch(() => null);
-    if (ask !== asking) return; // a newer selection change already
-    const now = wish();
-    if (now.docId !== docId || !now.wanted) return;
-    lastView = view?.view ?? lastView;
-    // how long reading the canvas from Photoshop took (to tell this apart from other stalls)
-    log("info", "overlay panel show", JSON.stringify(view?.view ?? null), `${Date.now() - t0} ms`);
-    hub.show(GENERATE_PANEL, view?.view ?? null);
-  }
+  const { hub, corner } = overlay;
+  /** Wanted while the document has a selection, or while something runs (its progress stays in
+   *  view even when the selection is dropped meanwhile). No document: never. */
+  const wish = (): Wish => {
+    const { docId, sel } = page.where();
+    return { docId, wanted: docId !== null && (sel !== null || !!page.sections().run) };
+  };
+  corner.claim(GENERATE_PANEL, GENERATE_PRIORITY, wish, docId => page.canvasView(docId));
 
   /** a run was going in the last state sent: when it ends well, say so in the corner */
   let wasRunning = false;
@@ -76,7 +63,7 @@ export function attachGenerateSurface(overlay: Overlay, page: GeneratePage) {
     const s = page.sections();
     if (wasRunning && !s.run && s.status.tone !== "error" && s.status.text !== "已取消") {
       // even when the panel is away (the selection was dropped while it ran)
-      hub.toast("图片生成完毕", s.status.text, hub.viewOf(GENERATE_PANEL) ?? lastView);
+      hub.toast("图片生成完毕", s.status.text, hub.viewOf(GENERATE_PANEL) ?? corner.lastView());
     }
     wasRunning = !!s.run;
     return s;
@@ -122,28 +109,13 @@ export function attachGenerateSurface(overlay: Overlay, page: GeneratePage) {
         case "remove-ref": return page.removeRef(a.slot);
       }
     },
-    onViewRequest() {
-      const { docId } = page.where();
-      if (docId !== null) void putUp(docId);
-    },
+    onViewRequest() { corner.viewRequested(GENERATE_PANEL); },
   });
 
   const surface = {
-    /** The page's state or Photoshop's may have changed: show / hide, and send what changed. */
+    /** The page's state or Photoshop's may have changed: the corner looks again, what changed is sent. */
     refresh() {
-      if (again) { clearTimeout(again); again = null; }
-      const w = wish(), v = decide(vis, w, Date.now(), HIDE_DELAY_MS);
-      vis = v.state;
-      if (v.do === "hide") {
-        asking++;
-        if (hub.isShown(GENERATE_PANEL)) log("info", "overlay panel hide", v.why);
-        hub.hide(GENERATE_PANEL);
-      } else if (v.do === "show" || (w.wanted && !hub.isShown(GENERATE_PANEL))) {
-        void putUp(w.docId!);
-      } else if (v.againInMs !== undefined) {
-        // a hide is waiting: look again when it is due (Photoshop may send nothing meanwhile)
-        again = setTimeout(() => { again = null; surface.refresh(); }, v.againInMs + 10);
-      }
+      corner.refresh();
       overlay.queueSync();
     },
   };

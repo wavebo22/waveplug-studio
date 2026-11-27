@@ -11,6 +11,10 @@ import { deepseekJson } from "../core/assistant/deepseek.ts";
 import { type OrganizePlan, type OrganizeScope, ORGANIZE_MAX_LAYERS, ORGANIZE_SYSTEM, chosenPlan, describeLayers, organizeScope, organizeUserPrompt, parseOrganizePlan, textRenames } from "../core/assistant/organize.ts";
 import { ORGANIZE_PANEL, type OrganizeAction, type OrganizeSections, organizeItemIds, organizePlanSection, parseOrganizeAction } from "../core/overlay/organizePanel.ts";
 import { log, withTimeout } from "../app/log.ts";
+import { ORGANIZE_SETUP, type SetupSections } from "../core/overlay/setupPanel.ts";
+import type { CanvasView } from "../core/overlay/protocol.ts";
+import { createSetupPanel } from "./setupPanel.ts";
+import { SETUP_HELPER_VERSION } from "../core/overlay/protocol.ts";
 import { h } from "./dom.ts";
 
 type Status = (text: string, kind?: "info" | "ok" | "error" | "busy") => void;
@@ -29,9 +33,11 @@ export interface AiOrganizeDeps {
   mark(ids: number[], sev: "warn" | null): void;
   /** the window is about to show AI 整理: whatever else it showed (检查结果) closes */
   opening(): void;
+  /** the canvas view, to put the settings panel in the corner */
+  view?(docId: number): Promise<CanvasView | null>;
 }
 
-const EXTRA_KEY = "wp.ai.organize.extra", RENAME_ONLY_KEY = "wp.ai.organize.renameOnly";
+const EXTRA_KEY = "wp.ai.organize.extra", RENAME_ONLY_KEY = "wp.ai.organize.renameOnly", TEXT_NAMES_KEY = "wp.ai.organize.textNames";
 /** DeepSeek can take a while for a long list; give up after this long */
 const TIMEOUT_MS = 180_000;
 const read = (k: string) => { try { return localStorage.getItem(k) ?? ""; } catch { return ""; } };
@@ -44,7 +50,7 @@ export function createAiOrganize(d: AiOrganizeDeps) {
   let plan: OrganizePlan | null = null, busy = "", error = "", run = 0;
   /** the text layers' words as read for the plan (their names come from them) */
   let texts = new Map<number, string>();
-  let extra = read(EXTRA_KEY), renameOnly = read(RENAME_ONLY_KEY) === "on";
+  let extra = read(EXTRA_KEY), renameOnly = read(RENAME_ONLY_KEY) === "on", textNames = read(TEXT_NAMES_KEY) !== "off";
   const offRenames = new Set<number>(), offGroups = new Set<number>();
 
   const nameOf = (id: number) => plan?.renames.find(r => r.id === id)?.to ?? d.state().layers.find(l => l.id === id)?.name ?? `#${id}`;
@@ -65,7 +71,7 @@ export function createAiOrganize(d: AiOrganizeDeps) {
   button.addEventListener("click", () => {
     const ov = d.overlay;
     if (!ov?.connected) { d.status("AI 整理的方案显示在 WavePlug 程序里，它现在没有运行：点 Studio 面板右上角的连接状态启动它", "error"); return; }
-    if (!ov.assistReady) { d.status(`AI 整理窗口需要 WavePlug 程序 0.33.0（现在是 ${ov.helperVersion ?? "旧版"}）：双击 update.cmd 更新`, "error"); return; }
+    if (!ov.setupReady) { d.status(`AI 整理需要 WavePlug 程序 ${SETUP_HELPER_VERSION}（现在是 ${ov.helperVersion ?? "旧版"}）：在面板顶部的更新提醒里点「更新」`, "error"); return; }
     const s = d.state();
     if (s.docId === null) { d.status("没有打开的文档", "error"); return; }
     const sc = organizeScope(s.layers, s.selected);
@@ -75,15 +81,52 @@ export function createAiOrganize(d: AiOrganizeDeps) {
       return;
     }
     if (!d.settings().key.trim()) { d.status("还没有填写 DeepSeek API Key：在 WavePlug 程序 › 功能设置 › AI 助手 里填写", "error"); return; }
-    d.opening();
     // the click is in this panel: the helper takes the window under the cursor as the panel
+    // (the plan goes beside it once 开始 is clicked in the settings)
     ov.anchorPanel();
+    settingsPanel.open();
+  });
+
+  /** 开始 in the settings: the layers in scope now, then DeepSeek */
+  function begin() {
+    const ov = d.overlay, s = d.state();
+    if (!ov || s.docId === null) return;
+    const sc = organizeScope(s.layers, s.selected);
+    if (!sc.ids.length || sc.ids.length > ORGANIZE_MAX_LAYERS) return;
+    d.opening();
     open = true; docId = s.docId; scope = sc;
     ov.hub.show(ORGANIZE_PANEL, null);
     void analyse();
+  }
+
+  const settingsPanel = createSetupPanel({
+    overlay: d.overlay, id: ORGANIZE_SETUP, docId: () => d.state().docId,
+    view: id => d.view?.(id) ?? Promise.resolve(null),
+    form: (): SetupSections["form"] => {
+      const s = d.state(), sc = organizeScope(s.layers, s.selected);
+      const tooMany = sc.ids.length > ORGANIZE_MAX_LAYERS;
+      return {
+        title: "AI 整理图层",
+        scope: `${sc.label} · ${sc.ids.length} 个图层（选中组：整理组内；选中多个图层：整理它们）`,
+        fields: [
+          { key: "textNames", kind: "toggle", label: "文字图层用文字内容命名", value: textNames, tip: "不交给 AI：文字图层的名字直接换成它的文字（第一行）" },
+          { key: "renameOnly", kind: "toggle", label: "只改名字，不新建组", value: renameOnly },
+          { key: "extra", kind: "text", label: "补充要求（可选）", hint: "例如：按钮统一叫「按钮-…」", value: extra },
+        ],
+        start: sc.ids.length && !tooMany ? "开始分析" : "",
+        note: !sc.ids.length ? "没有可以整理的图层（背景和 AI 结果组内部不整理）" : tooMany ? `一次最多整理 ${ORGANIZE_MAX_LAYERS} 个图层：先选中一个组或一部分图层` : "只改看不出内容的名字；归组只收相邻的同级图层，不改变画面",
+      };
+    },
+    set(k, v) {
+      if (k === "textNames" && typeof v === "boolean") { textNames = v; keep(TEXT_NAMES_KEY, v ? "on" : "off"); }
+      else if (k === "renameOnly" && typeof v === "boolean") { renameOnly = v; keep(RENAME_ONLY_KEY, v ? "on" : "off"); }
+      else if (k === "extra" && typeof v === "string") { extra = v; keep(EXTRA_KEY, v); }
+    },
+    start: begin,
   });
 
   function close() {
+    settingsPanel.close();
     if (!open) return;
     open = false; ++run;
     d.mark([], null);
@@ -108,7 +151,7 @@ export function createAiOrganize(d: AiOrganizeDeps) {
       const fresh = d.state().layers;
       const p = parseOrganizePlan(r.value, fresh, sc.ids, { texts });
       // text layers: named by their words, not by DeepSeek
-      const fromText = textRenames(fresh, sc.ids, texts).filter(t => !p.renames.some(x => x.id === t.id));
+      const fromText = textNames ? textRenames(fresh, sc.ids, texts).filter(t => !p.renames.some(x => x.id === t.id)) : [];
       p.renames = [...fromText, ...p.renames];
       if (renameOnly) p.groups = [];
       plan = p;
@@ -167,5 +210,5 @@ export function createAiOrganize(d: AiOrganizeDeps) {
     }
   }
 
-  return { button, isOpen: () => open, close };
+  return { button, isOpen: () => open || settingsPanel.isOpen(), close, syncSetup: () => settingsPanel.sync() };
 }

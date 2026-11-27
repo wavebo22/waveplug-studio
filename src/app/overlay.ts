@@ -8,8 +8,9 @@
 
 import { onDispose } from "../ui/dom.ts";
 import { log, setLogContext } from "./log.ts";
-import { ASSIST_HELPER_VERSION, CHECK_HELPER_VERSION, REWRITE_HELPER_VERSION, EXPECTED_HELPER_VERSION, OVERLAY_URL, type ComfyManagerStatus, type ExternalDragEvent, type ExternalDragFile, HANG_SECONDS, type HangDoc, type MenuNode, type OverlayCommand, MENU_HELPER_VERSION, OPEN_APP_HELPER_VERSION, type ScreenRect, TRASH_HELPER_VERSION, WEBDROP_HELPER_VERSION, KEYS_HELPER_VERSION, STATUSBAR_HELPER_VERSION, TINT_HELPER_VERSION, type StatusBarHint, type StatusBarMode, type StatusBarPart, type UpdateEvent, type WebDropEvent, helperOutdated, parseOverlayEvent } from "../core/overlay/protocol.ts";
+import { ASSIST_HELPER_VERSION, CHECK_HELPER_VERSION, REWRITE_HELPER_VERSION, SETUP_HELPER_VERSION, EXPECTED_HELPER_VERSION, OVERLAY_URL, type ComfyManagerStatus, type ExternalDragEvent, type ExternalDragFile, HANG_SECONDS, type HangDoc, type MenuNode, type OverlayCommand, MENU_HELPER_VERSION, OPEN_APP_HELPER_VERSION, type ScreenRect, TRASH_HELPER_VERSION, WEBDROP_HELPER_VERSION, KEYS_HELPER_VERSION, STATUSBAR_HELPER_VERSION, TINT_HELPER_VERSION, type StatusBarHint, type StatusBarMode, type StatusBarPart, type UpdateEvent, type WebDropEvent, helperOutdated, parseOverlayEvent } from "../core/overlay/protocol.ts";
 import { type Hub, createHub } from "../core/overlay/hub.ts";
+import { type CornerSlot, createCornerSlot } from "./cornerSlot.ts";
 
 const RETRY_MS = 3000;
 /** state changes are gathered this long, then sent as one message */
@@ -17,6 +18,8 @@ const SYNC_MS = 40;
 
 export interface Overlay {
   hub: Hub;
+  /** the canvas-corner window: who is up there (app/cornerSlot.ts) */
+  corner: CornerSlot;
   /** state may have changed: sends the changed sections shortly (many calls → one message) */
   queueSync(): void;
   /** Tell the native helper that a WaveLayer row is being dragged toward a reference slot. */
@@ -48,6 +51,8 @@ export interface Overlay {
   readonly assistReady: boolean;
   /** the helper can show the AI 改写 window */
   readonly rewriteReady: boolean;
+  /** the helper can show the settings panels (检查 / AI 整理 / 改写) */
+  readonly setupReady: boolean;
   /** the hovered item's rows in the 图层 panel (page CSS px); null: none */
   issueRows(rows: { left: number; right: number; rows: { top: number; bottom: number }[]; color: string } | null): void;
   /** the helper can tint (connected, ≥ TINT_HELPER_VERSION) */
@@ -160,6 +165,7 @@ export function connectOverlay(opts: { launch?: () => Promise<string | null>; au
     catch { return false; }
   };
   const hub = createHub(send);
+  const corner = createCornerSlot(hub);
   const waitConnected = async (ms: number) => {
     const t0 = Date.now();
     while (!connected && !closed && Date.now() - t0 < ms) await new Promise(r => setTimeout(r, 250));
@@ -314,6 +320,7 @@ export function connectOverlay(opts: { launch?: () => Promise<string | null>; au
   });
   return {
     hub,
+    corner,
     beginLayerDrag(docId, layers, totalCount, thumb) {
       if (!connected) return false;
       return sendChecked({ type: "layer-drag-start", docId, layers, totalCount, thumb });
@@ -404,6 +411,7 @@ export function connectOverlay(opts: { launch?: () => Promise<string | null>; au
       return true;
     },
     anchorPanel() { send({ type: "panel-anchor" }); },
+    get setupReady() { return connected && helperVersion !== null && !helperOutdated(helperVersion, SETUP_HELPER_VERSION); },
     get rewriteReady() { return connected && helperVersion !== null && !helperOutdated(helperVersion, REWRITE_HELPER_VERSION); },
     get assistReady() { return connected && helperVersion !== null && !helperOutdated(helperVersion, ASSIST_HELPER_VERSION); },
     issueRows(r) {

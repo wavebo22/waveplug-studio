@@ -10,7 +10,11 @@
 import type { Overlay } from "../app/overlay.ts";
 import type { DocChecker, LayerTools, LayerTree } from "../ps/host.ts";
 import { DEEPSEEK_VISION_MODEL, deepseekJson } from "../core/assistant/deepseek.ts";
-import { type CheckDoc, type Issue, runChecks } from "../core/check/rules.ts";
+import { CATEGORY_NAMES, type Category, type CheckDoc, type Issue, filterIssues, runChecks } from "../core/check/rules.ts";
+import { CHECK_SETUP, type SetupSections } from "../core/overlay/setupPanel.ts";
+import type { CanvasView } from "../core/overlay/protocol.ts";
+import { createSetupPanel } from "./setupPanel.ts";
+import { SETUP_HELPER_VERSION } from "../core/overlay/protocol.ts";
 import { COPY_SYSTEM, VISUAL_SYSTEM, copyPrompt, parseCopyIssues, parseVisualIssues } from "../core/check/ai.ts";
 import { CHECK_PANEL, type CheckAction, type CheckSections, checkIssues, checkSummary, parseCheckAction } from "../core/overlay/checkPanel.ts";
 import { log, withTimeout } from "../app/log.ts";
@@ -36,6 +40,22 @@ export interface DocCheckDeps {
   mark(ids: number[], sev: Issue["severity"] | null): void;
   /** the window is about to show 检查结果: whatever else it showed (AI 整理) closes */
   opening?(): void;
+  /** the selected layers with what is inside selected groups ([]: nothing selected) */
+  selection?(): number[];
+  /** the canvas view, to put the settings panel in the corner */
+  view?(docId: number): Promise<CanvasView | null>;
+}
+
+/** the local categories the settings offer, in their order (copy / visual are the AI options) */
+const LOCAL_CATS: Category[] = ["font", "smart", "delivery", "text", "design", "hygiene"];
+const SETUP_KEY = "wp.check.setup";
+interface CheckSetup { cats: Category[]; scope: "doc" | "selection" }
+function loadSetup(): CheckSetup {
+  try {
+    const v = JSON.parse(localStorage.getItem(SETUP_KEY) ?? "null");
+    if (v && Array.isArray(v.cats)) return { cats: v.cats.filter((c: string) => (LOCAL_CATS as string[]).includes(c)), scope: v.scope === "selection" ? "selection" : "doc" };
+  } catch { /* first time */ }
+  return { cats: [...LOCAL_CATS], scope: "doc" };
 }
 
 const COPY_KEY = "wp.check.copy", VISUAL_KEY = "wp.check.visual";
@@ -55,6 +75,10 @@ export function createDocCheck(d: DocCheckDeps) {
   const working = new Set<string>();
   let busy = "", error = "", run = 0, aiRun = 0, recheckTimer: ReturnType<typeof setTimeout> | null = null, reading = false, again = false;
   const opts = { copy: flag(COPY_KEY, true), visual: flag(VISUAL_KEY, false) };
+  const setup = loadSetup();
+  /** what this check covers: set when it starts (开始), kept for the re-checks */
+  let cats = new Set<Category>([...setup.cats, "copy", "visual"]), scope: Set<number> | null = null, scopeLabel = "整个文档";
+  const saveSetup = () => { try { localStorage.setItem(SETUP_KEY, JSON.stringify(setup)); } catch { /* not kept */ } };
   const hasKey = () => !!d.settings().key.trim();
 
   /** a copy suggestion is done when the text no longer has the original and has the suggestion */
@@ -82,7 +106,7 @@ export function createDocCheck(d: DocCheckDeps) {
   const sections = (): CheckSections => {
     const { issues, states } = listed();
     return {
-      head: { summary: doc ? checkSummary(issues, states) : "", busy, error },
+      head: { summary: doc ? `${scopeLabel} · ${checkSummary(issues, states)}` : "", busy, error },
       opts: { copy: opts.copy && hasKey(), visual: opts.visual && hasKey(), ai: hasKey() },
       issues: checkIssues(issues, states),
     };
@@ -99,18 +123,63 @@ export function createDocCheck(d: DocCheckDeps) {
   button.addEventListener("click", () => {
     const ov = d.overlay;
     if (!ov?.connected) { d.status("检查结果显示在 WavePlug 程序里，它现在没有运行：点 Studio 面板右上角的连接状态启动它", "error"); return; }
-    if (!ov.checkReady) { d.status(`检查结果窗口需要 WavePlug 程序 0.31.0（现在是 ${ov.helperVersion ?? "旧版"}）：双击 update.cmd 更新`, "error"); return; }
+    if (!ov.setupReady) { d.status(`检查需要 WavePlug 程序 ${SETUP_HELPER_VERSION}（现在是 ${ov.helperVersion ?? "旧版"}）：在面板顶部的更新提醒里点「更新」`, "error"); return; }
     const id = d.docId();
     if (id === null) { d.status("没有打开的文档", "error"); return; }
-    d.opening?.();
     // the click is in this panel: the helper takes the window under the cursor as the panel
+    // (the results go beside it once 开始 is clicked in the settings)
     ov.anchorPanel();
+    settingsPanel.open();
+  });
+
+  /** 开始 in the settings: what is ticked and the layers it covers, then the check */
+  function begin() {
+    const id = d.docId(), ov = d.overlay;
+    if (id === null || !ov) return;
+    const sel = setup.scope === "selection" ? d.selection?.() ?? [] : [];
+    scope = sel.length ? new Set(sel) : null;
+    scopeLabel = scope ? `选中的 ${scope.size} 个图层` : "整个文档";
+    cats = new Set<Category>([...setup.cats, "copy", "visual"]);
+    d.opening?.();
     open = true;
     ov.hub.show(CHECK_PANEL, null);
     void start(id, true);
+  }
+
+  const settingsPanel = createSetupPanel({
+    overlay: d.overlay, id: CHECK_SETUP, docId: d.docId,
+    view: docId => d.view?.(docId) ?? Promise.resolve(null),
+    form: (): SetupSections["form"] => {
+      const key = hasKey(), selected = d.selection?.().length ?? 0;
+      const noCats = !setup.cats.length && !(key && (opts.copy || opts.visual));
+      return {
+        title: "文档检查",
+        scope: setup.scope === "selection" ? (selected ? `选中的 ${selected} 个图层（含组内）` : "没有选中图层：将检查整个文档") : "整个文档",
+        fields: [
+          { key: "scope", kind: "choice", label: "范围", value: setup.scope, options: [{ value: "doc", label: "整个文档" }, { value: "selection", label: "只查选中的图层" }] },
+          { key: "h-local", kind: "heading", label: "检查哪些内容" },
+          ...LOCAL_CATS.map(c => ({ key: "cat:" + c, kind: "toggle" as const, label: c === "delivery" ? "交付设置（CMYK 文件才按印刷查）" : CATEGORY_NAMES[c], value: setup.cats.includes(c) })),
+          { key: "h-ai", kind: "heading", label: "AI 检查（DeepSeek）" },
+          { key: "copy", kind: "toggle", label: "文案：错别字、标点、广告法用语、前后不一致", value: opts.copy && key, disabled: !key, tip: key ? "只发送文字内容" : "先在 WavePlug 程序 › 功能设置 › AI 助手 里填写 DeepSeek API Key" },
+          { key: "visual", kind: "toggle", label: "看画面：AI 生成瑕疵、排版问题", value: opts.visual && key, disabled: !key, tip: key ? "会把画面缩略图上传到 DeepSeek，保密的稿子不要勾" : "先在 WavePlug 程序 › 功能设置 › AI 助手 里填写 DeepSeek API Key" },
+        ],
+        start: noCats ? "" : "开始检查",
+        note: noCats ? "至少勾选一项" : "",
+      };
+    },
+    set(k, v) {
+      if (k === "scope" && (v === "doc" || v === "selection")) setup.scope = v;
+      else if (k.startsWith("cat:") && typeof v === "boolean") {
+        const c = k.slice(4) as Category;
+        setup.cats = LOCAL_CATS.filter(x => x === c ? v : setup.cats.includes(x));
+      } else if ((k === "copy" || k === "visual") && typeof v === "boolean") { opts[k] = v; keep(k === "copy" ? COPY_KEY : VISUAL_KEY, v); }
+      saveSetup();
+    },
+    start: begin,
   });
 
   function close() {
+    settingsPanel.close();
     open = false; ++run; ++aiRun;
     if (recheckTimer) { clearTimeout(recheckTimer); recheckTimer = null; }
     d.mark([], null);
@@ -141,7 +210,7 @@ export function createDocCheck(d: DocCheckDeps) {
       if (mine !== run || !open) return;
       if (!read) throw new Error("读不到文档（是不是切换了文档？）");
       doc = read;
-      local = runChecks(read);
+      local = filterIssues(runChecks(read), cats, scope);
       // a fixed issue that is back (its fix was undone) is open again
       for (const i of local) if (fixed.has(i.key) && !working.has(i.key)) fixed.delete(i.key);
       log("info", "check local", JSON.stringify({ issues: local.length, ms: Date.now() - t0 }));
@@ -160,7 +229,7 @@ export function createDocCheck(d: DocCheckDeps) {
     const mine = ++aiRun, id = docId, read = doc, cfg = d.settings();
     const jobs: Promise<void>[] = [];
     if (opts.copy) {
-      const p = copyPrompt(read.texts);
+      const p = copyPrompt(scope ? read.texts.filter(t => scope!.has(t.id)) : read.texts);
       if (p.count) jobs.push(withTimeout(deepseekJson(d.fetch, { key: cfg.key, model: cfg.model }, { system: COPY_SYSTEM, user: p.user }), TIMEOUT_MS, "DeepSeek ").then(r => {
         if (mine !== aiRun) return;
         ai.push(...parseCopyIssues(r.value, read.texts));
@@ -256,5 +325,5 @@ export function createDocCheck(d: DocCheckDeps) {
     }, RECHECK_MS);
   });
 
-  return { button, isOpen: () => open, close };
+  return { button, isOpen: () => open || settingsPanel.isOpen(), close, syncSetup: () => settingsPanel.sync() };
 }

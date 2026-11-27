@@ -1785,7 +1785,11 @@ export function createLayerTreeView(tree: LayerTree, status: Status, tools?: Lay
   listen(document, "mouseup", () => { thumbDrag = null; });
 
 
+  /** the settings panels' resync (set once they exist: render runs before they are made) */
+  let syncSetups = () => {};
   function render() {
+    // an open settings panel says what it will cover (the selection may have changed)
+    syncSetups();
     const exp = expanded();
     collapsed = new Set(layers.filter(l => l.kind === "group" && !exp.has(l.id)).map(l => l.id));
     query.selectedIds = selected;
@@ -3598,18 +3602,22 @@ export function createLayerTreeView(tree: LayerTree, status: Status, tools?: Lay
     overlay, tree, status, fetch: assistant.fetch, settings: assistant.settings,
     state: () => ({ docId, layers, selected, width: canvas.width, height: canvas.height }),
     refresh: () => void refresh(), mark: (ids, sev) => void markIssue(ids, sev), opening: () => { docCheck?.close(); aiRewrite?.close(); },
+    view: canvasView,
   }) : null;
   // ── 文档检查: the button beside AI 整理; its list is the helper's window beside the panel (docCheck.ts) ──
   const docCheck = assistant?.checker ? createDocCheck({
     overlay, checker: assistant.checker, tree, tools, status, fetch: assistant.fetch, settings: assistant.settings, composite: assistant.composite,
     docId: () => docId, docVersion, refresh: () => void refresh(), mark: (ids, sev) => void markIssue(ids, sev), opening: () => { aiOrganize?.close(); aiRewrite?.close(); },
+    view: canvasView, selection: () => layers.filter(l => selected.has(l.id) || ancestors(layers, l.id).some(a => selected.has(a))).map(l => l.id),
   }) : null;
   // ── AI 改写文字: the same window beside the panel (aiRewrite.ts) ──
   const aiRewrite = assistant?.checker ? createAiRewrite({
     overlay, checker: assistant.checker, status, fetch: assistant.fetch, settings: assistant.settings,
     state: () => ({ docId, layers, selected }),
     refresh: () => void refresh(), mark: (ids, sev) => void markIssue(ids, sev), opening: () => { aiOrganize?.close(); docCheck?.close(); },
+    view: canvasView,
   }) : null;
+  syncSetups = () => { docCheck?.syncSetup(); aiOrganize?.syncSetup(); aiRewrite?.syncSetup(); };
 
 
   // ── the panel menu (☰, as the menu at the top right of Photoshop's Layers panel) ──

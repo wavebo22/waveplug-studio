@@ -9,7 +9,7 @@
 //   ┌ 变体栏 (variants) ─────────────────────────────── 编辑工作台 (shelf) ┐
 //   │ top-left, grows down                              top-right, grows down│
 //   │                                                                        │
-//   │ 生图面板 (generate)                                      完成提示 (toast)│
+//   │ 角落窗口: 生图面板 / 设置面板 (one at a time)              完成提示 (toast)│
 //   │ bottom-left (or where the user dragged / snapped it)      bottom-right │
 //   └ 底部提示栏 (status bar): the whole width, on the bottom edge ──────────┘
 //
