@@ -723,7 +723,9 @@ impl Engine {
         }
         let at = self.began_at;
         let scale = scale_at(at.0, at.1);
-        let centre = trash::centre(at, view, work_area(at.0, at.1), scale);
+        // up already for this drag (the plugin asks again once it has read the canvas): it stays
+        // where it is — a square that jumps away mid-drag is where it seemed to be wrong
+        let centre = if self.trash.on { self.trash.centre } else { trash::centre(at, view, work_area(at.0, at.1), scale) };
         self.trash.on = true;
         self.trash.enabled = enabled;
         self.trash.centre = centre;

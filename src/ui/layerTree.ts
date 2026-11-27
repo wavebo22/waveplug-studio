@@ -3334,6 +3334,26 @@ export function createLayerTreeView(tree: LayerTree, status: Status, tools?: Lay
   // ── right-click menu, rename, toolbar ──
   const el = h("section", { class: "lt fill", tabindex: "-1" });
   el.append(ghost, variantPreview.box);
+  // 变体栏 closes when the user clicks anywhere else in the panel. Not on the press: the rows
+  // below would move up under the pointer and the click land on another layer — after the
+  // release, and after a drag that press started.
+  let collapseVariants = false;
+  el.addEventListener("mousedown", e => {
+    const t = e.target as HTMLElement | null;
+    if (t?.closest?.(".lt-variant-row, .k-variant")) return;
+    if (layers.some(l => isVariantLayer(l) && openSubs().has(l.id))) collapseVariants = true;
+  }, true);
+  listen(document, "mouseup", () => {
+    if (!collapseVariants) return;
+    setTimeout(() => {
+      if (drag) return; // a drag is on: the next release closes it
+      collapseVariants = false;
+      const open = openSubs();
+      let changed = false;
+      for (const l of layers) if (isVariantLayer(l) && open.delete(l.id)) changed = true;
+      if (changed) { variantPreview.leave(); render(); }
+    }, 0);
+  });
   el.addEventListener("mouseenter", () => { pointerIn = true; refocus("hover"); });
   // no drag state here: UXP fires leave/enter spuriously mid-drag; locateDrag owns the region
   el.addEventListener("mouseleave", () => { variantPreview.leave(); hintOverCancel?.(); pointerIn = false; if (!drag?.active) { hintZone = "none"; hintLayer = null; updateHints(); } });

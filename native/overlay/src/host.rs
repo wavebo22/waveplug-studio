@@ -230,7 +230,11 @@ fn on_command(c: Command) {
     // the canvas moved: the status bar and every window's place follow, off the UI thread
     if let Command::Canvas { view } = c {
         crate::monitor::set_view(view);
-        let Some(view) = view else { return };
+        let Some(view) = view else {
+            #[cfg(windows)]
+            crate::win::canvas_gone();
+            return;
+        };
         #[cfg(windows)]
         crate::win::canvas_moved(view);
         return;
@@ -721,9 +725,15 @@ impl Host {
                     }
                 }
                 Command::LayerDragTrash { view, enabled, action } => {
-                    let view = view.filter(|v| v.right > v.left && v.bottom > v.top).map(|v| {
+                    let sent = view.filter(|v| v.right > v.left && v.bottom > v.top).map(|v| {
                         (v.left.round() as i32, v.top.round() as i32, v.right.round() as i32, v.bottom.round() as i32)
                     });
+                    // the canvas this program follows (always current) before the plugin's, which
+                    // may be a minute old or missing at the drag's start
+                    #[cfg(windows)]
+                    let view = crate::win::canvas_now().or(sent);
+                    #[cfg(not(windows))]
+                    let view = sent;
                     crate::drag::send(crate::drag::Cmd::Trash { view, enabled, action });
                 }
                 Command::LayerDragPreviewUpdate { action, tone } => {

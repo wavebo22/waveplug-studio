@@ -1469,6 +1469,23 @@ fn set_canvas(r: RECT) {
     }
 }
 
+/// The canvas as this program knows it now (physical px): the plugin reports it when a document
+/// opens and whenever it moves, and it is followed while Photoshop's window moves. None: no
+/// document (or not known yet).
+pub fn canvas_now() -> Option<(i32, i32, i32, i32)> {
+    CANVAS.lock().ok().and_then(|c| *c).map(|r| (r.left, r.top, r.right, r.bottom))
+}
+
+/// No document is open any more: no canvas to place against.
+pub fn canvas_gone() {
+    if let Ok(mut c) = CANVAS.lock() {
+        *c = None;
+    }
+    if let Ok(mut b) = CANVAS_BASE.lock() {
+        *b = None;
+    }
+}
+
 /// The plugin saw the canvas move (`canvas` message): every window follows now.
 pub fn canvas_moved(view: ScreenRect) {
     set_canvas(view_rect(view));
