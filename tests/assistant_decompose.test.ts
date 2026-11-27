@@ -30,7 +30,8 @@ test("细化：每个部分在自己的局部图里重新定位，换算回文�
   ];
   const r = applyRefine(first.parts, regions, answers, size, { pad: 0 });
   const r0 = regions[0];
-  assert.deepEqual(r.parts[0].box, { left: r0.left, top: r0.top, right: r0.left + Math.ceil((r0.right - r0.left) / 2), bottom: r0.top + Math.ceil((r0.bottom - r0.top) / 2) });
+  const f0 = first.parts[0].box, half = { right: r0.left + Math.ceil((r0.right - r0.left) / 2), bottom: r0.top + Math.ceil((r0.bottom - r0.top) / 2) };
+  assert.deepEqual(r.parts[0].box, { left: Math.min(r0.left, f0.left), top: Math.min(r0.top, f0.top), right: Math.max(half.right, f0.right), bottom: Math.max(half.bottom, f0.bottom) });
   assert.equal(r.parts[0].refined, true);
   assert.deepEqual(r.parts[1].box, first.parts[1].box);
   assert.equal(r.parts[1].refined, false);
@@ -103,10 +104,10 @@ test("裁剪范围：四周留边，太小的补到最小边长，靠边时往�
   assert.deepEqual(huge, { left: 0, top: 0, right: 2000, bottom: 1000 });
 });
 
-test("框外扩：按长边留余量，至少画面长边的 0.8%，不超出画面", () => {
+test("框外扩：按长边留 15% 余量，至少画面长边的 0.8%，不超出画面", () => {
   const size = { width: 1000, height: 500 };
   const plan = parseDecomposeAnswer({ parts: [{ name: "物件", box: [100, 200, 300, 600] }] }, size);
-  assert.deepEqual(plan.parts[0].box, { left: 84, top: 84, right: 316, bottom: 316 });
+  assert.deepEqual(plan.parts[0].box, { left: 70, top: 70, right: 330, bottom: 330 });
   const edge = parseDecomposeAnswer({ parts: [{ name: "边上", box: [0, 0, 50, 50] }] }, size);
   assert.deepEqual(edge.parts[0].box, { left: 0, top: 0, right: 58, bottom: 33 });
 });
@@ -120,5 +121,5 @@ test("细化：新框和第一次的框完全不重叠时，保留第一次的�
   assert.deepEqual(far.parts[0].box, first.parts[0].box);
   assert.match(far.notes[0], /差得太远/);
   const near = applyRefine(first.parts, [region], [{ boxes: [{ i: 1, box: [120, 90, 210, 190] }] }], size, { pad: 0 });
-  assert.deepEqual(near.parts[0].box, { left: 120, top: 90, right: 210, bottom: 190 });
+  assert.deepEqual(near.parts[0].box, { left: 100, top: 90, right: 210, bottom: 200 });
 });

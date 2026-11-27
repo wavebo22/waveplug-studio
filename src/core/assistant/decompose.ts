@@ -118,7 +118,8 @@ function boxOf(v: unknown, size: Size): Rect | string {
 
 export interface CropOptions {
   /** each box grows by this share of its longer side (at least 0.8% of the picture's), so 心宝抠图
-   *  gets a little room around the part (default 0.08; 0: the model's box as it is) */
+   *  gets room around the part: DeepSeek's boxes are off by 3–5% of the picture (default 0.15;
+   *  0: the model's box as it is) */
   pad?: number;
   /** margin on each side, as a share of the box's longer side (default 0.25) */
   margin?: number;
@@ -146,7 +147,7 @@ export function cropFor(box: Rect, size: Size, opts: CropOptions = {}): Rect {
 }
 
 /** `box` grown by `pad` of its longer side (at least 0.8% of the picture's longer side), inside the picture. */
-export function padBox(box: Rect, size: Size, pad = 0.08): Rect {
+export function padBox(box: Rect, size: Size, pad = 0.15): Rect {
   if (pad <= 0) return box;
   const m = Math.round(Math.max(Math.max(rectW(box), rectH(box)) * pad, Math.max(size.width, size.height) * 0.008));
   return {
@@ -205,7 +206,7 @@ export function refineRequest(names: readonly string[]): string {
     ...names.map((n, i) => `第 ${i + 1} 张：找「${n}」`)].join("\n");
 }
 
-/** The parts with their boxes from the refine answers (one per batch of REFINE_BATCH parts, null
+/** The parts with their boxes widened to cover the refine answers' too (one per batch of REFINE_BATCH parts, null
  *  where the request failed); a part whose crop got no usable box keeps its first box. `regions`
  *  are refineRegion's, in the parts' order. Crops are worked out again from the new boxes. */
 export function applyRefine(parts: readonly DecomposePart[], regions: readonly Rect[], answers: readonly unknown[], size: Size, crop: CropOptions = {}): { parts: DecomposePart[]; notes: string[] } {
@@ -227,7 +228,10 @@ export function applyRefine(parts: readonly DecomposePart[], regions: readonly R
       notes.push(`「${p.name}」细化的结果和第一次差得太远，用第一次的框`);
       return { ...p, refined: false };
     }
-    const box = padBox(raw, size, crop.pad);
+    // both looks are off by a few per cent, in different directions (11-27 log): the part is inside
+    // either box, so the union goes to 心宝抠图
+    const q = padBox(raw, size, crop.pad);
+    const box = { left: Math.min(q.left, p.box.left), top: Math.min(q.top, p.box.top), right: Math.max(q.right, p.box.right), bottom: Math.max(q.bottom, p.box.bottom) };
     return { ...p, box, crop: cropFor(box, size, crop), refined: true };
   });
   return { parts: out, notes };

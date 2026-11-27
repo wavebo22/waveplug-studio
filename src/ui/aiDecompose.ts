@@ -57,8 +57,10 @@ export function createAiDecompose(d: AiDecomposeDeps) {
   let detail: DecomposeDetail = "medium";
   try { const v = localStorage.getItem(DETAIL_KEY) ?? ""; if (isDecomposeDetail(v)) detail = v; } catch { /* default */ }
   let busy = false, result: Result | null = null, failed = "";
-  let refine = true;
-  try { refine = localStorage.getItem(REFINE_KEY) !== "off"; } catch { /* default */ }
+  let refine = false;
+  // off unless ticked: on small pictures the crops show DeepSeek nothing new, it costs minutes, and
+  // the boxes come out about as good (11-27 log)
+  try { refine = localStorage.getItem(REFINE_KEY) === "on"; } catch { /* default */ }
   /** the part whose box (false) or crop (true) is selected now */
   let shown: { i: number; crop: boolean } | null = null;
 
@@ -195,7 +197,7 @@ export function createAiDecompose(d: AiDecomposeDeps) {
       h("div", { class: "param-top" }, h("span", { class: "param-label" }, "拆分粒度")),
       h("div", { class: "seg dc-seg" }, ...detailBtns)),
     h("div", { class: "param", title: "告诉 DeepSeek 哪些要拆、哪些不要，例如「人物和衣服算一个」「文字不用拆」" }, hint),
-    h("label", { class: "check-row dc-refine", title: "看完整个画面后，再把每个部分周围放大看一次，重新框出范围。多花一些时间；放大后找不到或差得太远的，保留第一次的框" }, refineBox, h("span", null, "放大细化每个部分的范围")),
+    h("label", { class: "check-row dc-refine", title: "看完整个画面后，再把每个部分周围放大看一次，框取两次的合并范围（更不容易漏掉边缘）。要多花一两分钟；大图上更有用" }, refineBox, h("span", null, "放大细化每个部分的范围")),
     runBtn, view, list, allBtn, dropped);
   render();
   return { el };
