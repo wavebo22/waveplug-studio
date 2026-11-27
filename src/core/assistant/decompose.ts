@@ -221,7 +221,13 @@ export function applyRefine(parts: readonly DecomposePart[], regions: readonly R
       notes.push(`「${p.name}」${answer == null ? "细化请求失败" : item?.box === null ? "细化时没找到" : "细化没有给出范围"}，用第一次的框`);
       return { ...p, refined: false };
     }
-    const box = padBox({ left: r.left + b.left, top: r.top + b.top, right: r.left + b.right, bottom: r.top + b.bottom }, size, crop.pad);
+    const raw = { left: r.left + b.left, top: r.top + b.top, right: r.left + b.right, bottom: r.top + b.bottom };
+    // not touching the first box at all: the second look found something else
+    if (raw.right <= p.box.left || raw.left >= p.box.right || raw.bottom <= p.box.top || raw.top >= p.box.bottom) {
+      notes.push(`「${p.name}」细化的结果和第一次差得太远，用第一次的框`);
+      return { ...p, refined: false };
+    }
+    const box = padBox(raw, size, crop.pad);
     return { ...p, box, crop: cropFor(box, size, crop), refined: true };
   });
   return { parts: out, notes };

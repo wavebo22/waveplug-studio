@@ -110,3 +110,15 @@ test("框外扩：按长边留余量，至少画面长边的 0.8%，不超出画
   const edge = parseDecomposeAnswer({ parts: [{ name: "边上", box: [0, 0, 50, 50] }] }, size);
   assert.deepEqual(edge.parts[0].box, { left: 0, top: 0, right: 58, bottom: 33 });
 });
+
+test("细化：新框和第一次的框完全不重叠时，保留第一次的框", () => {
+  const size = { width: 1000, height: 1000 };
+  const first = parseDecomposeAnswer({ parts: [{ name: "图标", box: [100, 100, 200, 200] }] }, size, { pad: 0 });
+  const region = { left: 0, top: 0, right: 1000, bottom: 1000 };
+  const far = applyRefine(first.parts, [region], [{ boxes: [{ i: 1, box: [700, 700, 800, 800] }] }], size, { pad: 0 });
+  assert.equal(far.parts[0].refined, false);
+  assert.deepEqual(far.parts[0].box, first.parts[0].box);
+  assert.match(far.notes[0], /差得太远/);
+  const near = applyRefine(first.parts, [region], [{ boxes: [{ i: 1, box: [120, 90, 210, 190] }] }], size, { pad: 0 });
+  assert.deepEqual(near.parts[0].box, { left: 120, top: 90, right: 210, bottom: 190 });
+});

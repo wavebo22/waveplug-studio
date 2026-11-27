@@ -25,7 +25,7 @@ export interface AiDecomposeDeps {
   status: Status;
 }
 
-const DETAIL_KEY = "wp.decompose.detail";
+const DETAIL_KEY = "wp.decompose.detail", REFINE_KEY = "wp.decompose.refine";
 const TIMEOUT_MS = 180_000;
 const DETAILS: [DecomposeDetail, string, string][] = [
   ["coarse", "粗", "只拆 2～4 个最主要的部分"],
@@ -57,11 +57,15 @@ export function createAiDecompose(d: AiDecomposeDeps) {
   let detail: DecomposeDetail = "medium";
   try { const v = localStorage.getItem(DETAIL_KEY) ?? ""; if (isDecomposeDetail(v)) detail = v; } catch { /* default */ }
   let busy = false, result: Result | null = null, failed = "";
+  let refine = true;
+  try { refine = localStorage.getItem(REFINE_KEY) !== "off"; } catch { /* default */ }
   /** the part whose box (false) or crop (true) is selected now */
   let shown: { i: number; crop: boolean } | null = null;
 
   const detailBtns = DETAILS.map(([k, label, tip]) => h("button", { class: "seg-btn", title: tip, onClick: () => { detail = k; try { localStorage.setItem(DETAIL_KEY, k); } catch { /* not kept */ } render(); } }, label));
   const hint = h("input", { class: "field", type: "text", placeholder: "补充要求（可选），例如：文字不用拆" }) as HTMLInputElement;
+  const refineBox = h("input", { type: "checkbox", checked: refine }) as HTMLInputElement;
+  refineBox.addEventListener("change", () => { refine = refineBox.checked; try { localStorage.setItem(REFINE_KEY, refine ? "on" : "off"); } catch { /* not kept */ } });
   const runBtn = h("button", { class: "btn tool-btn wide primary", title: "把画面发给 DeepSeek（deepseek-flash）：先看整个画面列出可以拆成独立图层的部分，再把每个部分放大看一次，框得更准。只分析，不改动文档", onClick: () => void run() }, "分析画面");
   const info = h("div", { class: "tool-info muted" });
   const view = h("div", { class: "dc-view" });
@@ -82,12 +86,11 @@ export function createAiDecompose(d: AiDecomposeDeps) {
     const size = { width: doc.width, height: doc.height };
     const cfg = { key: d.key(), model: DEEPSEEK_VISION_MODEL };
     let tokens = 0;
-    // the first look thinks (DeepSeek's default: it counts the parts more carefully, and its reasoning
-    // takes thousands of tokens, so the limit is high); finding a named part in a crop needs no thinking
-    const ask = async (system: string, user: string, images: string[], think: boolean) => {
-      const r = await withTimeout(deepseekJson(d.fetch, cfg, think
-        ? { system, user, images, maxTokens: 32000 }
-        : { system, user, images, maxTokens: 4000, temperature: 0.2, thinking: "off" }), TIMEOUT_MS, "DeepSeek ");
+    // both looks think (DeepSeek's default). Without it the boxes come back well off, mostly up and
+    // down (11-27 log: 心宝 icon, 品质秒杀, SONG 颂 70–100 px low in the crop); its reasoning takes
+    // thousands of tokens, so the limit is high.
+    const ask = async (system: string, user: string, images: string[]) => {
+      const r = await withTimeout(deepseekJson(d.fetch, cfg, { system, user, images, maxTokens: 32000 }), TIMEOUT_MS, "DeepSeek ");
       if (r.usage) tokens += r.usage.prompt + r.usage.completion;
       return r.value;
     };
@@ -99,12 +102,12 @@ export function createAiDecompose(d: AiDecomposeDeps) {
         const px = await d.host.docPixels(doc.id, null, t.width * t.height);
         thumb = dataUrl(px); sent = dataUrl(withGrid(px));
       } else thumb = sent = await d.host.docThumbnail(doc.id, Math.max(t.width, t.height));
-      const first = await ask(DECOMPOSE_SYSTEM, decomposeRequest(detail, t, hint.value), [sent], true);
+      const first = await ask(DECOMPOSE_SYSTEM, decomposeRequest(detail, t, hint.value), [sent]);
       let plan = parseDecomposeAnswer(first, size);
       log("info", "decompose", JSON.stringify({ doc: doc.name, size: [doc.width, doc.height], thumb: [t.width, t.height], detail, parts: plan.parts.length, dropped: plan.dropped, answer: JSON.stringify(first).slice(0, 3000) }));
       // 2. each part again in a zoomed-in crop of the full-resolution picture: a box that fits
       let notes: string[] = [];
-      if (plan.parts.length && d.host.docPixels) {
+      if (refine && plan.parts.length && d.host.docPixels) {
         d.status(`AI 拆层：找到 ${plan.parts.length} 个部分，正在放大细化每个部分的范围…`);
         const regions = plan.parts.map(p => refineRegion(p.box, size));
         const crops: string[] = [];
@@ -112,7 +115,7 @@ export function createAiDecompose(d: AiDecomposeDeps) {
         const batches: Promise<unknown>[] = [];
         for (let i = 0; i < plan.parts.length; i += REFINE_BATCH) {
           const names = plan.parts.slice(i, i + REFINE_BATCH).map(p => p.name);
-          batches.push(ask(REFINE_SYSTEM, refineRequest(names), crops.slice(i, i + REFINE_BATCH), false).catch(e => { log("warn", "decompose refine", e); return null; }));
+          batches.push(ask(REFINE_SYSTEM, refineRequest(names), crops.slice(i, i + REFINE_BATCH)).catch(e => { log("warn", "decompose refine", e); return null; }));
         }
         const answers = await Promise.all(batches);
         log("info", "decompose refine", JSON.stringify({ regions, answers: JSON.stringify(answers).slice(0, 4000) }));
@@ -192,6 +195,7 @@ export function createAiDecompose(d: AiDecomposeDeps) {
       h("div", { class: "param-top" }, h("span", { class: "param-label" }, "拆分粒度")),
       h("div", { class: "seg dc-seg" }, ...detailBtns)),
     h("div", { class: "param", title: "告诉 DeepSeek 哪些要拆、哪些不要，例如「人物和衣服算一个」「文字不用拆」" }, hint),
+    h("label", { class: "check-row dc-refine", title: "看完整个画面后，再把每个部分周围放大看一次，重新框出范围。多花一些时间；放大后找不到或差得太远的，保留第一次的框" }, refineBox, h("span", null, "放大细化每个部分的范围")),
     runBtn, view, list, allBtn, dropped);
   render();
   return { el };
