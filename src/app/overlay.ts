@@ -40,7 +40,7 @@ export interface Overlay {
   /** 悬停边框: frame `rect` (screen px) cut to `clip` on the canvas; null takes it away. */
   hoverFrame(frame: { rect: ScreenRect; clip: ScreenRect } | null): void;
   /** the canvas is somewhere else on screen now: every external window follows it */
-  canvasMoved(view: ScreenRect): void;
+  canvasMoved(view: ScreenRect | null): void;
   /** 悬停高亮: the hovered layer's shape tinted on the canvas; false when the helper is too old */
   hoverTint(tint: { rect: ScreenRect; clip: ScreenRect; width: number; height: number; alpha: string; color?: string } | null): boolean;
   /** 检查结果: the 图层 panel is under the cursor now (helper ≥ CHECK_HELPER_VERSION) */

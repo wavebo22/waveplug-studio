@@ -138,6 +138,8 @@ src/ui/app.ts  startOverlay()      生成页提供状态和     src/panel/genera
 
 - 0.38.3：设置面板（id 以 `-setup` 结尾）显示时，`win::watch_outside_clicks` 每 40 ms 看一次鼠标：显示 400 ms 后在窗口外按下左 / 右键 → 替插件发 `{"kind":"close"}`。插件在画出新选区时也会关掉设置面板（`closeSetupPanels`）。
 
+- 0.38.4：`canvas` 的 `view` 可以是 null（没有文档）。插件打开 / 切换文档时就发一次画布位置（不再等某个面板 show 时带上），helper 重连后也重发；提示栏只看它，生图面板 hide 不再清掉提示栏的画布位置。
+
 ### 3.6 快捷键 Ctrl+F = 原位粘贴（2026-11-25，0.29.0，未实测）
 
 `src/hotkey.rs`：独立线程上的 `WH_KEYBOARD_LL` 键盘钩子（钩子要求所在线程有消息循环）。插件每次连上发 `{"type":"hotkeys","on":true}`，断开时 `on_disconnect` 关掉。打开期间，Photoshop 进程的窗口在前台时按 Ctrl+F（不带 Shift / Alt / Win）：这次按键被吞掉（PS 自己的「上次滤镜」不会执行），发 `{"type":"paste-in-place"}` 给插件；按住的重复和抬起也吞掉，每按一次只发一次。其他程序、小程序自己的窗口、其他按键都不动。插件没连上时 Ctrl+F 照旧给 PS。判断是纯函数 `verdict()`，有测试。

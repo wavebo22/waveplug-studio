@@ -134,9 +134,14 @@ pub enum Command {
         #[serde(default)]
         action: String,
     },
-    /// The canvas moved on screen (a panel docked beside it changed width, the window was
-    /// resized …) while nothing else changed: every external window follows (win.rs relayout).
-    Canvas { view: ScreenRect },
+    /// Where the canvas is on screen: sent when a document opens / is switched to, and whenever the
+    /// canvas moves (a panel docked beside it changed width, the window was resized …). Every
+    /// external window and the status bar follow it (win.rs relayout, monitor.rs) — whatever is
+    /// shown or not. `view: null`: no document is open.
+    Canvas {
+        #[serde(default)]
+        view: Option<ScreenRect>,
+    },
     /// A WaveLayer row is hovered: a thin click-through frame around `rect`, cut to `clip`
     /// (Photoshop's canvas view); `rect: null` takes it away. Drawn by frame.rs.
     HoverFrame {
@@ -779,8 +784,9 @@ mod tests {
     #[test]
     fn canvas_moves_are_read() {
         match parse(r#"{"type":"canvas","view":{"left":1174,"top":139,"right":3224,"bottom":2064}}"#) {
-            Some(Command::Canvas { view }) => assert_eq!((view.left, view.right), (1174.0, 3224.0)),
+            Some(Command::Canvas { view: Some(view) }) => assert_eq!((view.left, view.right), (1174.0, 3224.0)),
             _ => panic!("canvas"),
         }
+        assert!(matches!(parse(r#"{"type":"canvas","view":null}"#), Some(Command::Canvas { view: None })));
     }
 }

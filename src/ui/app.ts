@@ -932,19 +932,26 @@ export function mountApp(root: HTMLElement, svc: Services) {
   /** The canvas moves on screen without any event the plugin hears (a docked panel beside it
    *  widened or folded, the window resized): look at Photoshop's view bounds a few times a
    *  second — one cheap read — and when they changed, tell the helper the new canvas so every
-   *  external window follows at once (native/overlay/src/layout.rs). */
+   *  external window follows at once (native/overlay/src/layout.rs). The first reading of each
+   *  document is sent too, and "no document" (null): the status bar sits on the canvas whether or
+   *  not any panel is up, so it can't wait for a panel's show to learn where the canvas is. */
   function watchCanvas() {
     let busy = false, last = "";
+    // a helper that (re)connects knows no canvas yet
+    overlay?.onConnected(() => { last = ""; });
     every(async () => {
-      if (busy || !overlay?.connected || !doc || !svc.host.viewBounds || !svc.host.canvasView) return;
+      if (busy || !overlay?.connected || !svc.host.viewBounds || !svc.host.canvasView) return;
+      if (!doc) {
+        if (last !== "none") { last = "none"; overlay.canvasMoved(null); log("info", "canvas: no document"); }
+        return;
+      }
       busy = true;
       try {
         const id = doc.id;
-        const key = await svc.host.viewBounds(id);
+        const bounds = await svc.host.viewBounds(id);
+        const key = bounds ? `${id}:${bounds}` : "";
         if (!key || key === last) return;
-        const first = !last;
         last = key;
-        if (first) return; // where it was already sent with the windows' show
         const v = await svc.host.canvasView(id);
         if (v) { overlay.canvasMoved(v.view); log("info", "canvas moved", JSON.stringify(v.view)); }
       } catch { /* Photoshop busy (a modal step): next time */ }

@@ -223,13 +223,14 @@ fn on_command(c: Command) {
             return;
         }
         Command::Show { view: Some(view), .. } => crate::monitor::set_view(Some(*view)),
-        // the generate panel leaves only when no document is open: no canvas to sit in
-        Command::Hide { panel } if panel == "generate" => crate::monitor::set_view(None),
+        // (a surface going away says nothing about the canvas: the generate panel leaves whenever
+        // the selection does. The plugin says when there is no document: `canvas` with no view.)
         _ => {}
     }
     // the canvas moved: the status bar and every window's place follow, off the UI thread
     if let Command::Canvas { view } = c {
-        crate::monitor::set_view(Some(view));
+        crate::monitor::set_view(view);
+        let Some(view) = view else { return };
         #[cfg(windows)]
         crate::win::canvas_moved(view);
         return;

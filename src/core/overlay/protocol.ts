@@ -23,7 +23,8 @@ export type OverlayCommand =
   | { type: "show"; panel: string; view: ScreenRect | null }
   | { type: "hide"; panel: string }
   /** the canvas moved on screen while nothing else changed: the helper moves every window */
-  | { type: "canvas"; view: ScreenRect }
+  /** where the canvas is (null: no document open): the status bar and every window follow it */
+  | { type: "canvas"; view: ScreenRect | null }
   /** the surface's state; `rev` only grows per surface, so the helper drops anything older */
   | { type: "state"; panel: string; rev: number; sections: Record<string, unknown> }
   /** a notice in the bottom-right corner of `view` (shared by every surface; shown even while
@@ -209,7 +210,7 @@ export type OverlayEvent =
 /** The helper build this plugin's protocol needs (native/overlay/Cargo.toml). Bump both together:
  *  an older helper still connects, but e.g. can't arbitrate drag verdicts (drag_target.rs), and
  *  without this check a stale exe looks exactly like a bug in new code. */
-export const EXPECTED_HELPER_VERSION = "0.38.3";
+export const EXPECTED_HELPER_VERSION = "0.38.4";
 /** the native 编辑工作台 window (panel/shelf.rs) needs at least this helper; older: the in-panel workbench */
 export const WORKBENCH_HELPER_VERSION = "0.11.0";
 /** the 检查结果 window, panel-anchor and coloured hover-tint need at least this helper (native/overlay/HANDOFF.md 3.5b) */
