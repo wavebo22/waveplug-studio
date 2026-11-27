@@ -1143,3 +1143,10 @@ textarea,
 .lt .lt-list .lt-row.chk-error .lt-stripe { background: var(--c-err); }
 .lt .lt-list .lt-row.chk-warn { background-color: var(--c-warn-wash); }
 .lt .lt-list .lt-row.chk-warn .lt-stripe { background: var(--c-warn); }
+
+/* 更新提醒 (app.ts renderUpdate): above the header, one line with 「更新」 */
+.update-bar { display: flex; align-items: center; flex: none; margin-bottom: var(--sp-3); padding: var(--sp-2) var(--sp-3); border: 1px solid var(--c-accent); border-radius: var(--r-s); background: var(--c-accent-wash); color: var(--c-text-hi); font-size: var(--fs-s); }
+.update-bar > * + * { margin-left: var(--sp-3); }
+.update-bar .update-text { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.update-bar.error { border-color: var(--c-err); background: var(--c-err-wash); }
+.update-bar .small-btn { flex: none; height: var(--h-s); padding: 0 var(--sp-4); }

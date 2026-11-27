@@ -133,6 +133,7 @@ src/ui/app.ts  startOverlay()      生成页提供状态和     src/panel/genera
 - 0.34.0 修复：AI 整理输入框获得键盘后，`watch_check` 不再每轮把窗口改回不接收键盘（`needs_noactivate_style` 用 `CHECK_TYPING`）。
 - 0.35.0：外置生成面板区块 `ai`（`{busy, blocked, undo}`，null = 这个模式没有提示词可优化），收藏栏里显示「✦ AI 优化」/「↶ 还原」，回传 `optimize-prompt` / `restore-prompt`；功能设置 › AI 助手 多了 `deepseekPromptImage`（默认开）。
 - 0.36.0：检查结果窗口里双击一行 = 处理（有 `choices` 时回传 `choice: 0`）。
+- 0.37.0 更新提醒（`src/autoupdate.rs`）：启动 30 秒后检查、之后每 3 小时（开发机：源码文件夹每 10 分钟 `git fetch`）。找到新版本发 `{"type":"update-available","version","notes","dev"}`（新连上的面板也会收到）；面板的「更新」发 `{"type":"update-now"}`，进度和结果用 `{"type":"update-progress","text","done","ok"}`。发布版：下载校验安装包 → 插件代码放进 `<data>\plugin-live\`（写到 `.new` 再整体换上，build-stamp.txt 最后写）→ Illustrator 面板 → `install_app` 换 WavePlug.exe（life.rs 自动重启）。`ready` 多了 `liveRoot` / `appExe`；`plugin/loader.js` 在开发文件夹之后、插件自带版本之前读 liveRoot：版本更新且 manifest（除 version）完全相同时才用。开发机：「更新」跑 `node scripts\update.mjs`。
 
 ### 3.6 快捷键 Ctrl+F = 原位粘贴（2026-11-25，0.29.0，未实测）
 

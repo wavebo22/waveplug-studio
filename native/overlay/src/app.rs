@@ -643,19 +643,22 @@ impl AppWindow {
         });
     }
 
+    /// 下载并安装: the same one-click update as the panel's 「更新」 (autoupdate.rs): downloaded,
+    /// checked and put in place without the installer's window or an administrator prompt.
     fn download_update(&self, l: Latest) {
-        let dir = paths::install_dir().map(|d| d.display().to_string()).unwrap_or_default();
-        let nodes = update::mirror_list(&self.cfg.mirrors);
-        self.task("下载更新", move |log| {
-            let to = paths::cache_dir("downloads").join(format!("WavePlug_Setup_{}.exe", l.version));
-            let from = update::download_checked(&l, &to, &nodes, true, log)?;
-            log(format!("已下载（来自{from}）"));
-            if payload::read_exe(&to)?.is_none() {
-                return Err("下载的文件不是 WavePlug 安装程序".into());
-            }
-            sys::launch(&to, &["--update", &dir])?;
-            Ok(format!("新版本 {} 的安装程序已启动", l.version))
-        });
+        if paths::install_dir().is_none() {
+            // not installed yet: the installer it is
+            self.task("下载更新", move |log| {
+                let to = paths::cache_dir("downloads").join(format!("WavePlug_Setup_{}.exe", l.version));
+                let from = update::download_checked(&l, &to, &update::mirror_list(&install::Config::load().mirrors), true, log)?;
+                log(format!("已下载（来自{from}）"));
+                sys::launch(&to, &[])?;
+                Ok(format!("新版本 {} 的安装程序已启动", l.version))
+            });
+            return;
+        }
+        crate::autoupdate::update_now();
+        self.logger().put(format!("正在后台更新到 {}：完成后 WavePlug 自动重启，插件自动载入新版本", l.version), theme::ACCENT_HI);
     }
 
     /// The source folder's GitHub state, asked in the background: when the window opens, every

@@ -15,6 +15,7 @@ mod anim;
 mod app;
 mod host;
 mod comfy;
+mod autoupdate;
 mod devgit;
 mod drag;
 mod drag_target;

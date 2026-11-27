@@ -66,6 +66,12 @@ pub fn installed_plugin() -> Option<(String, bool)> {
     installed_uxp(PLUGIN_ID)
 }
 
+/// The installed Photoshop plugin's folder (Adobe's External plugins), when there is one.
+pub fn installed_plugin_dir() -> Option<PathBuf> {
+    let (version, _) = installed_plugin()?;
+    Some(common_files().join("Adobe\\UXP\\Plugins\\External").join(format!("{PLUGIN_ID}_{version}"))).filter(|d| d.is_dir())
+}
+
 fn installed_uxp(id: &str) -> Option<(String, bool)> {
     let p = common_files().join("Adobe\\UXP\\PluginsInfo\\v1\\PS.json");
     detect::uxp_plugin(&std::fs::read_to_string(p).ok()?, id)

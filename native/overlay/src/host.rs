@@ -130,6 +130,10 @@ fn on_command(c: Command) {
         );
         return;
     }
+    if let Command::UpdateNow = c {
+        crate::autoupdate::update_now();
+        return;
+    }
     if let Command::RestartHelper = c {
         // off the server thread: the restart waits for the new copy before quitting
         std::thread::spawn(|| crate::life::restart("requested by the plugin"));
@@ -330,6 +334,7 @@ pub fn run() {
     let show = args.iter().any(|a| a == "--show");
     let uninstall = args.iter().any(|a| a == "--uninstall");
     crate::life::init();
+    crate::autoupdate::start();
     if show || uninstall {
         crate::app::pin();
         if uninstall { crate::app::ask_uninstall() } else { crate::app::open(None) }
@@ -643,6 +648,7 @@ impl Host {
                 Command::IssueRows { .. } => {}  // frame.rs, on its own thread
                 Command::MenuOpen { .. } | Command::MenuClose { .. } => {} // menu.rs, on its own thread
                 Command::RestartHelper => {}     // life.rs, on its own thread
+                Command::UpdateNow => {}         // autoupdate.rs, on its own thread
                 Command::Monitor { .. } => {}    // monitor.rs, on its own thread
                 Command::HangGuard { .. } => {}  // hang.rs, on its own thread
                 Command::WebCatch { .. } => {}   // webdrop.rs, on its own thread

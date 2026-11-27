@@ -232,6 +232,26 @@ export function mountApp(root: HTMLElement, svc: Services) {
   const advHead = h("button", { class: "adv-head" });
   const advBody = h("div", { class: "adv-body" });
   const statusEl = h("div", { class: "status" });
+  // 更新提醒: the helper found a newer WavePlug; one 「更新」 does it all (native/overlay/src/autoupdate.rs)
+  const updateBar = h("div", { class: "update-bar" });
+  updateBar.hidden = true;
+  let update: { version: string; notes: string; dev: boolean } | null = null, updating = false, updateText = "", updateOk: boolean | null = null;
+  function renderUpdate() {
+    updateBar.hidden = !update && !updateText;
+    if (updateBar.hidden) return;
+    const what = update ? (update.dev ? `源码有 ${update.version}` : `WavePlug 有新版本 ${update.version}`) : "";
+    const text = updateText || what;
+    const btn = update && !updating ? h("button", { class: "btn primary small-btn", title: update.notes || "下载并装好新版本：插件当场换成新版本，WavePlug 程序自动重启，不用关 Photoshop", onClick: () => { updating = true; updateOk = null; updateText = "正在更新…"; renderUpdate(); overlay?.updateNow(); } }, "更新") : null;
+    const close = !updating ? h("button", { class: "icon-btn", title: "先不更新（下次打开 Photoshop 时再提醒）", onClick: () => { update = null; updateText = ""; renderUpdate(); } }, icon("close", 10)) : null;
+    updateBar.className = "update-bar" + (updateOk === false ? " error" : "");
+    replace(updateBar, h("span", { class: "update-text", title: update?.notes ?? "" }, text), ...(btn ? [btn] : []), ...(close ? [close] : []));
+  }
+  /** after an update: load the new build once nothing is running (the loader picks the newer code) */
+  function reloadWhenIdle() {
+    if (run) { setTimeout(reloadWhenIdle, 2000); return; }
+    log("info", "update installed: loading the new build");
+    (globalThis as any).__waveplugDevReload?.();
+  }
   const sheetHost = h("div", { class: "sheet-host" });
 
   const MODES = [["inpaint", "局部重绘"], ["blend", "融图"], ["extract", "抠图"], ["outpaint", "扩图"], ["txt2img", "文生图"], ["upscale", "放大"]] as const;
@@ -386,6 +406,7 @@ export function mountApp(root: HTMLElement, svc: Services) {
   };
 
   root.append(
+    updateBar,
     h("header", { class: "top" },
       h("div", { class: "brand" }, h("span", { class: "mark" }, "W"), h("span", { class: "brand-name" }, "WavePlug"),
         h("span", { class: "brand-tag", title: "测试版 1：功能还在打磨，遇到问题请把 reports\\uxp_runtime.log 发给开发者" }, "Beta"),
@@ -957,6 +978,33 @@ export function mountApp(root: HTMLElement, svc: Services) {
     watchCanvas();
     overlay.onConnected(() => {
       syncComfyManager(settings.comfyAutoStartWithPhotoshop !== false);
+      // the program restarted into its new version while updating (a source update compiles it
+      // midway, so the old copy can't say it finished): the update is done
+      if (updating) {
+        const dev = update?.dev;
+        updating = false; updateOk = true; update = null; updateText = "已更新：WavePlug 程序已重启成新版本";
+        if (!dev) setTimeout(reloadWhenIdle, 1500);
+        setTimeout(() => { if (!updating && updateOk) { updateText = ""; renderUpdate(); } }, 8000);
+        renderUpdate();
+      }
+    });
+    overlay.onUpdate(u => {
+      if (u.type === "update-available") {
+        if (!updating) { update = { version: u.version, notes: u.notes, dev: u.dev }; updateText = ""; updateOk = null; }
+      } else {
+        updateText = u.text;
+        if (u.done) {
+          updating = false; updateOk = u.ok;
+          if (u.ok) {
+            const dev = update?.dev;
+            update = null;
+            // a release: its code is in the update folder now; a source update reloads by itself
+            if (!dev) setTimeout(reloadWhenIdle, 1500);
+            setTimeout(() => { if (!updating && updateOk) { updateText = ""; renderUpdate(); } }, 8000);
+          }
+        }
+      }
+      renderUpdate();
     });
     overlay.onPasteInPlace(() => void pasteInPlace());
     // the WavePlug app window's 功能设置: the same settings, shown and edited there

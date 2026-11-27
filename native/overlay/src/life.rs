@@ -84,6 +84,12 @@ fn remove_old_copies(exe: &PathBuf) {
 /// Starts the exe on disk again and quits this copy, keeping the ComfyUI it started.
 pub fn restart(reason: &str) {
     let Some(exe) = EXE.get().cloned() else { return };
+    restart_into(&exe, reason);
+}
+
+/// The same with another exe (an update installed WavePlug.exe while this copy runs from elsewhere).
+pub fn restart_into(exe: &std::path::Path, reason: &str) {
+    let exe = exe.to_path_buf();
     crate::log::line(format!("restarting helper: {reason}"));
     let event = handover_event();
     crate::comfy::handover();

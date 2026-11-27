@@ -235,6 +235,8 @@ pub enum Command {
     },
     /// Settings → 重启外置框架: start this exe again and quit, keeping the managed ComfyUI.
     RestartHelper,
+    /// The panel's 「更新」: install the update found (autoupdate.rs), nothing else to click.
+    UpdateNow,
     /// A WaveLayer drag left the panel: the plugin is exporting `totalCount` layers as PNG for a
     /// possible drag to another program (docs/CROSS_APP_DRAG_DROP_SPEC.md 7.3).
     ExternalDragPrepare {
@@ -349,6 +351,25 @@ fn toast_ms() -> u64 {
 pub enum Event {
     Ready {
         version: &'static str,
+        /// where a one-click update puts the plugin's code (the loader runs it: plugin/loader.js)
+        #[serde(rename = "liveRoot", skip_serializing_if = "Option::is_none")]
+        live_root: Option<String>,
+        /// the installed WavePlug.exe: the plugin starts this one (updates replace it)
+        #[serde(rename = "appExe", skip_serializing_if = "Option::is_none")]
+        app_exe: Option<String>,
+    },
+    /// A newer WavePlug was found (autoupdate.rs): the panel offers 「更新」. `dev`: the source
+    /// folder has new commits.
+    UpdateAvailable {
+        version: String,
+        notes: String,
+        dev: bool,
+    },
+    /// How 「更新」 is going; `done` at the end, `ok` whether it worked.
+    UpdateProgress {
+        text: String,
+        done: bool,
+        ok: bool,
     },
     /// The user did something in surface `panel`; `action` is that surface's own.
     Action {
@@ -733,9 +754,18 @@ mod tests {
             r#"{"type":"view-request","panel":"generate"}"#
         );
         assert_eq!(
-            encode(&Event::Ready { version: "0.2.0" }),
+            encode(&Event::Ready { version: "0.2.0", live_root: None, app_exe: None }),
             r#"{"type":"ready","version":"0.2.0"}"#
         );
+        assert_eq!(
+            encode(&Event::Ready { version: "0.2.0", live_root: Some("C:/W/data/plugin-live/".into()), app_exe: None }),
+            r#"{"type":"ready","version":"0.2.0","liveRoot":"C:/W/data/plugin-live/"}"#
+        );
+        assert_eq!(
+            encode(&Event::UpdateAvailable { version: "1.4.0".into(), notes: "n".into(), dev: false }),
+            r#"{"type":"update-available","version":"1.4.0","notes":"n","dev":false}"#
+        );
+        assert!(matches!(parse(r#"{"type":"update-now"}"#), Some(Command::UpdateNow)));
         assert_eq!(
             encode(&Event::ComfyStatus {
                 state: "ready".into(),

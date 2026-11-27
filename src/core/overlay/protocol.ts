@@ -45,6 +45,8 @@ export type OverlayCommand =
   | { type: "bridge"; to: "illustrator"; msg: unknown }
   /** Start the helper's exe again and quit the running copy; the ComfyUI it started keeps running. */
   | { type: "restart-helper" }
+  /** 更新提醒's 「更新」: the helper installs the update it found (native/overlay/src/autoupdate.rs) */
+  | { type: "update-now" }
   /** A normal WaveLayer row began dragging; the native surface tracks the global cursor until release. */
   | { type: "layer-drag-start"; docId: number; layers: { layerId: number; name: string }[]; totalCount: number; thumb?: string }
   /** Escape / cancellation: stop the external reference drop without changing the layer. */
@@ -170,8 +172,14 @@ export type WebDropEvent =
   | { type: "web-drop"; files: { file: string; name: string }[]; html: string; text: string; url: string; formats: string[] }
   | { type: "web-drop-leave" };
 
+export type UpdateEvent = Extract<OverlayEvent, { type: "update-available" | "update-progress" }>;
+
 export type OverlayEvent =
-  | { type: "ready"; version: string }
+  /** liveRoot: where a one-click update puts the plugin's code; appExe: the installed WavePlug.exe */
+  | { type: "ready"; version: string; liveRoot?: string; appExe?: string }
+  /** a newer WavePlug (dev: the source folder has new commits) */
+  | { type: "update-available"; version: string; notes: string; dev: boolean }
+  | { type: "update-progress"; text: string; done: boolean; ok: boolean }
   | { type: "action"; panel: string; action: unknown }
   /** Photoshop's window moved or changed size: send `show` again with the new view */
   | { type: "view-request"; panel: string }
@@ -201,7 +209,7 @@ export type OverlayEvent =
 /** The helper build this plugin's protocol needs (native/overlay/Cargo.toml). Bump both together:
  *  an older helper still connects, but e.g. can't arbitrate drag verdicts (drag_target.rs), and
  *  without this check a stale exe looks exactly like a bug in new code. */
-export const EXPECTED_HELPER_VERSION = "0.36.0";
+export const EXPECTED_HELPER_VERSION = "0.37.0";
 /** the native 编辑工作台 window (panel/shelf.rs) needs at least this helper; older: the in-panel workbench */
 export const WORKBENCH_HELPER_VERSION = "0.11.0";
 /** the 检查结果 window, panel-anchor and coloured hover-tint need at least this helper (native/overlay/HANDOFF.md 3.5b) */
@@ -293,7 +301,12 @@ export function helperOutdated(version: string | null, expected = EXPECTED_HELPE
 export function parseOverlayEvent(text: string): OverlayEvent | null {
   let m: any;
   try { m = JSON.parse(text); } catch { return null; }
-  if (m?.type === "ready" && typeof m.version === "string") return { type: "ready", version: m.version };
+  if (m?.type === "ready" && typeof m.version === "string") return {
+    type: "ready", version: m.version,
+    ...(typeof m.liveRoot === "string" ? { liveRoot: m.liveRoot } : {}), ...(typeof m.appExe === "string" ? { appExe: m.appExe } : {}),
+  };
+  if (m?.type === "update-available" && typeof m.version === "string") return { type: "update-available", version: m.version, notes: typeof m.notes === "string" ? m.notes : "", dev: m.dev === true };
+  if (m?.type === "update-progress" && typeof m.text === "string") return { type: "update-progress", text: m.text, done: m.done === true, ok: m.ok === true };
   if (m?.type === "comfy-status"
     && typeof m.state === "string"
     && ["not-configured", "path-missing", "remote", "starting", "ready", "already-running", "managed-running", "restart-required", "autostart-disabled", "external-running", "failed", "timeout"].includes(m.state)

@@ -3,9 +3,13 @@
 //   • 开发文件夹 (G:\waveplug\studio\dist\plugin, or localStorage "wp.devRoot"): when that folder is
 //     reachable and "wp.loadFrom" isn't "bundled". Every ⟳ / new build-stamp.txt reads it again,
 //     so code changes take effect without closing Photoshop or reinstalling.
+//   • 更新 (one click in the panel's update line): the newer build WavePlug put in its own folder
+//     (localStorage "wp.liveRoot", native/overlay/src/autoupdate.rs) when it is newer than the build
+//     inside the plugin and asks for the same permissions (its manifest.json, apart from the
+//     version, is the same): no reinstall into Adobe's folder, no restart of Photoshop.
 //   • the build inside the plugin (index.js / styles.css next to this file) otherwise, and whenever
 //     the development folder can't be read.
-// The build learns which one through __waveplugSource ("dev" | "bundled").
+// The build learns which one through __waveplugSource ("dev" | "live" | "bundled").
 (function () {
   "use strict";
   var DEFAULT_DEV_ROOT = "G:/waveplug/studio/dist/plugin/";
@@ -44,8 +48,9 @@
     onShow: function (cb) { listeners.push(cb); },
   };
 
-  async function readDev(name) {
-    var root = devRoot(), urls = ["file:" + root + name, "file:///" + root + name];
+  async function readDev(name) { return readAt(devRoot(), name); }
+  async function readAt(root, name) {
+    var urls = ["file:" + root + name, "file:///" + root + name];
     var last;
     for (var i = 0; i < urls.length; i++) {
       try { var f = await fs.getEntryWithUrl(urls[i]); return await f.read({ format: storage.formats.utf8 }); }
@@ -85,17 +90,52 @@
     }
   }
 
+  function liveRoot() {
+    var r = setting("wp.liveRoot");
+    if (!r) return null;
+    r = r.replace(/\\/g, "/");
+    return /\/$/.test(r) ? r : r + "/";
+  }
+  /** "1.10.2" newer than "1.9.0" */
+  function newer(a, b) {
+    var x = String(a).split("."), y = String(b).split(".");
+    for (var i = 0; i < Math.max(x.length, y.length); i++) {
+      var p = parseInt(x[i] || "0", 10) || 0, q = parseInt(y[i] || "0", 10) || 0;
+      if (p !== q) return p > q;
+    }
+    return false;
+  }
+  /** css + js of the updated build, or null (none, not newer, other permissions, unreadable) */
+  async function fromLive() {
+    var root = liveRoot();
+    if (!root || setting("wp.loadFrom") === "bundled") return null;
+    try {
+      var live = JSON.parse(await readAt(root, "manifest.json")), mine = JSON.parse(await readBundled("manifest.json"));
+      if (!newer(live.version, mine.version)) return null;
+      var same = function (m) { var c = JSON.parse(JSON.stringify(m)); delete c.version; return JSON.stringify(c); };
+      if (same(live) !== same(mine)) { console.warn("WavePlug: the updated build needs other permissions, running the installed one"); return null; }
+      return { css: await readAt(root, "styles.css"), js: await readAt(root, "index.js") };
+    } catch (e) {
+      console.warn("WavePlug: updated build unreadable", e);
+      return null;
+    }
+  }
+
   async function load() {
     try {
       if (typeof globalThis.__waveplugDispose === "function") { try { globalThis.__waveplugDispose(); } catch (e) { /* old build */ } }
       var dev = await fromDev(), source = "dev", css, js;
       if (dev && dev.js) { css = dev.css; js = dev.js; }
       else {
-        source = "bundled";
         // wanted the development folder but it isn't there (another computer, drive not mounted)
         globalThis.__waveplugDevMissing = dev && dev.error ? String(dev.error.message || dev.error) : "";
-        css = await readBundled("styles.css");
-        js = await readBundled("index.js");
+        var live = await fromLive();
+        if (live) { source = "live"; css = live.css; js = live.js; }
+        else {
+          source = "bundled";
+          css = await readBundled("styles.css");
+          js = await readBundled("index.js");
+        }
       }
       document.head.querySelectorAll("style[data-waveplug]").forEach(function (s) { s.remove(); });
       var style = document.createElement("style");

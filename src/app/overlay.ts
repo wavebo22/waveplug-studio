@@ -8,7 +8,7 @@
 
 import { onDispose } from "../ui/dom.ts";
 import { log, setLogContext } from "./log.ts";
-import { ASSIST_HELPER_VERSION, CHECK_HELPER_VERSION, REWRITE_HELPER_VERSION, EXPECTED_HELPER_VERSION, OVERLAY_URL, type ComfyManagerStatus, type ExternalDragEvent, type ExternalDragFile, HANG_SECONDS, type HangDoc, type MenuNode, type OverlayCommand, MENU_HELPER_VERSION, OPEN_APP_HELPER_VERSION, type ScreenRect, TRASH_HELPER_VERSION, WEBDROP_HELPER_VERSION, KEYS_HELPER_VERSION, STATUSBAR_HELPER_VERSION, TINT_HELPER_VERSION, type StatusBarHint, type StatusBarMode, type StatusBarPart, type WebDropEvent, helperOutdated, parseOverlayEvent } from "../core/overlay/protocol.ts";
+import { ASSIST_HELPER_VERSION, CHECK_HELPER_VERSION, REWRITE_HELPER_VERSION, EXPECTED_HELPER_VERSION, OVERLAY_URL, type ComfyManagerStatus, type ExternalDragEvent, type ExternalDragFile, HANG_SECONDS, type HangDoc, type MenuNode, type OverlayCommand, MENU_HELPER_VERSION, OPEN_APP_HELPER_VERSION, type ScreenRect, TRASH_HELPER_VERSION, WEBDROP_HELPER_VERSION, KEYS_HELPER_VERSION, STATUSBAR_HELPER_VERSION, TINT_HELPER_VERSION, type StatusBarHint, type StatusBarMode, type StatusBarPart, type UpdateEvent, type WebDropEvent, helperOutdated, parseOverlayEvent } from "../core/overlay/protocol.ts";
 import { type Hub, createHub } from "../core/overlay/hub.ts";
 
 const RETRY_MS = 3000;
@@ -89,6 +89,10 @@ export interface Overlay {
   onConnected(cb: () => void): () => void;
   onDisconnected(cb: () => void): () => void;
   onComfyStatus(cb: (status: ComfyManagerStatus) => void): () => void;
+  /** 更新提醒: what the helper found and how 「更新」 is going */
+  onUpdate(cb: (u: UpdateEvent) => void): () => void;
+  /** 「更新」: the helper installs the update it found */
+  updateNow(): void;
   /** 从网页拖入: put the helper's drop catcher over the panel's drop area (see web-catch). False
    *  when the helper isn't connected or is older than WEBDROP_HELPER_VERSION. */
   webCatch(at: { clientX: number; clientY: number; left: number; top: number; width: number; height: number; folder: string } | null): boolean;
@@ -125,6 +129,7 @@ export function connectOverlay(opts: { launch?: () => Promise<string | null>; au
   const connectionListeners = new Set<() => void>();
   const disconnectionListeners = new Set<() => void>();
   const comfyListeners = new Set<(status: ComfyManagerStatus) => void>();
+  const updateListeners = new Set<(u: UpdateEvent) => void>();
   const externalDragListeners = new Set<(event: ExternalDragEvent) => void>();
   const trashListeners = new Set<() => void>();
   const pasteListeners = new Set<() => void>();
@@ -203,11 +208,21 @@ export function connectOverlay(opts: { launch?: () => Promise<string | null>; au
       const m = parseOverlayEvent(String(e.data));
       if (m?.type === "ready") {
         helperVersion = m.version;
+        // where a one-click update puts the plugin's code, and the WavePlug.exe to start next time
+        // (plugin/loader.js and launchOverlay read them)
+        try {
+          if (m.liveRoot) localStorage.setItem("wp.liveRoot", m.liveRoot);
+          if (m.appExe) localStorage.setItem("wp.helperExe", m.appExe);
+        } catch { /* storage off */ }
         // the status bar needs to know the helper is new enough: sent once its version is known
         if (bar && barReady()) { barSent = JSON.stringify(bar); send(bar); }
         setLogContext({ 外置框架: m.version });
         log("info", "overlay ready", m.version);
         if (helperOutdated(m.version)) log("warn", "overlay helper outdated: rebuild native/overlay (build.cmd)", JSON.stringify({ running: m.version, expected: EXPECTED_HELPER_VERSION }));
+      }
+      if (m?.type === "update-available" || m?.type === "update-progress") {
+        log("info", "overlay update", JSON.stringify(m));
+        updateListeners.forEach(cb => { try { cb(m); } catch (err) { log("warn", "update listener", err); } });
       }
       if (m?.type === "comfy-status") {
         log("info", "ComfyUI manager", m.state, m.owned, m.message);
@@ -484,6 +499,11 @@ export function connectOverlay(opts: { launch?: () => Promise<string | null>; au
       comfyListeners.add(cb);
       return () => comfyListeners.delete(cb);
     },
+    onUpdate(cb) {
+      updateListeners.add(cb);
+      return () => updateListeners.delete(cb);
+    },
+    updateNow() { send({ type: "update-now" }); },
     onExternalDrag(cb) {
       externalDragListeners.add(cb);
       return () => externalDragListeners.delete(cb);

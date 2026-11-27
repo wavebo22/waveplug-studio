@@ -170,7 +170,15 @@ fn run(listener: TcpListener, on_command: fn(Command), on_disconnect: fn()) {
             if let Ok(ws) = tungstenite::accept(stream) {
                 let _ = ws.get_ref().set_nonblocking(true);
                 let mut c = Client { ws, role: None, alive: true };
-                c.put(protocol::encode(&Event::Ready { version: env!("CARGO_PKG_VERSION") }));
+                c.put(protocol::encode(&Event::Ready {
+                    version: env!("CARGO_PKG_VERSION"),
+                    live_root: crate::autoupdate::live_root().map(|p| crate::autoupdate::url_dir(&p)),
+                    app_exe: crate::autoupdate::app_exe().map(|p| p.display().to_string()),
+                }));
+                // an update found before this panel connected
+                if let Some(ev) = crate::autoupdate::found_event() {
+                    c.put(protocol::encode(&ev));
+                }
                 clients.push(c);
             }
         }
