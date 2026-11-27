@@ -32,6 +32,7 @@ import { vectorFragment } from "../core/overlay/svgFragment.ts";
 import type { Rect } from "../core/image/region.ts";
 import { type ExternalDragSession, MAX_EXTERNAL_LAYERS, beginExternalExport, capExternalLayers, externalDragKey, externalDragResultText, layersToExport, createExternalDragSession, endExternalDrag, externalDragCandidates, externalDragOver, externalDragSessionId, finishExternalExport, helperCopiedExternalFiles, helperFinishedExternalDrag, recordExportedFile, shouldPrepareExternalDrag } from "../core/overlay/externalDrag.ts";
 import { TINT_SIZE, bytesToBase64, frameKey, frameOnScreen, layerFrame, unionShapes } from "../core/overlay/hoverFrame.ts";
+import { PREVIEW_DELAY_MS, PREVIEW_PX, previewPlace } from "../core/layers/hoverPreview.ts";
 import { SEVERITY_COLOR } from "../core/overlay/checkPanel.ts";
 import { docToScreen } from "../core/overlay/protocol.ts";
 import { NATIVE_COMMANDS_KEY } from "../core/layers/nativeCommands.ts";
@@ -1285,8 +1286,61 @@ export function createLayerTreeView(tree: LayerTree, status: Status, tools?: Lay
       if (m.button === 0 && at >= 0) startDrag(l.id, m, { what: { kind: "variant", layerId: l.id, variantId: id }, row: at });
     });
     chip.addEventListener("click", e => { e.stopPropagation(); if (suppressClick) return; if (!on) void run("showVariant", [l.id], String(id)); });
+    // a bigger picture under the pointer while it rests on the chip (gone when it leaves)
+    chip.addEventListener("mouseenter", e => variantPreview.enter(id, "v" + num + (on ? "（当前）" : ""), e as MouseEvent));
+    chip.addEventListener("mousemove", e => variantPreview.move(e as MouseEvent));
+    chip.addEventListener("mouseleave", () => variantPreview.leave());
+    chip.addEventListener("mousedown", () => variantPreview.leave());
     return chip;
   }
+
+  // ── 变体栏的悬停预览: the variant's own area at PREVIEW_PX, read once per version of it ──
+  const variantPreview = (() => {
+    const pic = h("div", { class: "lt-vpreview-pic" }), cap = h("div", { class: "lt-vpreview-cap" });
+    const box = h("div", { class: "lt-vpreview" }, pic, cap);
+    setShown(box, false);
+    const cache = new Map<string, string | null>();
+    let token = 0, timer: ReturnType<typeof setTimeout> | null = null, at: { x: number; y: number } | null = null;
+    /** the pointer over the panel section, px from its top-left */
+    const where = (e: MouseEvent) => { const o = offsetIn(el, document.body ?? document.documentElement); return o ? { x: e.clientX - o.x, y: e.clientY - o.y } : null; };
+    const place = () => {
+      if (!at) return;
+      const p = previewPlace(at, { w: PREVIEW_PX + 12, h: PREVIEW_PX + 34 }, { w: el.clientWidth, h: el.clientHeight });
+      box.style.left = p.left + "px"; box.style.top = p.top + "px";
+    };
+    async function show(id: number, label: string, mine: number) {
+      const doc = docId, l = byId.get(id);
+      if (doc === null || !l) return;
+      cap.textContent = label;
+      const key = `${doc}:${id}:${thumbs().version(id)}`;
+      let url = cache.get(key);
+      replace(pic, url ? thumbImg(url) : h("div", { class: "lt-vpreview-wait" }, url === null ? "读不到预览" : "…"));
+      place(); setShown(box, true);
+      if (url !== undefined) return;
+      const bounds = { left: l.left, top: l.top, right: l.left + Math.max(1, l.width), bottom: l.top + Math.max(1, l.height) };
+      const got = await tree.thumbnails(doc, [{ id, bounds }], canvas, PREVIEW_PX).catch(() => [undefined]);
+      url = got[0];
+      if (url !== undefined) cache.set(key, url);
+      if (cache.size > 60) cache.delete(cache.keys().next().value!);
+      if (mine !== token) return;
+      replace(pic, url ? thumbImg(url) : h("div", { class: "lt-vpreview-wait" }, "读不到预览"));
+    }
+    return {
+      box,
+      enter(id: number, label: string, e: MouseEvent) {
+        const mine = ++token;
+        at = where(e);
+        if (timer) clearTimeout(timer);
+        timer = setTimeout(() => { timer = null; if (mine === token) void show(id, label, mine); }, PREVIEW_DELAY_MS);
+      },
+      move(e: MouseEvent) { at = where(e); if (isShown(box)) place(); },
+      leave() {
+        ++token; at = null;
+        if (timer) { clearTimeout(timer); timer = null; }
+        setShown(box, false);
+      },
+    };
+  })();
 
   /** the tree's connecting lines for row `index` (core/layers/guides.ts), one box per level of indent */
   function guideEl(index: number): HTMLElement {
@@ -3279,10 +3333,10 @@ export function createLayerTreeView(tree: LayerTree, status: Status, tools?: Lay
 
   // ── right-click menu, rename, toolbar ──
   const el = h("section", { class: "lt fill", tabindex: "-1" });
-  el.append(ghost);
+  el.append(ghost, variantPreview.box);
   el.addEventListener("mouseenter", () => { pointerIn = true; refocus("hover"); });
   // no drag state here: UXP fires leave/enter spuriously mid-drag; locateDrag owns the region
-  el.addEventListener("mouseleave", () => { hintOverCancel?.(); pointerIn = false; if (!drag?.active) { hintZone = "none"; hintLayer = null; updateHints(); } });
+  el.addEventListener("mouseleave", () => { variantPreview.leave(); hintOverCancel?.(); pointerIn = false; if (!drag?.active) { hintZone = "none"; hintLayer = null; updateHints(); } });
   const popup = createPopup(el);
   /** y (px from the panel section's top) just below row `idx` */
   const rowBottom = (idx: number) => list.offsetTop + yOf(idx + 1);

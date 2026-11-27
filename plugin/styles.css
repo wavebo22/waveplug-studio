@@ -1150,3 +1150,9 @@ textarea,
 .update-bar .update-text { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .update-bar.error { border-color: var(--c-err); background: var(--c-err-wash); }
 .update-bar .small-btn { flex: none; height: var(--h-s); padding: 0 var(--sp-4); }
+
+/* 变体栏的悬停预览 (layerTree.ts variantPreview): under the pointer while it rests on a variant */
+.lt-vpreview { position: absolute; z-index: 45; width: 232px; padding: 6px; border: 1px solid var(--c-line-strong); border-radius: var(--r-s); background: var(--c-surface-hi); pointer-events: none; }
+.lt-vpreview-pic { width: 220px; height: 220px; background: var(--c-field); }
+.lt-vpreview-wait { display: flex; align-items: center; justify-content: center; height: 100%; color: var(--c-text-3); font-size: var(--fs-s); }
+.lt-vpreview-cap { margin-top: 4px; font-size: var(--fs-s); color: var(--c-text-2); text-align: center; }
