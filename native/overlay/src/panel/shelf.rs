@@ -270,6 +270,7 @@ impl Shelf {
                         for i in rows {
                             let tex = self.texture(i, ui.ctx());
                             let e = self.entries[i].clone();
+                            let src = self.textures.get(&e.key).map(|(_, t)| t.size_vec2());
                             let (r, resp) = ui.allocate_exact_size(Vec2::new(w, ROW_H), Sense::click_and_drag());
                             let sel = self.selected.contains(&e.key);
                             let p = ui.painter();
@@ -282,7 +283,12 @@ impl Shelf {
                             let pic = Rect::from_min_size(Pos2::new(r.left() + 14.0, r.center().y - THUMB / 2.0), Vec2::splat(THUMB));
                             p.rect_filled(pic, CornerRadius::same(2), theme::FIELD);
                             if let Some(t) = tex {
-                                p.image(t, pic, Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0, 1.0)), dim);
+                                // the whole picture, fitted and centred (never stretched or cropped)
+                                let fit = src.filter(|s| s.x > 0.0 && s.y > 0.0).map_or(pic, |s| {
+                                    let k = (pic.width() / s.x).min(pic.height() / s.y);
+                                    Rect::from_center_size(pic.center(), s * k)
+                                });
+                                p.image(t, fit, Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0, 1.0)), dim);
                             }
                             p.rect_stroke(pic, CornerRadius::same(2), Stroke::new(1.0_f32, theme::LINE_SOFT), StrokeKind::Inside);
                             let x = name_x(pic);

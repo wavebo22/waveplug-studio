@@ -13,7 +13,7 @@ import { closeSetupPanels } from "./setupPanel.ts";
 import { createDocCheck } from "./docCheck.ts";
 import { crumb, log } from "../app/log.ts";
 import { resultText } from "../core/layers/smart.ts";
-import { ThumbCache, thumbRetryDelay } from "../core/layers/thumbs.ts";
+import { ThumbCache, thumbRetryDelay, pictureArea } from "../core/layers/thumbs.ts";
 import { activateLayerDragLifecycle, cancelLayerDragLifecycle, createLayerDragLifecycle, releaseLayerDragLifecycle, routeLayerDragRelease, updateLayerDragLifecycle, type LayerDragLifecycle, type LayerDragRegion } from "../core/layers/drag.ts";
 import { addCalibrationSample, calibrationOffset, clampDropListY, edgeScrollRate, createClientCalibration, plausibleAxisOffset, resolveDragRegion, syntheticOffset, type ClientCalibration, type DragLayout, type DragRect } from "../core/layers/dragGeometry.ts";
 import { MAX_REFERENCES } from "../core/workflow/references.ts";
@@ -372,6 +372,7 @@ export function createLayerTreeView(tree: LayerTree, status: Status, tools?: Lay
     if (board && board.width > 0 && board.height > 0) return { left: board.left, top: board.top, right: board.left + board.width, bottom: board.top + board.height };
     return { left: 0, top: 0, right: Math.max(1, canvas.width), bottom: Math.max(1, canvas.height) };
   }
+  const ownBounds = (l: TreeLayer) => l.width > 0 && l.height > 0 ? { left: l.left, top: l.top, right: l.left + l.width, bottom: l.top + l.height } : null;
   /** a thumbnail box as wide as its area's shape needs at the row's height (½ to 2 × the height) */
   function thumbW(l: TreeLayer): number {
     const a = areaOf(l), t = thumbSize.thumb;
@@ -1317,7 +1318,7 @@ export function createLayerTreeView(tree: LayerTree, status: Status, tools?: Lay
       replace(pic, url ? thumbImg(url) : h("div", { class: "lt-vpreview-wait" }, url === null ? "读不到预览" : "…"));
       place(); setShown(box, true);
       if (url !== undefined) return;
-      const bounds = { left: l.left, top: l.top, right: l.left + Math.max(1, l.width), bottom: l.top + Math.max(1, l.height) };
+      const bounds = pictureArea(ownBounds(l), areaOf(l));
       const got = await tree.thumbnails(doc, [{ id, bounds }], canvas, PREVIEW_PX).catch(() => [undefined]);
       url = got[0];
       if (url !== undefined) cache.set(key, url);
@@ -1765,9 +1766,11 @@ export function createLayerTreeView(tree: LayerTree, status: Status, tools?: Lay
     const want = thumbs().next(keys, THUMB_BATCH);
     if (!want.length) { scheduleRetry(); return; }
     const doc = docId, cache = thumbs(), byId = new Map(layers.map(l => [l.id, l]));
-    // a thumbnail shows the layer's artboard, or the canvas (core/layers/thumbs.ts thumbArea)
+    // a picture shows the layer's own content whole, a mask its artboard or the canvas (core pictureArea);
+    // the box keeps the artboard's / canvas's shape so every row lines up, the picture is fitted in it
     const items = want.filter(k => byId.has(keyLayer(k))).map(k => {
-      const bounds = areaOf(byId.get(keyLayer(k))!);
+      const l = byId.get(keyLayer(k))!, area = areaOf(l);
+      const bounds = k < 0 ? area : pictureArea(ownBounds(l), area);
       return k <= -VKEY ? { key: k, id: keyLayer(k), mask: "vector" as const, bounds } : k < 0 ? { key: k, id: -k, mask: true, bounds } : { key: k, id: k, bounds };
     });
     fetching = true;

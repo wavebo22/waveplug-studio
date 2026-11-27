@@ -1,7 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { type MenuItem, type RawLayer, ancestors, effectsOf, isVariantLayer, isCompactRow, packChips, rawProblem, buildTree, clickSelect, contentUsers, deleteTargets, nextLayerAfterDelete, planLayerDeletion, canDropToDelete, canDropMaskOnto, copyPlan, dropPlan, previewMoveTree, dropZone, filterCounts, layerMenu, layerTags, linkPeers, lockPlan, lockedByGroup, rowLockIcons, sharedColors, selectionAfterLocalClear, visibleRows } from "../src/core/layers/tree.ts";
-import { ThumbCache, frameThumb, thumbArea } from "../src/core/layers/thumbs.ts";
+import { ThumbCache, frameThumb, pictureArea, thumbArea } from "../src/core/layers/thumbs.ts";
 
 const raw = (id: number, name: string, kind: number, extra: Partial<RawLayer> = {}): RawLayer =>
   ({ id, name, kind, section: kind === 7 ? "start" : "content", visible: true, locked: false, mask: false, ...extra });
@@ -624,4 +624,16 @@ test("planLayerDeletion keeps the document's last top-level layer (a group holdi
   assert.deepEqual(two.targets, [35]);
   // children inside it can still be deleted
   assert.deepEqual(planLayerDeletion(layers, [36]).targets, [36]);
+});
+
+test("pictureArea: a picture frames the layer's own content, clipped to its artboard or canvas", () => {
+  const canvas = { left: 0, top: 0, right: 1000, bottom: 800 };
+  // a small AI fill in a corner: the picture is that area, not the whole canvas
+  assert.deepEqual(pictureArea({ left: 700, top: 500, right: 900, bottom: 700 }, canvas), { left: 700, top: 500, right: 900, bottom: 700 });
+  // partly off the canvas: only what Photoshop can read
+  assert.deepEqual(pictureArea({ left: -100, top: 600, right: 300, bottom: 1200 }, canvas), { left: 0, top: 600, right: 300, bottom: 800 });
+  // empty, unknown or wholly off the canvas: the canvas itself
+  assert.deepEqual(pictureArea(null, canvas), canvas);
+  assert.deepEqual(pictureArea({ left: 1200, top: 0, right: 1400, bottom: 100 }, canvas), canvas);
+  assert.deepEqual(pictureArea({ left: NaN, top: 0, right: 1, bottom: 1 }, canvas), canvas);
 });

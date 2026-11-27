@@ -91,3 +91,15 @@ export function thumbArea(b: Bounds, maxRatio = 4): Bounds | null {
   if (h > w * maxRatio) { const add = (h / maxRatio - w) / 2; return { left: b.left - add, right: b.right + add, top: b.top, bottom: b.bottom }; }
   return { ...b };
 }
+
+/**
+ * 缩略图统一规则: a picture shows the layer's own content whole — its bounds, clipped to `area`
+ * (its artboard or the canvas, what Photoshop can read) — fitted and centred in the box, never
+ * cropped. Nothing of it inside `area` (an empty layer, one moved off the canvas): `area` itself.
+ * Masks keep `area`: a mask is about the whole canvas, not only where the layer has pixels.
+ */
+export function pictureArea(own: Bounds | null | undefined, area: Bounds): Bounds {
+  if (!own || ![own.left, own.top, own.right, own.bottom].every(Number.isFinite)) return area;
+  const b = { left: Math.max(own.left, area.left), top: Math.max(own.top, area.top), right: Math.min(own.right, area.right), bottom: Math.min(own.bottom, area.bottom) };
+  return b.right - b.left >= 1 && b.bottom - b.top >= 1 ? b : area;
+}
