@@ -198,22 +198,27 @@ export function padBox(box: Rect, size: Size, pad = 0.15): Rect {
 
 /** Checks DeepSeek's answer: parts with a usable name and box, in its order (front to back), names
  *  made unique, at most DECOMPOSE_MAX_PARTS. `size` is the document's (the boxes are scaled to it). */
-export function parseDecomposeAnswer(value: unknown, size: Size, crop: CropOptions = {}): DecomposePlan {
+export function parseDecomposeAnswer(value: unknown, size: Size, crop: CropOptions = {}, region?: Rect): DecomposePlan {
+  // only `region` of the picture was shown: the boxes are read against it, then moved into the
+  // document (padding and crops are the document's, so they may reach outside the region)
+  const seen: Size = region ? { width: rectW(region), height: rectH(region) } : size;
+  const ox = region?.left ?? 0, oy = region?.top ?? 0;
   const list = value && typeof value === "object" ? (value as { parts?: unknown }).parts : null;
   if (!Array.isArray(list)) return { parts: [], dropped: ["DeepSeek 没有列出任何部分"] };
   const parts: DecomposePart[] = [];
   const dropped: string[] = [];
   const used = new Map<string, number>();
-  const area = size.width * size.height;
+  const area = seen.width * seen.height;
   for (const item of list) {
     const o = item && typeof item === "object" ? item as { name?: unknown; kind?: unknown; box?: unknown } : {};
     let name = typeof o.name === "string" ? o.name.replace(/\s+/g, " ").trim() : "";
     if (!name) { dropped.push("有一项没有名字"); continue; }
     if (name.length > MAX_NAME) name = name.slice(0, MAX_NAME);
-    const box = boxOf(o.box, size);
-    if (typeof box === "string") { dropped.push(`「${name}」${box}`); continue; }
+    const got = boxOf(o.box, seen);
+    if (typeof got === "string") { dropped.push(`「${name}」${got}`); continue; }
+    const box = { left: got.left + ox, top: got.top + oy, right: got.right + ox, bottom: got.bottom + oy };
     if (rectW(box) * rectH(box) < area * 0.001) { dropped.push(`「${name}」太小`); continue; }
-    if (rectW(box) >= size.width * 0.95 && rectH(box) >= size.height * 0.95) { dropped.push(`「${name}」铺满了整个画面，像是背景`); continue; }
+    if (rectW(box) >= seen.width * 0.95 && rectH(box) >= seen.height * 0.95) { dropped.push(`「${name}」铺满了整个${region ? "选区" : "画面"}，像是背景`); continue; }
     if (parts.length >= DECOMPOSE_MAX_PARTS) { dropped.push(`「${name}」超过 ${DECOMPOSE_MAX_PARTS} 个`); continue; }
     const n = (used.get(name) ?? 0) + 1;
     used.set(name, n);

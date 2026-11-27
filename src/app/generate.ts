@@ -69,14 +69,25 @@ export function sameAspect(out: { width: number; height: number }, sent: { width
  * 抠图 → removal: where the cut-out is (alpha > 16), at the size of the area it covers, grown by
  * ~1 % of that area (≥ 6 px) so the removal also takes the object's soft edge and shadow line.
  */
-export function cutoutMask(png: Uint8Array, width: number, height: number): Pixels {
+export function cutoutMask(png: Uint8Array, width: number, height: number, grow = CUTOUT_GROW): Pixels {
   const a = resizeAlpha(decodePng(png), width, height), n = width * height, solid = new Uint8Array(n);
-  for (let i = 0; i < n; i++) solid[i] = a.data[i] > 16 ? 1 : 0;
-  const grown = dilate(solid, width, height, Math.max(6, Math.round(Math.min(width, height) * 0.01)));
+  let l = width, t = height, r = -1, bt = -1;
+  for (let i = 0; i < n; i++) if (a.data[i] > 16) {
+    solid[i] = 1;
+    const x = i % width, y = (i - x) / width;
+    if (x < l) l = x; if (x > r) r = x; if (y < t) t = y; if (y > bt) bt = y;
+  }
+  // grown by a share of the object's own size: the removal must take its soft edge, outline and the
+  // shadow next to it too (1% of the crop left a ring of shadow and text outline behind, 11-27)
+  const long = r < 0 ? 0 : Math.max(r - l + 1, bt - t + 1);
+  const grown = dilate(solid, width, height, Math.max(8, Math.round(long * grow)));
   const out = new Uint8Array(n);
   for (let i = 0; i < n; i++) out[i] = grown[i] ? 255 : 0;
   return { width, height, channels: 1, data: out };
 }
+
+/** 拆图 / 补充背景: the cut-out's shape is grown by this share of its longer side (at least 8 px). */
+export const CUTOUT_GROW = 0.035;
 
 /** 抠图: context sent around the selection, in multiples of its shorter side. */
 const EXTRACT_MARGIN = 0.15;

@@ -25,11 +25,23 @@ export interface AiDecomposeDeps {
   status: Status;
   /** cuts the parts out with the 抠图 mode's workflow, back to front, one 「AI抠图 · 名字」 group each
    *  (app.ts); `report` follows its progress. Missing: no 抠图 button. */
-  cut?(docId: number, parts: readonly { name: string; box: Rect }[], report: (done: number, total: number, text: string) => void, clean: boolean): Promise<{ done: number; failed: string[]; stopped: boolean; background: string | null }>;
+  cut?(docId: number, parts: readonly { name: string; box: Rect }[], report: (done: number, total: number, text: string) => void, clean: CleanMode): Promise<{ done: number; failed: string[]; stopped: boolean; background: { done: number; total: number; failed: string[] } | null }>;
   cancelCut?(): void;
 }
 
-const DETAIL_KEY = "wp.decompose.detail", REFINE_KEY = "wp.decompose.refine", CLEAN_KEY = "wp.decompose.clean";
+const DETAIL_KEY = "wp.decompose.detail", REFINE_KEY = "wp.decompose.refine", CLEAN_KEY = "wp.decompose.clean", SCOPE_KEY = "wp.decompose.scope";
+/** 去除背景: not at all, the cut-outs' outlines grown, or each part's whole box (long shadows) */
+export type CleanMode = "off" | "contour" | "box";
+const CLEANS: [CleanMode, string, string][] = [
+  ["off", "不去除", "只抠图，不动原图"],
+  ["contour", "沿轮廓", "全部抠完后，沿每个抠出部分的轮廓向外扩一圈，用「局部重绘」的移除工作流去掉、补出背景。挨着的部分一起补，离得远的分开依次补"],
+  ["box", "整个框", "同「沿轮廓」，但每个部分的整个范围框都重画：阴影很长、或者轮廓外留下残影时用"],
+];
+type Scope = "doc" | "selection";
+const SCOPES: [Scope, string, string][] = [
+  ["doc", "整个画面", "DeepSeek 看整个画面"],
+  ["selection", "当前选区", "只看 PS 里当前选区框住的地方：东西少、占的像素多，框得更准。点列表选中范围也会改变选区，重新框选后再分析"],
+];
 const TIMEOUT_MS = 180_000;
 const DETAILS: [DecomposeDetail, string, string][] = [
   ["coarse", "粗", "只拆 2～4 个最主要的部分"],
@@ -44,6 +56,8 @@ interface Result {
   docName: string;
   size: { width: number; height: number };
   thumb: string;
+  /** what the thumbnail shows (the whole document, or the selection it was asked about) */
+  area: Rect;
   plan: DecomposePlan;
   /** what the second look couldn't do */
   notes: string[];
@@ -65,11 +79,15 @@ export function createAiDecompose(d: AiDecomposeDeps) {
   const skip = new Set<number>();
   /** 抠图 running: what it is doing */
   let cutting: string | null = null;
-  let clean = true;
-  try { clean = localStorage.getItem(CLEAN_KEY) !== "off"; } catch { /* default */ }
-  const cleanBox = h("input", { type: "checkbox", checked: clean }) as HTMLInputElement;
-  cleanBox.addEventListener("change", () => { clean = cleanBox.checked; try { localStorage.setItem(CLEAN_KEY, clean ? "on" : "off"); } catch { /* not kept */ } });
-  const cleanRow = h("label", { class: "check-row dc-refine", title: "全部抠完后，用「局部重绘」模式的移除工作流（留空提示词）把抠出的东西从原图上去掉、补出干净的背景，放在所有抠图层下面。原图层不动" }, cleanBox, h("span", null, "最后去除背景（补出干净的背景）"));
+  let clean: CleanMode = "contour";
+  try { const v = localStorage.getItem(CLEAN_KEY); clean = v === "off" ? "off" : v === "box" ? "box" : "contour"; } catch { /* default */ }
+  const cleanBtns = CLEANS.map(([k, label, tip]) => h("button", { class: "seg-btn", title: tip, onClick: () => { if (cutting) return; clean = k; try { localStorage.setItem(CLEAN_KEY, k); } catch { /* not kept */ } render(); } }, label));
+  const cleanRow = h("div", { class: "param", title: "抠完以后，要不要把抠出的东西从原图上去掉、补出干净的背景（放在所有抠图层下面，原图层不动）" },
+    h("div", { class: "param-top" }, h("span", { class: "param-label" }, "最后去除背景")),
+    h("div", { class: "seg dc-seg" }, ...cleanBtns));
+  let scope: Scope = "doc";
+  try { if (localStorage.getItem(SCOPE_KEY) === "selection") scope = "selection"; } catch { /* default */ }
+  const scopeBtns = SCOPES.map(([k, label, tip]) => h("button", { class: "seg-btn", title: tip, onClick: () => { scope = k; try { localStorage.setItem(SCOPE_KEY, k); } catch { /* not kept */ } render(); } }, label));
   let refine = false;
   // off unless ticked: on small pictures the crops show DeepSeek nothing new, it costs minutes, and
   // the boxes come out about as good (11-27 log)
@@ -87,7 +105,7 @@ export function createAiDecompose(d: AiDecomposeDeps) {
   const list = h("div", { class: "dc-list" });
   const allBtn = h("button", { class: "btn tool-btn wide", title: "在画面上选中全部部分的范围", onClick: () => void select(null, false) }, "选中全部范围");
   const dropped = h("div", { class: "muted small dc-dropped" });
-  const cutBtn = h("button", { class: "btn tool-btn wide primary", title: "用「抠图」模式当前的工作流（如心宝强化抠图），按上面勾选的部分逐个抠图：每个部分的范围当作选区，名字当作物件名。从后往前做，前面的部分最后在最上面；每个部分一个「AI抠图 · 名字」图层组；勾了「最后去除背景」时，最后再补出干净的背景", onClick: () => void cut() }, "按范围抠图");
+  const cutBtn = h("button", { class: "btn tool-btn wide primary", title: "用「抠图」模式当前的工作流（如心宝强化抠图），按上面勾选的部分逐个抠图：每个部分的范围当作选区，名字当作物件名。从后往前做，前面的部分最后在最上面；每个部分一个「AI抠图 · 名字」图层组；「最后去除背景」选了沿轮廓或整个框时，最后再补出干净的背景", onClick: () => void cut() }, "按范围抠图");
   const stopBtn = h("button", { class: "btn tool-btn wide", title: "做完当前这一个就停下，已经抠好的保留", onClick: () => { d.cancelCut?.(); cutting = "正在停止…"; render(); } }, "停止");
   const cutInfo = h("div", { class: "tool-info dc-cut-info" });
 
@@ -102,9 +120,10 @@ export function createAiDecompose(d: AiDecomposeDeps) {
     try {
       const out = await d.cut(r.docId, parts.map(p => ({ name: p.name, box: p.box })), (_done, _total, text) => { if (cutting !== "正在停止…") { cutting = text; render(); } }, clean);
       const mins = ((Date.now() - started) / 60000).toFixed(1);
+      const bg = out.background;
       const head = (out.stopped ? `已停止：抠好 ${out.done} 个` : `抠图完成：${out.done}/${parts.length} 个`)
-        + (out.background === "ok" ? "，背景已去除" : "");
-      const bgFail = out.background && out.background !== "ok" ? `去除背景失败：${out.background}` : "";
+        + (bg && bg.done ? bg.done === bg.total ? `，背景已去除（${bg.total} 块）` : `，背景去除 ${bg.done}/${bg.total} 块` : "");
+      const bgFail = bg?.failed.length ? `去除背景失败：${bg.failed.join("；")}` : "";
       const bad = out.failed.length || out.stopped || !!bgFail;
       d.status(`AI 拆层 ${head}（${mins} 分钟）` + (out.failed.length ? `，${out.failed.length} 个失败（${out.failed[0]}${out.failed.length > 1 ? " 等" : ""}）` : "") + (bgFail ? "；" + bgFail : ""), bad ? "error" : "ok");
       cutResult = [head + `，用时 ${mins} 分钟`, ...out.failed, ...(bgFail ? [bgFail] : [])].join("\n");
@@ -128,6 +147,13 @@ export function createAiDecompose(d: AiDecomposeDeps) {
     d.status("AI 拆层：DeepSeek 正在分别找图像和文字…");
     const started = Date.now();
     const size = { width: doc.width, height: doc.height };
+    let area: Rect = { left: 0, top: 0, right: doc.width, bottom: doc.height };
+    if (scope === "selection") {
+      const b = await d.host.selectionBounds(doc.id).catch(() => null);
+      if (!b || !d.host.docPixels) { busy = false; failed = "「当前选区」要先在 PS 里框一个选区"; d.status(failed, "error"); render(); return; }
+      area = { left: Math.max(0, b.left), top: Math.max(0, b.top), right: Math.min(doc.width, b.right), bottom: Math.min(doc.height, b.bottom) };
+    }
+    const whole = area.left === 0 && area.top === 0 && area.right === doc.width && area.bottom === doc.height;
     const cfg = { key: d.key(), model: DEEPSEEK_VISION_MODEL };
     let tokens = 0;
     // both looks think (DeepSeek's default). Without it the boxes come back well off, mostly up and
@@ -140,10 +166,10 @@ export function createAiDecompose(d: AiDecomposeDeps) {
     };
     try {
       // 1. the whole picture (with a grid to read positions against): what the parts are, roughly where
-      const t = visionSize(doc.width, doc.height);
+      const t = visionSize(area.right - area.left, area.bottom - area.top);
       let thumb: string, sent: string;
       if (d.host.docPixels) {
-        const px = await d.host.docPixels(doc.id, null, t.width * t.height);
+        const px = await d.host.docPixels(doc.id, whole ? null : area, t.width * t.height);
         thumb = dataUrl(px); sent = dataUrl(withGrid(px));
       } else thumb = sent = await d.host.docThumbnail(doc.id, Math.max(t.width, t.height));
       // two looks at the same time, one for the objects and graphics, one for the text
@@ -155,7 +181,7 @@ export function createAiDecompose(d: AiDecomposeDeps) {
       if (objects.status === "rejected" && text.status === "rejected") throw objects.reason;
       const value = (r: PromiseSettledResult<unknown>) => r.status === "fulfilled" ? r.value : null;
       const first = combineAnswers(value(text), value(objects));
-      let plan = parseDecomposeAnswer(first, size);
+      let plan = parseDecomposeAnswer(first, size, {}, whole ? undefined : area);
       log("info", "decompose", JSON.stringify({ doc: doc.name, size: [doc.width, doc.height], thumb: [t.width, t.height], detail, parts: plan.parts.length, dropped: plan.dropped, answer: JSON.stringify(first).slice(0, 4000) }));
       // 2. each part again in a zoomed-in crop of the full-resolution picture: a box that fits
       if (refine && plan.parts.length && d.host.docPixels) {
@@ -175,7 +201,7 @@ export function createAiDecompose(d: AiDecomposeDeps) {
         notes.push(...refined.notes);
       }
       const secs = ((Date.now() - started) / 1000).toFixed(0);
-      result = { docId: doc.id, docName: doc.name, size, thumb, plan, notes, note: `${secs} 秒` + (tokens ? ` · ${tokens} tokens` : "") };
+      result = { docId: doc.id, docName: doc.name, size, thumb, area, plan, notes, note: `${secs} 秒` + (tokens ? ` · ${tokens} tokens` : "") };
       shown = null;
       d.status(plan.parts.length ? `AI 拆层：找到 ${plan.parts.length} 个部分，点一项在画面上选中它` : "AI 拆层：DeepSeek 没有找到可以拆的部分", plan.parts.length ? "ok" : "error");
     } catch (e) {
@@ -204,32 +230,35 @@ export function createAiDecompose(d: AiDecomposeDeps) {
   }
 
   const pct = (v: number, of: number) => `${(v / of * 100).toFixed(2)}%`;
-  const boxStyle = (r: Rect, size: { width: number; height: number }, c: number) =>
-    `left:${pct(r.left, size.width)};top:${pct(r.top, size.height)};width:${pct(r.right - r.left, size.width)};height:${pct(r.bottom - r.top, size.height)};border-color:var(--lc-${c});color:var(--lc-${c})`;
+  const boxStyle = (r: Rect, a: Rect, c: number) => {
+    const w = a.right - a.left, hh = a.bottom - a.top;
+    return `left:${pct(r.left - a.left, w)};top:${pct(r.top - a.top, hh)};width:${pct(r.right - r.left, w)};height:${pct(r.bottom - r.top, hh)};border-color:var(--lc-${c});color:var(--lc-${c})`;
+  };
 
   function render() {
     detailBtns.forEach((b, i) => b.classList.toggle("on", DETAILS[i][0] === detail));
+    scopeBtns.forEach((b, i) => b.classList.toggle("on", SCOPES[i][0] === scope));
     (runBtn as any).disabled = busy;
     replace(runBtn, busy ? "分析中…" : result ? "重新分析" : "分析画面");
     const r = result;
     info.classList.toggle("err", !r && !!failed);
     replace(info, !r && failed ? failed : !r ? "DeepSeek 看画面，列出可以拆成独立图层的部分和大致范围。点一项在画面上选中它的范围；勾选的部分按范围逐个抠图，最后可以把它们从原图上去掉、补出干净的背景。"
-      : `「${r.docName}」：${r.plan.parts.length} 个部分（从前到后）· ${r.note}`);
+      : `「${r.docName}」${r.area.left || r.area.top || r.area.right !== r.size.width || r.area.bottom !== r.size.height ? "选区内" : ""}：${r.plan.parts.length} 个部分（从前到后）· ${r.note}`);
     (cutBtn as any).disabled = busy || !!cutting;
     if (!r) { replace(view); replace(list); replace(dropped); view.hidden = list.hidden = dropped.hidden = allBtn.hidden = cutBtn.hidden = stopBtn.hidden = cutInfo.hidden = cleanRow.hidden = true; return; }
     const picked = r.plan.parts.length - [...skip].filter(i => i < r.plan.parts.length).length;
     cutBtn.hidden = !d.cut || !r.plan.parts.length || !!cutting;
     cleanRow.hidden = cutBtn.hidden;
-    (cleanBox as any).disabled = !!cutting;
+    cleanBtns.forEach((b, i) => b.classList.toggle("on", CLEANS[i][0] === clean));
     replace(cutBtn, `按范围抠图（${picked} 个）`);
     stopBtn.hidden = !cutting;
     cutInfo.hidden = !cutting && !cutResult;
     replace(cutInfo, cutting ?? cutResult);
     view.hidden = false;
-    const boxes = r.plan.parts.map((p, i) => h("div", { class: "dc-box" + (shown?.i === i ? " on" : ""), style: boxStyle(p.box, r.size, i % COLORS) }, h("span", { class: "dc-num" }, String(i + 1))));
+    const boxes = r.plan.parts.map((p, i) => h("div", { class: "dc-box" + (shown?.i === i ? " on" : ""), style: boxStyle(p.box, r.area, i % COLORS) }, h("span", { class: "dc-num" }, String(i + 1))));
     const s = shown && r.plan.parts[shown.i];
     replace(view, h("img", { class: "dc-thumb", src: r.thumb }), ...boxes,
-      s ? h("div", { class: "dc-box crop", style: boxStyle(s.crop, r.size, shown!.i % COLORS) }) : null);
+      s ? h("div", { class: "dc-box crop", style: boxStyle(s.crop, r.area, shown!.i % COLORS) }) : null);
     list.hidden = !r.plan.parts.length;
     replace(list, ...r.plan.parts.map((p, i) => {
       const row = h("div", { class: "dc-row" + (shown?.i === i ? " on" : ""), title: "点一下：在画面上选中它的范围；再点一下：选中裁剪范围（送去抠图的区域）",
@@ -259,6 +288,9 @@ export function createAiDecompose(d: AiDecomposeDeps) {
   const el = h("section", { class: "card" },
     h("div", { class: "card-head" }, h("span", { class: "label" }, "AI 拆层（试验）")),
     info,
+    h("div", { class: "param", title: "DeepSeek 看哪里：整个画面，或者 PS 里当前选区框住的地方" },
+      h("div", { class: "param-top" }, h("span", { class: "param-label" }, "分析范围")),
+      h("div", { class: "seg dc-seg" }, ...scopeBtns)),
     h("div", { class: "param", title: "拆多细：越细部分越多，以后抠图花的时间也越多" },
       h("div", { class: "param-top" }, h("span", { class: "param-label" }, "拆分粒度")),
       h("div", { class: "seg dc-seg" }, ...detailBtns)),
