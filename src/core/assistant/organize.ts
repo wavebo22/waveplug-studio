@@ -161,13 +161,26 @@ export const ORGANIZE_SYSTEM = `你是 Photoshop 图层整理助手。根据图�
 3. 只改默认名、文件名这类看不出内容的名字（「图层 3」「矩形 1 拷贝」「组 2」「Layer 1」「IMG_2041.jpg」）。带 "keepName": true 的名字已经清楚，不要改；带 "nameFromText": true 的文字图层由程序用文字内容命名，不要放进 renames；带 "fixed": true 的不能改。
 4. 判断图层是什么时参考同组、相邻的文字图层内容（例如文字「立即购买」下面的圆角矩形就是「按钮-立即购买」的底板）。
 5. groups：把同一个元素或同一块区域的图层归成一组，组名也用简短中文。每组至少 2 个图层；组内图层的 parent 必须相同（没有 parent 的都算顶层），并且在列表里紧挨着，中间不能隔着别的同级图层；带 "clip": true 的剪贴图层必须和它下面紧挨着的基底图层在同一组。不要把一个 parent 下的全部图层归成一组；不要嵌套新组；artboard 和 fixed 的图层不能归组。拿不准就不归组。
-6. 推测依据：box 是 [左, 上, 宽, 高]（像素），text 是文字内容，file 是智能对象的文件名，fx 是图层样式，children 是组内图层数。你看不到图像，只能根据这些信息判断。组名同样按内容命名（「顶部导航」「商品卡片」「价格标签」）。
+6. 推测依据：box 是 [左, 上, 宽, 高]（像素），text 是文字内容，file 是智能对象的文件名，fx 是图层样式，children 是组内图层数。没有附图的图层你看不到画面，只能根据这些信息判断；附了缩略图的图层按图里画的内容命名。组名同样按内容命名（「顶部导航」「商品卡片」「价格标签」）。
 
 输出格式：{"renames":[{"id":数字,"name":"新名字"}],"groups":[{"name":"组名","ids":[数字,…]}]}`;
 
 /** The user message: canvas size, the layer lines, and the user's own wishes. */
-export function organizeUserPrompt(lines: string, opts: { width: number; height: number; renameOnly: boolean; extra: string }): string {
+/** 参考图层画面: at most this many layer pictures go with one request */
+export const ORGANIZE_MAX_PICTURES = 24;
+
+/** The layers worth a picture: in scope, a picture of their own (pixel / smart object) and a name
+ *  that says nothing (the model can rename only those), top to bottom, at most `max`. */
+export function organizeLookIds(layers: readonly TreeLayer[], scopeIds: readonly number[], max = ORGANIZE_MAX_PICTURES): { ids: number[]; more: number } {
+  const byId = byIdOf(layers), scope = new Set(scopeIds);
+  const want = layers.filter(l => scope.has(l.id) && (l.kind === "pixel" || l.kind === "smartObject") && l.width > 0 && l.height > 0
+    && renamable(byId, l) && unclearName(l.name)).map(l => l.id);
+  return { ids: want.slice(0, max), more: Math.max(0, want.length - max) };
+}
+
+export function organizeUserPrompt(lines: string, opts: { width: number; height: number; renameOnly: boolean; extra: string; pictures?: readonly number[] }): string {
   const parts = [`画布 ${Math.round(opts.width)}×${Math.round(opts.height)} 像素。图层从上到下（和 Photoshop 图层面板顺序相同），每行一个：`, lines];
+  if (opts.pictures?.length) parts.push(`附图依次是这些图层自己的缩略图（只有这个图层，不含别的图层）：${opts.pictures.map((id, i) => `第 ${i + 1} 张 = id ${id}`).join("，")}。看图判断它们画的是什么来命名（例如「商品主图」「人物」「背景纹理」「装饰线」），也可以据此判断哪些图层属于同一个元素。`);
   if (opts.renameOnly) parts.push("这次只重命名：groups 返回空数组。");
   const extra = oneLine(opts.extra);
   if (extra) parts.push(`用户的补充要求（不违反上面的规则时照做）：${extra}`);

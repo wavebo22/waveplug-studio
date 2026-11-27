@@ -490,7 +490,9 @@ async function boot() {
         return reply({ items: lines.map(l => ({ id: l.id, text: "[EN] " + l.text })) });
       }
       if (system.includes("视觉设计审稿")) return reply({ issues: [{ type: "ai_artifact", where: "右侧人物的左手", problem: "手指看起来有六根", suggestion: "重新生成这只手或局部重绘" }] });
-      const lines = String(body.messages[1].content).split("\n").filter(l => l.startsWith("{")).map(l => JSON.parse(l));
+      // with pictures (参考图层画面) the message is a list: its text part has the layer lines
+      const msg = body.messages[1].content, msgText = Array.isArray(msg) ? msg.map((x: any) => x.text ?? "").join("\n") : String(msg);
+      const lines = msgText.split("\n").filter(l => l.startsWith("{")).map(l => JSON.parse(l));
       const free = lines.filter(l => !l.fixed);
       const renames = free.filter(l => /^(图层|矩形|组|碎片|Layer)\s*\d|拷贝/.test(l.name)).slice(0, 40).map(l => ({ id: l.id, name: l.text ? String(l.text).slice(0, 8) : (l.kind === "group" ? "区块 " : "元素 ") + l.id }));
       const pair = free.filter(l => l.kind !== "artboard" && l.parent === free.find(f => f.kind !== "artboard" && f.kind !== "group")?.parent);
