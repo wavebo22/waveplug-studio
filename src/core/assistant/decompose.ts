@@ -117,6 +117,9 @@ function boxOf(v: unknown, size: Size): Rect | string {
 }
 
 export interface CropOptions {
+  /** each box grows by this share of its longer side (at least 0.8% of the picture's), so 心宝抠图
+   *  gets a little room around the part (default 0.08; 0: the model's box as it is) */
+  pad?: number;
   /** margin on each side, as a share of the box's longer side (default 0.25) */
   margin?: number;
   /** a crop is at least this many pixels wide and high, so a small part keeps some context (default 384) */
@@ -142,6 +145,16 @@ export function cropFor(box: Rect, size: Size, opts: CropOptions = {}): Rect {
   return { left, top, right, bottom };
 }
 
+/** `box` grown by `pad` of its longer side (at least 0.8% of the picture's longer side), inside the picture. */
+export function padBox(box: Rect, size: Size, pad = 0.08): Rect {
+  if (pad <= 0) return box;
+  const m = Math.round(Math.max(Math.max(rectW(box), rectH(box)) * pad, Math.max(size.width, size.height) * 0.008));
+  return {
+    left: Math.max(0, box.left - m), top: Math.max(0, box.top - m),
+    right: Math.min(size.width, box.right + m), bottom: Math.min(size.height, box.bottom + m),
+  };
+}
+
 /** Checks DeepSeek's answer: parts with a usable name and box, in its order (front to back), names
  *  made unique, at most DECOMPOSE_MAX_PARTS. `size` is the document's (the boxes are scaled to it). */
 export function parseDecomposeAnswer(value: unknown, size: Size, crop: CropOptions = {}): DecomposePlan {
@@ -165,7 +178,8 @@ export function parseDecomposeAnswer(value: unknown, size: Size, crop: CropOptio
     used.set(name, n);
     if (n > 1) name = `${name}（${n}）`;
     const kind: PartKind = o.kind === "text" ? "text" : "object";
-    parts.push({ name, kind, box, crop: cropFor(box, size, crop) });
+    const padded = padBox(box, size, crop.pad);
+    parts.push({ name, kind, box: padded, crop: cropFor(padded, size, crop) });
   }
   return { parts, dropped };
 }
@@ -207,7 +221,7 @@ export function applyRefine(parts: readonly DecomposePart[], regions: readonly R
       notes.push(`「${p.name}」${answer == null ? "细化请求失败" : item?.box === null ? "细化时没找到" : "细化没有给出范围"}，用第一次的框`);
       return { ...p, refined: false };
     }
-    const box = { left: r.left + b.left, top: r.top + b.top, right: r.left + b.right, bottom: r.top + b.bottom };
+    const box = padBox({ left: r.left + b.left, top: r.top + b.top, right: r.left + b.right, bottom: r.top + b.bottom }, size, crop.pad);
     return { ...p, box, crop: cropFor(box, size, crop), refined: true };
   });
   return { parts: out, notes };

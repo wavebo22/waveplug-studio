@@ -47,3 +47,19 @@ test("DeepSeek 看图：图片放在 user 消息的 image_url 块里，不开 JS
   assert.equal("response_format" in body, false);
   assert.deepEqual(r.value, { issues: [] });
 });
+
+test("DeepSeek：可以关掉思考模式或指定思考强度，不写就用 DeepSeek 的默认", async () => {
+  const bodies: any[] = [];
+  const f = (async (_u: string, init: RequestInit) => {
+    bodies.push(JSON.parse(String(init.body)));
+    return reply(200, { choices: [{ finish_reason: "stop", message: { content: "{}" } }] });
+  }) as unknown as typeof fetch;
+  await deepseekJson(f, { key: "k" }, { system: "", user: "", thinking: "off" });
+  await deepseekJson(f, { key: "k" }, { system: "", user: "", thinking: "low" });
+  await deepseekJson(f, { key: "k" }, { system: "", user: "" });
+  assert.deepEqual(bodies[0].thinking, { type: "disabled" });
+  assert.equal(bodies[0].reasoning_effort, undefined);
+  assert.deepEqual(bodies[1].thinking, { type: "enabled" });
+  assert.equal(bodies[1].reasoning_effort, "low");
+  assert.equal(bodies[2].thinking, undefined);
+});

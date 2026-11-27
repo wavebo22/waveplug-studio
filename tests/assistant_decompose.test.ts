@@ -28,7 +28,7 @@ test("细化：每个部分在自己的局部图里重新定位，换算回文�
     { boxes: [{ i: 1, box: [0, 0, 500, 500] }, { i: 2, box: null }] },
     null,
   ];
-  const r = applyRefine(first.parts, regions, answers, size);
+  const r = applyRefine(first.parts, regions, answers, size, { pad: 0 });
   const r0 = regions[0];
   assert.deepEqual(r.parts[0].box, { left: r0.left, top: r0.top, right: r0.left + Math.ceil((r0.right - r0.left) / 2), bottom: r0.top + Math.ceil((r0.bottom - r0.top) / 2) });
   assert.equal(r.parts[0].refined, true);
@@ -59,7 +59,7 @@ test("拆层回答：0～1000 的框换算成文档像素，保持从前到后�
   const plan = parseDecomposeAnswer({ parts: [
     { name: "红色瓶子", kind: "object", box: [100, 200, 300, 600] },
     { name: "标题文字“新品”", kind: "text", box: [500, 50, 900, 150] },
-  ] }, { width: 2000, height: 1000 });
+  ] }, { width: 2000, height: 1000 }, { pad: 0 });
   assert.deepEqual(plan.dropped, []);
   assert.deepEqual(plan.parts.map(p => p.name), ["红色瓶子", "标题文字“新品”"]);
   assert.deepEqual(plan.parts[0].box, { left: 200, top: 200, right: 600, bottom: 600 });
@@ -76,7 +76,7 @@ test("拆层回答：坏的项目被丢掉并说明原因，重名加编号，�
     { name: "背景墙", box: [0, 0, 1000, 1000] },
     { name: "瓶子", box: [300, 300, 100, 100] },
     { name: "瓶子", box: [500, 500, 700, 700] },
-  ] }, size);
+  ] }, size, { pad: 0 });
   assert.deepEqual(plan.parts.map(p => p.name), ["瓶子", "瓶子（2）"]);
   assert.deepEqual(plan.parts[0].box, { left: 100, top: 100, right: 300, bottom: 300 });
   assert.equal(plan.dropped.length, 5);
@@ -101,4 +101,12 @@ test("裁剪范围：四周留边，太小的补到最小边长，靠边时往�
   assert.deepEqual(edge, { left: 0, top: 0, right: 384, bottom: 384 });
   const huge = cropFor({ left: 0, top: 0, right: 2000, bottom: 900 }, size);
   assert.deepEqual(huge, { left: 0, top: 0, right: 2000, bottom: 1000 });
+});
+
+test("框外扩：按长边留余量，至少画面长边的 0.8%，不超出画面", () => {
+  const size = { width: 1000, height: 500 };
+  const plan = parseDecomposeAnswer({ parts: [{ name: "物件", box: [100, 200, 300, 600] }] }, size);
+  assert.deepEqual(plan.parts[0].box, { left: 84, top: 84, right: 316, bottom: 316 });
+  const edge = parseDecomposeAnswer({ parts: [{ name: "边上", box: [0, 0, 50, 50] }] }, size);
+  assert.deepEqual(edge.parts[0].box, { left: 0, top: 0, right: 58, bottom: 33 });
 });

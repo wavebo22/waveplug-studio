@@ -56,7 +56,7 @@ function dataUrl(p: Pixels): string {
 export function createAiDecompose(d: AiDecomposeDeps) {
   let detail: DecomposeDetail = "medium";
   try { const v = localStorage.getItem(DETAIL_KEY) ?? ""; if (isDecomposeDetail(v)) detail = v; } catch { /* default */ }
-  let busy = false, result: Result | null = null;
+  let busy = false, result: Result | null = null, failed = "";
   /** the part whose box (false) or crop (true) is selected now */
   let shown: { i: number; crop: boolean } | null = null;
 
@@ -74,15 +74,20 @@ export function createAiDecompose(d: AiDecomposeDeps) {
     const doc = d.host.activeDoc();
     if (!doc) { d.status("先打开一个文档", "error"); return; }
     if (!d.key().trim()) { d.status("先在 WavePlug 程序 › 功能设置 › AI 助手 里填写 DeepSeek API Key", "error"); return; }
-    busy = true; render();
+    // a new analysis replaces the last one at once: a failure never leaves another picture's boxes up
+    busy = true; result = null; shown = null; failed = ""; render();
     crumb("工具：AI 拆层 分析");
     d.status("AI 拆层：DeepSeek 正在看整个画面…");
     const started = Date.now();
     const size = { width: doc.width, height: doc.height };
     const cfg = { key: d.key(), model: DEEPSEEK_VISION_MODEL };
     let tokens = 0;
-    const ask = async (system: string, user: string, images: string[]) => {
-      const r = await withTimeout(deepseekJson(d.fetch, cfg, { system, user, images, maxTokens: 8000, temperature: 0.2 }), TIMEOUT_MS, "DeepSeek ");
+    // the first look thinks (DeepSeek's default: it counts the parts more carefully, and its reasoning
+    // takes thousands of tokens, so the limit is high); finding a named part in a crop needs no thinking
+    const ask = async (system: string, user: string, images: string[], think: boolean) => {
+      const r = await withTimeout(deepseekJson(d.fetch, cfg, think
+        ? { system, user, images, maxTokens: 32000 }
+        : { system, user, images, maxTokens: 4000, temperature: 0.2, thinking: "off" }), TIMEOUT_MS, "DeepSeek ");
       if (r.usage) tokens += r.usage.prompt + r.usage.completion;
       return r.value;
     };
@@ -94,7 +99,7 @@ export function createAiDecompose(d: AiDecomposeDeps) {
         const px = await d.host.docPixels(doc.id, null, t.width * t.height);
         thumb = dataUrl(px); sent = dataUrl(withGrid(px));
       } else thumb = sent = await d.host.docThumbnail(doc.id, Math.max(t.width, t.height));
-      const first = await ask(DECOMPOSE_SYSTEM, decomposeRequest(detail, t, hint.value), [sent]);
+      const first = await ask(DECOMPOSE_SYSTEM, decomposeRequest(detail, t, hint.value), [sent], true);
       let plan = parseDecomposeAnswer(first, size);
       log("info", "decompose", JSON.stringify({ doc: doc.name, size: [doc.width, doc.height], thumb: [t.width, t.height], detail, parts: plan.parts.length, dropped: plan.dropped, answer: JSON.stringify(first).slice(0, 3000) }));
       // 2. each part again in a zoomed-in crop of the full-resolution picture: a box that fits
@@ -107,7 +112,7 @@ export function createAiDecompose(d: AiDecomposeDeps) {
         const batches: Promise<unknown>[] = [];
         for (let i = 0; i < plan.parts.length; i += REFINE_BATCH) {
           const names = plan.parts.slice(i, i + REFINE_BATCH).map(p => p.name);
-          batches.push(ask(REFINE_SYSTEM, refineRequest(names), crops.slice(i, i + REFINE_BATCH)).catch(e => { log("warn", "decompose refine", e); return null; }));
+          batches.push(ask(REFINE_SYSTEM, refineRequest(names), crops.slice(i, i + REFINE_BATCH), false).catch(e => { log("warn", "decompose refine", e); return null; }));
         }
         const answers = await Promise.all(batches);
         log("info", "decompose refine", JSON.stringify({ regions, answers: JSON.stringify(answers).slice(0, 4000) }));
@@ -121,6 +126,7 @@ export function createAiDecompose(d: AiDecomposeDeps) {
       d.status(plan.parts.length ? `AI 拆层：找到 ${plan.parts.length} 个部分，点一项在画面上选中它` : "AI 拆层：DeepSeek 没有找到可以拆的部分", plan.parts.length ? "ok" : "error");
     } catch (e) {
       log("error", "decompose", e);
+      failed = `「${doc.name}」分析失败：${(e as Error).message ?? e}`;
       d.status(`AI 拆层失败：${(e as Error).message ?? e}`, "error");
     } finally { busy = false; render(); }
   }
@@ -152,7 +158,8 @@ export function createAiDecompose(d: AiDecomposeDeps) {
     (runBtn as any).disabled = busy;
     replace(runBtn, busy ? "分析中…" : result ? "重新分析" : "分析画面");
     const r = result;
-    replace(info, !r ? "DeepSeek 看画面，列出可以拆成独立图层的部分和大致范围。现在只做到这一步：点一项在画面上选中它的范围，检查准不准；还不会抠图。"
+    info.classList.toggle("err", !r && !!failed);
+    replace(info, !r && failed ? failed : !r ? "DeepSeek 看画面，列出可以拆成独立图层的部分和大致范围。现在只做到这一步：点一项在画面上选中它的范围，检查准不准；还不会抠图。"
       : `「${r.docName}」：${r.plan.parts.length} 个部分（从前到后）· ${r.note}`);
     if (!r) { replace(view); replace(list); replace(dropped); view.hidden = list.hidden = dropped.hidden = allBtn.hidden = true; return; }
     view.hidden = false;

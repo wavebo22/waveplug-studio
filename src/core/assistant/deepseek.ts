@@ -27,6 +27,9 @@ export interface JsonRequest {
   /** DeepSeek's JSON output mode; default on without images. With images it is left off (its docs
    *  don't say the two work together) and the JSON is read out of the answer. */
   jsonMode?: boolean;
+  /** DeepSeek's thinking mode (on by default, effort high; its reasoning counts against maxTokens):
+   *  "off" turns it off, "low" / "high" set the effort; left out: DeepSeek's default */
+  thinking?: "off" | "low" | "high";
 }
 
 /** What the request cost, for the log and the status line. */
@@ -83,6 +86,7 @@ export async function deepseekJson(
           ? [{ type: "text", text: req.user }, ...req.images.map(url => ({ type: "image_url", image_url: { url } }))]
           : req.user }],
         ...((req.jsonMode ?? !req.images?.length) ? { response_format: { type: "json_object" } } : {}),
+        ...(req.thinking === "off" ? { thinking: { type: "disabled" } } : req.thinking ? { thinking: { type: "enabled" }, reasoning_effort: req.thinking } : {}),
         temperature: req.temperature ?? 0.3,
         max_tokens: req.maxTokens ?? 8000,
         stream: false,
