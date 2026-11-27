@@ -1,7 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import {
-  DECOMPOSE_MAX_PARTS, DECOMPOSE_MAX_PIXELS, REFINE_BATCH, applyRefine, cropFor, decomposeRequest, parseDecomposeAnswer, refineRegion, refineRequest, visionSize,
+  DECOMPOSE_MAX_PARTS, DECOMPOSE_MAX_PIXELS, DECOMPOSE_SYSTEM, combineAnswers, REFINE_BATCH, applyRefine, cropFor, decomposeRequest, parseDecomposeAnswer, refineRegion, refineRequest, visionSize,
 } from "../src/core/assistant/decompose.ts";
 import { withGrid } from "../src/core/image/grid.ts";
 
@@ -48,12 +48,24 @@ test("拆层缩略图：不超过 1300×1300 像素数，保持比例，小图�
   assert.ok(t.width * t.height > DECOMPOSE_MAX_PIXELS * 0.99);
 });
 
-test("拆层请求：写明缩略图尺寸、粒度和用户补充", () => {
-  const s = decomposeRequest("coarse", { width: 1300, height: 1000 }, "  文字不用拆  ");
+test("拆层请求：两次各写明缩略图尺寸、自己那一类的粒度和用户补充", () => {
+  const s = decomposeRequest("objects", "coarse", { width: 1300, height: 1000 }, "  文字不用拆  ");
   assert.match(s, /1300×1000/);
-  assert.match(s, /2～4/);
-  assert.match(s, /用户的补充要求：文字不用拆/);
-  assert.doesNotMatch(decomposeRequest("fine", { width: 10, height: 10 }), /补充要求/);
+  assert.match(s, /1～3 个最主要的东西/);
+  assert.match(s, /补充要求（只看和图像、物件有关的部分）：文字不用拆/);
+  assert.match(decomposeRequest("text", "fine", { width: 10, height: 10 }), /5～15 块/);
+  assert.doesNotMatch(decomposeRequest("text", "fine", { width: 10, height: 10 }), /补充要求/);
+  assert.doesNotMatch(DECOMPOSE_SYSTEM.objects, /kind/);
+});
+
+test("两次的回答合起来：文字在上，物件按前后顺序在下，类型由哪一次找到决定；失败的一次跳过", () => {
+  const plan = parseDecomposeAnswer(combineAnswers(
+    { parts: [{ name: "文字“标题”", kind: "object", box: [0, 0, 500, 100] }] },
+    { parts: [{ name: "猫", box: [100, 200, 900, 900] }, { name: "气泡", box: [600, 0, 1000, 300] }] },
+  ), { width: 1000, height: 1000 });
+  assert.deepEqual(plan.parts.map(p => [p.name, p.kind]), [["文字“标题”", "text"], ["猫", "object"], ["气泡", "object"]]);
+  assert.deepEqual(combineAnswers(null, { parts: [{ name: "猫", box: [1, 1, 2, 2] }] }).parts, [{ name: "猫", box: [1, 1, 2, 2], kind: "object" }]);
+  assert.deepEqual(combineAnswers("坏了", null).parts, []);
 });
 
 test("拆层回答：0～1000 的框换算成文档像素，保持从前到后的顺序", () => {

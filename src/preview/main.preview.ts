@@ -529,11 +529,13 @@ async function boot() {
         const n = body.messages[1].content.filter((x: any) => x.type === "image_url").length;
         return reply({ boxes: Array.from({ length: n }, (_, k) => ({ i: k + 1, box: k === 1 ? null : [300, 280, 700, 720] })) });
       }
+      if (system.includes("图像拆层助手") && system.includes("只负责画面里的文字")) return reply({ parts: [
+        { name: "文字“新品上市”", box: [80, 60, 600, 180] },
+      ] });
       if (system.includes("图像拆层助手")) return reply({ parts: [
-        { name: "白色椭圆物件", kind: "object", box: [330, 300, 670, 800] },
-        { name: "标题文字“新品上市”", kind: "text", box: [80, 60, 600, 180] },
-        { name: "右下角的价格牌", kind: "object", box: [720, 680, 950, 920] },
-        { name: "背景渐变", kind: "object", box: [0, 0, 1000, 1000] },
+        { name: "白色椭圆物件", box: [330, 300, 670, 800] },
+        { name: "价格牌", box: [720, 680, 950, 920] },
+        { name: "背景渐变", box: [0, 0, 1000, 1000] },
       ] });
       if (system.includes("视觉设计审稿")) return reply({ issues: [{ type: "ai_artifact", where: "右侧人物的左手", problem: "手指看起来有六根", suggestion: "重新生成这只手或局部重绘" }] });
       // with pictures (参考图层画面) the message is a list: its text part has the layer lines

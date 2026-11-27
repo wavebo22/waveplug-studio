@@ -5,7 +5,7 @@
 
 import { DEEPSEEK_VISION_MODEL, deepseekJson } from "../core/assistant/deepseek.ts";
 import {
-  DECOMPOSE_SYSTEM, type DecomposeDetail, type DecomposePlan, REFINE_BATCH, REFINE_MAX_PIXELS, REFINE_SYSTEM, applyRefine,
+  DECOMPOSE_SYSTEM, type DecomposeDetail, type DecomposePass, type DecomposePlan, combineAnswers, REFINE_BATCH, REFINE_MAX_PIXELS, REFINE_SYSTEM, applyRefine,
   decomposeRequest, isDecomposeDetail, parseDecomposeAnswer, refineRegion, refineRequest, visionSize,
 } from "../core/assistant/decompose.ts";
 import { withGrid } from "../core/image/grid.ts";
@@ -68,7 +68,7 @@ export function createAiDecompose(d: AiDecomposeDeps) {
   const hint = h("input", { class: "field", type: "text", placeholder: "补充要求（可选），例如：文字不用拆" }) as HTMLInputElement;
   const refineBox = h("input", { type: "checkbox", checked: refine }) as HTMLInputElement;
   refineBox.addEventListener("change", () => { refine = refineBox.checked; try { localStorage.setItem(REFINE_KEY, refine ? "on" : "off"); } catch { /* not kept */ } });
-  const runBtn = h("button", { class: "btn tool-btn wide primary", title: "把画面发给 DeepSeek（deepseek-flash）：先看整个画面列出可以拆成独立图层的部分，再把每个部分放大看一次，框得更准。只分析，不改动文档", onClick: () => void run() }, "分析画面");
+  const runBtn = h("button", { class: "btn tool-btn wide primary", title: "把画面发给 DeepSeek（deepseek-flash），同时问两次：一次找图像、物件和装饰图形，一次找文字，合起来列出可以拆成独立图层的部分（文字在上）。只分析，不改动文档", onClick: () => void run() }, "分析画面");
   const info = h("div", { class: "tool-info muted" });
   const view = h("div", { class: "dc-view" });
   const list = h("div", { class: "dc-list" });
@@ -83,7 +83,7 @@ export function createAiDecompose(d: AiDecomposeDeps) {
     // a new analysis replaces the last one at once: a failure never leaves another picture's boxes up
     busy = true; result = null; shown = null; failed = ""; render();
     crumb("工具：AI 拆层 分析");
-    d.status("AI 拆层：DeepSeek 正在看整个画面…");
+    d.status("AI 拆层：DeepSeek 正在分别找图像和文字…");
     const started = Date.now();
     const size = { width: doc.width, height: doc.height };
     const cfg = { key: d.key(), model: DEEPSEEK_VISION_MODEL };
@@ -104,11 +104,18 @@ export function createAiDecompose(d: AiDecomposeDeps) {
         const px = await d.host.docPixels(doc.id, null, t.width * t.height);
         thumb = dataUrl(px); sent = dataUrl(withGrid(px));
       } else thumb = sent = await d.host.docThumbnail(doc.id, Math.max(t.width, t.height));
-      const first = await ask(DECOMPOSE_SYSTEM, decomposeRequest(detail, t, hint.value), [sent]);
+      // two looks at the same time, one for the objects and graphics, one for the text
+      const look = (pass: DecomposePass) => ask(DECOMPOSE_SYSTEM[pass], decomposeRequest(pass, detail, t, hint.value), [sent]);
+      const [objects, text] = await Promise.allSettled([look("objects"), look("text")]);
+      const notes: string[] = [];
+      for (const [r, what] of [[objects, "图像和物件"], [text, "文字"]] as const)
+        if (r.status === "rejected") { log("warn", "decompose " + what, r.reason); notes.push(`找${what}的那次请求失败（${(r.reason as Error)?.message ?? r.reason}），这次只有另一类`); }
+      if (objects.status === "rejected" && text.status === "rejected") throw objects.reason;
+      const value = (r: PromiseSettledResult<unknown>) => r.status === "fulfilled" ? r.value : null;
+      const first = combineAnswers(value(text), value(objects));
       let plan = parseDecomposeAnswer(first, size);
-      log("info", "decompose", JSON.stringify({ doc: doc.name, size: [doc.width, doc.height], thumb: [t.width, t.height], detail, parts: plan.parts.length, dropped: plan.dropped, answer: JSON.stringify(first).slice(0, 3000) }));
+      log("info", "decompose", JSON.stringify({ doc: doc.name, size: [doc.width, doc.height], thumb: [t.width, t.height], detail, parts: plan.parts.length, dropped: plan.dropped, answer: JSON.stringify(first).slice(0, 4000) }));
       // 2. each part again in a zoomed-in crop of the full-resolution picture: a box that fits
-      let notes: string[] = [];
       if (refine && plan.parts.length && d.host.docPixels) {
         d.status(`AI 拆层：找到 ${plan.parts.length} 个部分，正在放大细化每个部分的范围…`);
         const regions = plan.parts.map(p => refineRegion(p.box, size));
@@ -123,7 +130,7 @@ export function createAiDecompose(d: AiDecomposeDeps) {
         log("info", "decompose refine", JSON.stringify({ regions, answers: JSON.stringify(answers).slice(0, 4000) }));
         const refined = applyRefine(plan.parts, regions, answers, size);
         plan = { ...plan, parts: refined.parts };
-        notes = refined.notes;
+        notes.push(...refined.notes);
       }
       const secs = ((Date.now() - started) / 1000).toFixed(0);
       result = { docId: doc.id, docName: doc.name, size, thumb, plan, notes, note: `${secs} 秒` + (tokens ? ` · ${tokens} tokens` : "") };

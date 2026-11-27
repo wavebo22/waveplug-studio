@@ -13,7 +13,7 @@ export const isDecomposeDetail = (v: string): v is DecomposeDetail => v === "coa
  *  bigger thumbnail costs upload time and shows it nothing more. */
 export const DECOMPOSE_MAX_PIXELS = 1300 * 1300;
 /** More parts than this and one run takes too long (each part is one 心宝抠图 run). */
-export const DECOMPOSE_MAX_PARTS = 20;
+export const DECOMPOSE_MAX_PARTS = 30;
 /** Longest name accepted (it goes into the 心宝 prompt 「抠出【…】」). */
 const MAX_NAME = 24;
 /** Boxes are given on a 0–1000 scale of the thumbnail's width and height. */
@@ -48,30 +48,59 @@ export function visionSize(width: number, height: number): Size {
   return { width: Math.max(1, Math.floor(width * s)), height: Math.max(1, Math.floor(height * s)) };
 }
 
-const DETAIL_GUIDE: Record<DecomposeDetail, string> = {
-  coarse: "拆分粒度：粗。只拆出 2～4 个最主要的部分（主体、大的前景物件、整片标题区），小东西归到它所在或挨着的大部分里，不单独列出。",
-  medium: "拆分粒度：中。拆出 5～10 个部分：每个独立的物件、每个明显的装饰图形、每块排版上分开的文字各算一个；紧贴在一起、明显属于同一个东西的（例如瓶子和瓶盖、一行标题和它的下划线）算一个。",
-  fine: "拆分粒度：细。尽量拆细，一般 10～20 个：能单独移动的东西都单独列出，包括小装饰、小图标、logo、线框、对话气泡、每块文字（不同颜色、字号、方向或中间有空白的文字分别列出）。画面里确实没那么多东西时才可以少于 10 个。",
+/** Two looks at the picture, asked at the same time: the objects and graphics, and the text. Each
+ *  request then counts one kind of thing only — together, the text crowded the objects out and the
+ *  boxes were looser (11-27 tests). */
+export type DecomposePass = "objects" | "text";
+
+const DETAIL_GUIDE: Record<DecomposePass, Record<DecomposeDetail, string>> = {
+  objects: {
+    coarse: "拆分粒度：粗。只列 1～3 个最主要的东西（主体、大的前景物件），小东西归到它挨着的大东西里，不单独列出。",
+    medium: "拆分粒度：中。列 3～8 个：每个独立的物件、每个明显的装饰图形各算一个；紧贴在一起、明显属于同一个东西的（例如瓶子和瓶盖）算一个。",
+    fine: "拆分粒度：细。尽量拆细，一般 5～12 个：能单独移动的东西都单独列出，包括小装饰、小图标、logo 的图形部分、线框、对话气泡、箭头。画面里确实没那么多东西时才可以少列。",
+  },
+  text: {
+    coarse: "拆分粒度：粗。只列 1～3 块最主要的文字（大标题、整片主要文案），挨在一起的文字合成一块。",
+    medium: "拆分粒度：中。列 3～8 块：标题、副标题、每段文案、价格、标签各算一块；同一句话换行的几行算一块。",
+    fine: "拆分粒度：细。每一块排版上独立的文字都单独列出，一般 5～15 块：颜色、字号、方向（横排 / 竖排）不同，或者中间有明显空白的文字分开列；很小的说明文字、角标也要列。",
+  },
 };
 
-export const DECOMPOSE_SYSTEM = `你是图像拆层助手。用户要把一张平面图拆成 Photoshop 里的独立图层：每个部分会被单独抠出来、补全被挡住的部分，放到自己的图层上；背景另外处理。你的任务是列出要拆出的部分和它们的位置。只输出 JSON。
+const GRID_NOTE = "附图上叠了一层品红色的细网格线，把宽和高各分成 10 格；上边和左边的数字 1～9 是网格线的位置，表示 100～900。网格线不是画面内容，只是帮你读坐标。";
+const BOX_RULE = "box 是范围 [左, 上, 右, 下]，按附图的宽和高换算成 0～1000 的整数（0 是左边或上边，1000 是右边或下边），对照网格线读数。框要贴着边缘：左边对齐最左的一点，右边对齐最右的一点，上下也一样。";
 
-附图上叠了一层品红色的细网格线，把宽和高各分成 10 格；上边和左边的数字 1～9 是网格线的位置，表示 100～900。网格线不是画面内容，只是帮你读坐标。
+export const DECOMPOSE_SYSTEM: Record<DecomposePass, string> = {
+  objects: `你是图像拆层助手。用户要把一张平面图拆成 Photoshop 里的独立图层：每个部分会被单独抠出来、补全被挡住的部分，放到自己的图层上。这一次你只负责文字以外的东西（文字由另一位助手负责，背景另外处理）。只输出 JSON。
 
-先按下面几类逐一清点画面，不要漏：
-- 主体和物件（人物、动物、产品、家具、器物……）
-- 装饰图形（对话气泡、线框、色块、贴纸、图标、logo、印章、箭头……）
-- 文字（每一块排版上独立的文字）
+${GRID_NOTE}
+
+按下面两类逐一清点，不要漏：
+- 主体和物件：人物、动物、产品、家具、器物、植物……
+- 装饰图形：对话气泡、线框、色块、贴纸、图标、logo 的图形部分、印章、箭头、分隔线……
 
 规则：
-1. 不要列背景（天空、墙面、地面、桌面、纯色或渐变底、铺满画面的纹理等）。
-2. 名字用中文，是一个简短的名词短语（不超过 12 个字），说清它是什么，例如「奶牛头」「绿色办公椅」「白色键盘」。只有画面里有相似的东西时，才加位置或颜色区分，例如「左边的红色瓶子」「右边的红色瓶子」。不要写动作和描述句。
-3. 文字的 kind 写 "text"，名字写成「文字“……”」，引号里是文字内容（太长就写开头几个字）；其他部分 kind 写 "object"。
+1. 不要列任何文字（标题、文案、价格、logo 里的字都不要列）。
+2. 不要列背景（天空、墙面、地面、桌面、纯色或渐变底、铺满画面的纹理等）。
+3. 名字用中文，是一个简短的名词短语（不超过 12 个字），说清它是什么，例如「奶牛头」「绿色办公椅」「白色键盘」「橙色对话气泡框」。只有画面里有相似的东西时，才加位置或颜色区分。不要写动作和描述句。
 4. 按从前到后的顺序排列：挡住别人的写在前面，被挡住的写在后面。
-5. box 是这个部分完整外形的范围 [左, 上, 右, 下]，按附图的宽和高换算成 0～1000 的整数（0 是左边或上边，1000 是右边或下边），对照网格线读数。框要贴着这个部分的边缘：左边对齐它最左的一点，右边对齐最右的一点，上下也一样。被别的东西挡住的部分也估算进去。
+5. ${BOX_RULE}框住它的完整外形，被别的东西（包括文字）挡住的部分也估算进去。
 6. 看不清、太小（不到画面的百分之一）的东西不要列。
 
-输出格式：{"parts":[{"name":"名字","kind":"object","box":[左,上,右,下]}]}`;
+输出格式：{"parts":[{"name":"名字","box":[左,上,右,下]}]}`,
+  text: `你是图像拆层助手。用户要把一张平面图拆成 Photoshop 里的独立图层。这一次你只负责画面里的文字（图像和装饰由另一位助手负责）。请找出每一块文字和它的位置。只输出 JSON。
+
+${GRID_NOTE}
+
+规则：
+1. 只列文字：标题、副标题、标语、正文、价格、标签、角标、logo 里的字、画面里物件上印着的大字等。不要列图形和图像。
+2. 一块文字是排版上连在一起的一组字：同一句话换行的几行算一块；颜色、字号、方向（横排 / 竖排）不同，或中间有明显空白的，分成不同的块。
+3. 名字写成「文字“……”」，引号里是这块文字的内容（太长写开头 8 个字左右再加……）。
+4. ${BOX_RULE}框住这块文字所有笔画的外缘，包括描边、阴影、和文字连在一起的下划线或装饰符号。
+5. 按从上到下、从左到右的顺序排列。
+6. 看不清的小字不要列。
+
+输出格式：{"parts":[{"name":"文字“……”","box":[左,上,右,下]}]}`,
+};
 
 export const REFINE_SYSTEM = `你是图像定位助手。用户会给你几张从同一张大图里裁出来的局部图，每张图说明要找的是哪个东西。请在每张局部图里找到它，给出贴边的范围。只输出 JSON。
 
@@ -85,15 +114,26 @@ export const REFINE_SYSTEM = `你是图像定位助手。用户会给你几张�
 
 输出格式：{"boxes":[{"i":1,"box":[左,上,右,下]},{"i":2,"box":null}]}`;
 
-/** The user message that goes with the thumbnail. */
-export function decomposeRequest(detail: DecomposeDetail, thumb: Size, hint = ""): string {
+/** The user message that goes with the thumbnail, for one of the two looks. */
+export function decomposeRequest(pass: DecomposePass, detail: DecomposeDetail, thumb: Size, hint = ""): string {
   const parts = [
     `附图是要拆层的画面（${thumb.width}×${thumb.height} 像素，叠了读坐标用的网格线）。`,
-    DETAIL_GUIDE[detail],
+    DETAIL_GUIDE[pass][detail],
   ];
   const h = hint.replace(/\s+/g, " ").trim().slice(0, 300);
-  if (h) parts.push(`用户的补充要求：${h}`);
+  if (h) parts.push(`用户的补充要求（只看和${pass === "text" ? "文字" : "图像、物件"}有关的部分）：${h}`);
   return parts.join("\n");
+}
+
+/** The two answers as one, for parseDecomposeAnswer: the text on top (in a layout it nearly always
+ *  is), then the objects front to back; each item's kind is set by which look found it. A look that
+ *  failed is null. */
+export function combineAnswers(text: unknown, objects: unknown): { parts: unknown[] } {
+  const list = (v: unknown, kind: PartKind) => {
+    const l = v && typeof v === "object" ? (v as { parts?: unknown }).parts : null;
+    return Array.isArray(l) ? l.map(x => x && typeof x === "object" ? { ...x, kind } : x) : [];
+  };
+  return { parts: [...list(text, "text"), ...list(objects, "object")] };
 }
 
 const num = (v: unknown): number | null => typeof v === "number" && Number.isFinite(v) ? v : null;
