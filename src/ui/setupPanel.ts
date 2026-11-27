@@ -18,7 +18,7 @@ export interface SetupPanelDeps {
   view(docId: number): Promise<CanvasView | null>;
 }
 
-export interface SetupPanel { open(): void; close(): void; isOpen(): boolean; sync(): void }
+export interface SetupPanel { open(): void; close(quiet?: boolean): void; isOpen(): boolean; sync(): void }
 
 /** the settings panels: one open at a time */
 const all = new Set<SetupPanel>();
@@ -28,15 +28,17 @@ export function createSetupPanel(d: SetupPanelDeps): SetupPanel {
   const ov = d.overlay;
   const panel: SetupPanel = {
     open() {
-      for (const p of all) if (p !== panel) p.close();
+      // the others close without a corner step of their own: one step then puts this one up in
+      // their place (shown first, the old one hidden after), never hide-then-show
+      for (const p of all) if (p !== panel) p.close(true);
       open = true; openFor = d.docId();
       ov?.queueSync();
       ov?.corner.refresh();
     },
-    close() {
+    close(quiet = false) {
       if (!open) return;
       open = false;
-      ov?.corner.refresh();
+      if (!quiet) ov?.corner.refresh();
     },
     isOpen: () => open,
     sync() { if (open) ov?.queueSync(); },

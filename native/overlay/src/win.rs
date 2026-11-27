@@ -1563,6 +1563,18 @@ pub fn relayout() {
             log::line(format!("layout: generate panel to {x},{y}"));
         }
     }
+    // the corner window itself where it should be: a size / move that got lost (an async
+    // SetWindowPos overtaken by a surface switch) is put right on the next tick
+    if SHOWN.load(Ordering::SeqCst) && !PARKED.load(Ordering::SeqCst) {
+        let want = PLACED.lock().ok().and_then(|p| p.as_ref().map(|pl| (pl.at.0, pl.at.1, pl.size.0, pl.size.1)));
+        if let (Some((x, y, w, h)), Some(r)) = (want, window_rect(own_window())) {
+            let off = (r.left - x).abs().max((r.top - y).abs()).max((r.right - r.left - w).abs()).max((r.bottom - r.top - h).abs());
+            if off > 1 {
+                log::line(format!("layout: corner window was at {},{} {}x{}, put back to {x},{y} {w}x{h}", r.left, r.top, r.right - r.left, r.bottom - r.top));
+                unsafe { SetWindowPos(own_window(), null_mut(), x, y, w, h, SWP_NOZORDER | SWP_NOACTIVATE | SWP_ASYNCWINDOWPOS) };
+            }
+        }
+    }
     let generate = generate_shown_rect();
     // 3: the variant rail and the workbench end above the panel in their column
     let mut wake = false;

@@ -958,8 +958,12 @@ impl Host {
             if (open_h - self.height).abs() >= 1.0 {
                 self.height = open_h;
                 CONTENT_H.store(open_h.to_bits(), Ordering::SeqCst);
-                crate::win::fit_height(open_h);
             }
+            // every frame, not only when the height changed: a change that came while the window
+            // was between two surfaces (hidden for a moment) was skipped there and never made up,
+            // leaving the next surface at the last one's height. fit_height returns at once when
+            // the window already has this height.
+            crate::win::fit_height(open_h);
             let target = if self.collapsed { bar_h } else { open_h };
             if (target - self.vis_to).abs() >= 1.0 {
                 self.fold = (self.vis > 0.0 && crate::win::panel_on_screen()).then(|| (self.vis, target, now));
