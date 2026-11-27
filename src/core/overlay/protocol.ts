@@ -209,7 +209,7 @@ export type OverlayEvent =
 /** The helper build this plugin's protocol needs (native/overlay/Cargo.toml). Bump both together:
  *  an older helper still connects, but e.g. can't arbitrate drag verdicts (drag_target.rs), and
  *  without this check a stale exe looks exactly like a bug in new code. */
-export const EXPECTED_HELPER_VERSION = "0.38.0";
+export const EXPECTED_HELPER_VERSION = "0.38.1";
 /** the native 编辑工作台 window (panel/shelf.rs) needs at least this helper; older: the in-panel workbench */
 export const WORKBENCH_HELPER_VERSION = "0.11.0";
 /** the 检查结果 window, panel-anchor and coloured hover-tint need at least this helper (native/overlay/HANDOFF.md 3.5b) */

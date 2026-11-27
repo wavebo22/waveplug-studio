@@ -12,6 +12,8 @@ use crate::panel::Surface;
 pub const CHECK_ID: &str = "check-setup";
 pub const ORGANIZE_ID: &str = "organize-setup";
 pub const REWRITE_ID: &str = "rewrite-setup";
+/// a row's height (title bar, the start button's row)
+const ROW_H: f32 = 28.0;
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum Field {
@@ -84,10 +86,12 @@ impl Surface for SetupSurface {
 
     fn ui(&mut self, ui: &mut egui::Ui) -> Vec<Value> {
         let mut out = Vec::new();
-        // title · ×
-        ui.horizontal(|ui| {
+        // title · ×. Rows get a fixed height: a right-to-left layout takes all the height it is
+        // given, and this window grows to its content — together they grew without end.
+        let w = ui.available_width();
+        ui.allocate_ui_with_layout(Vec2::new(w, ROW_H), egui::Layout::left_to_right(egui::Align::Center), |ui| {
             ui.label(RichText::new(&self.title).font(theme::font_bold(theme::FS_L)).color(theme::TEXT));
-            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            ui.allocate_ui_with_layout(Vec2::new(ui.available_width(), ROW_H), egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 if ui.add(egui::Button::new(RichText::new("×").font(theme::font(theme::FS_L))).frame(false)).on_hover_text("关闭（不开始）").clicked() {
                     out.push(json!({ "kind": "close" }));
                 }
@@ -149,7 +153,7 @@ impl Surface for SetupSurface {
             ui.add(egui::Label::new(RichText::new(&self.note).font(theme::font(theme::FS_S)).color(if self.start.is_empty() { theme::WARN } else { theme::TEXT_3 })).wrap());
             ui.add_space(4.0);
         }
-        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+        ui.allocate_ui_with_layout(Vec2::new(ui.available_width(), ROW_H + 4.0), egui::Layout::right_to_left(egui::Align::Center), |ui| {
             let label = if self.start.is_empty() { "开始" } else { self.start.as_str() };
             let b = egui::Button::new(RichText::new(label).font(theme::font_bold(theme::FS)).color(theme::ACCENT_INK)).fill(theme::ACCENT).min_size(Vec2::new(96.0, 28.0));
             if ui.add_enabled(!self.start.is_empty(), b).clicked() {
@@ -184,5 +188,35 @@ mod tests {
         assert!(matches!(&p.fields[2], Field::Toggle { value: true, disabled: false, .. }));
         assert_eq!(p.id(), CHECK_ID);
         assert!(p.keep_expanded());
+    }
+
+    /// The content's height doesn't depend on the room it is given (the window grows to its
+    /// content: a row that took all the height made it grow without end).
+    #[test]
+    fn content_height_does_not_follow_the_window() {
+        let height_in = |screen_h: f32| {
+            let mut p = SetupSurface::new(CHECK_ID);
+            let form = json!({ "form": { "title": "文档检查", "scope": "整个文档", "start": "开始检查", "note": "至少勾选一项",
+                "fields": [{ "key": "a", "kind": "toggle", "label": "字体", "value": true }, { "key": "t", "kind": "text", "label": "补充", "value": "" }] } });
+            p.apply(form.as_object().unwrap());
+            let ctx = egui::Context::default();
+            theme::install(&ctx);
+            let mut h = 0.0;
+            for _ in 0..3 {
+                let input = egui::RawInput { screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, Vec2::new(340.0, screen_h))), ..Default::default() };
+                let _ = ctx.run(input, |ctx| {
+                    egui::CentralPanel::default().show(ctx, |ui| {
+                        let out = egui::ScrollArea::vertical().auto_shrink([false, false]).enable_scrolling(false).show(ui, |ui| {
+                            p.ui(ui);
+                        });
+                        h = out.content_size.y;
+                    });
+                });
+            }
+            h
+        };
+        let (small, big) = (height_in(400.0), height_in(3000.0));
+        assert!(small > 50.0, "{small}");
+        assert!((small - big).abs() < 1.0, "content {small} in a 400 px window but {big} in a 3000 px one");
     }
 }
