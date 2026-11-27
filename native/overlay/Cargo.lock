@@ -2302,7 +2302,7 @@ dependencies = [
 
 [[package]]
 name = "waveplug-overlay"
-version = "0.38.4"
+version = "0.38.5"
 dependencies = [
  "data-encoding",
  "eframe",

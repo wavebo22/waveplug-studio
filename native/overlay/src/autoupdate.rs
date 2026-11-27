@@ -158,17 +158,25 @@ pub fn update_now() {
 fn update_dev() -> Result<String, String> {
     let dir = dev_dir().ok_or("没有源码文件夹")?;
     progress("正在取最新代码并构建（改了 WavePlug 程序时要编译几分钟）…", false, false);
-    let last = Mutex::new(String::new());
-    let code = sys::run_stream("node", &["scripts/update.mjs"], &dir, &|l: String| {
-        let t = l.trim().to_string();
-        if t.starts_with('[') || t.contains("[OK]") || t.contains("[失败]") {
-            progress(t.clone(), false, false);
-        }
-        if !t.is_empty() {
-            *last.lock().unwrap() = t;
-        }
-    })?;
-    if code == 0 { Ok("已更新到最新代码：面板会自动载入新版本".into()) } else { Err(last.into_inner().unwrap_or_default()) }
+    // Its output goes to a file, not a pipe to this program: update.mjs compiles this program
+    // midway and this copy then restarts into the new exe — a pipe would close under node, whose
+    // next line would kill it before the plugin is built. The new copy and the panel take over
+    // (the panel counts the reconnect as the update done).
+    let logs = dir.join("reports");
+    let _ = std::fs::create_dir_all(&logs);
+    let file = std::fs::File::create(logs.join("update.log")).map_err(|e| format!("写不了 update.log：{e}"))?;
+    let mut cmd = std::process::Command::new("node");
+    cmd.args(["scripts/update.mjs"]).current_dir(&dir).stdin(std::process::Stdio::null())
+        .stdout(file.try_clone().map_err(|e| e.to_string())?).stderr(file);
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        cmd.creation_flags(0x0800_0000); // CREATE_NO_WINDOW
+    }
+    let status = cmd.status().map_err(|e| format!("node 没能运行：{e}"))?;
+    let tail = std::fs::read_to_string(logs.join("update.log")).unwrap_or_default();
+    let last = tail.lines().rev().map(str::trim).find(|l| !l.is_empty()).unwrap_or("").to_string();
+    if status.success() { Ok("已更新到最新代码：面板会自动载入新版本".into()) } else { Err(format!("{last}（详情在 reports\\update.log）")) }
 }
 
 fn update_release(l: update::Latest) -> Result<String, String> {
@@ -181,6 +189,13 @@ fn update_release(l: update::Latest) -> Result<String, String> {
     let bytes = std::fs::read(&file).map_err(|e| e.to_string())?;
     let archive = payload::split(&bytes).ok_or("下载的文件不是 WavePlug 安装包")?;
     let p = payload::Payload::parse(archive)?;
+    // The installed plugin's loader must know the update folder (plugin/loader.js, wp.liveRoot):
+    // an older one would keep running its own old code next to the new program. Then this once
+    // the installer does it (Photoshop has to be closed for the plugin); after that, one click.
+    if !loader_reads_live() {
+        sys::launch(&file, &["--update", &dir.display().to_string()])?;
+        return Ok(format!("这次需要完整安装一次：已打开 {} 的安装程序，按提示关闭 Photoshop 后完成；以后的更新点一下就好", l.version));
+    }
     progress("正在安装…", false, false);
     let mut notes = Vec::new();
     // 1. the plugin's code, where the loader picks it up (no reinstall, no administrator prompt)
@@ -211,6 +226,13 @@ fn update_release(l: update::Latest) -> Result<String, String> {
         });
     }
     Ok(format!("已更新到 {}{}", l.version, if notes.is_empty() { String::new() } else { format!("（{}）", notes.join("；")) }))
+}
+
+/// Whether the installed Photoshop plugin's loader runs the code a one-click update puts in place.
+fn loader_reads_live() -> bool {
+    install::installed_plugin_dir()
+        .and_then(|d| std::fs::read_to_string(d.join("loader.js")).ok())
+        .is_some_and(|js| js.contains("wp.liveRoot"))
 }
 
 fn same_file(a: &Path, b: &Path) -> bool {

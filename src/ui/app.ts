@@ -1104,6 +1104,7 @@ export function mountApp(root: HTMLElement, svc: Services) {
         };
       },
       where: () => ({ docId: doc?.id ?? null, sel }),
+      running: () => !!run,
       pluginMode: () => mode,
       panelMode: () => shownPanelMode(mode, settings.panelMode),
       canvasView: id => svc.host.canvasView?.(id) ?? Promise.resolve(null),

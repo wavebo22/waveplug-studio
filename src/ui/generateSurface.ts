@@ -20,6 +20,8 @@ export interface GeneratePage {
   sections(): GenerateSections;
   /** the active document and its selection (null when none) */
   where(): { docId: number | null; sel: Rect | null };
+  /** a generation is running */
+  running(): boolean;
   canvasView(docId: number): Promise<CanvasView | null>;
   /** the plugin's current mode, and the one the panel shows (shownPanelMode) */
   pluginMode(): string;
@@ -53,7 +55,7 @@ export function attachGenerateSurface(overlay: Overlay, page: GeneratePage) {
    *  view even when the selection is dropped meanwhile). No document: never. */
   const wish = (): Wish => {
     const { docId, sel } = page.where();
-    return { docId, wanted: docId !== null && (sel !== null || !!page.sections().run) };
+    return { docId, wanted: docId !== null && (sel !== null || page.running()) };
   };
   corner.claim(GENERATE_PANEL, GENERATE_PRIORITY, wish, docId => page.canvasView(docId));
 
