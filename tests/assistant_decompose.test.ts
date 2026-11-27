@@ -4,6 +4,7 @@ import {
   DECOMPOSE_MAX_PARTS, DECOMPOSE_MAX_PIXELS, DECOMPOSE_SYSTEM, combineAnswers, REFINE_BATCH, applyRefine, cropFor, decomposeRequest, parseDecomposeAnswer, refineRegion, refineRequest, visionSize,
 } from "../src/core/assistant/decompose.ts";
 import { withGrid } from "../src/core/image/grid.ts";
+import { mergeMasks } from "../src/core/image/compose.ts";
 
 test("坐标网格：画在副本上，线在每十分之一处，原图不变", () => {
   const p = { width: 200, height: 100, channels: 3 as const, data: new Uint8Array(200 * 100 * 3).fill(0) };
@@ -134,4 +135,12 @@ test("细化：新框和第一次的框完全不重叠时，保留第一次的�
   assert.match(far.notes[0], /差得太远/);
   const near = applyRefine(first.parts, [region], [{ boxes: [{ i: 1, box: [120, 90, 210, 190] }] }], size, { pad: 0 });
   assert.deepEqual(near.parts[0].box, { left: 100, top: 90, right: 210, bottom: 200 });
+});
+
+test("合并蒙版：几个部分的轮廓合成一个，范围包住全部，重叠处取较大值", () => {
+  const m = (v: number) => ({ width: 2, height: 2, channels: 1 as const, data: new Uint8Array(4).fill(v) });
+  const r = mergeMasks([{ pixels: m(255), rect: { left: 10, top: 10, right: 12, bottom: 12 } }, { pixels: m(100), rect: { left: 11, top: 11, right: 13, bottom: 13 } }])!;
+  assert.deepEqual(r.rect, { left: 10, top: 10, right: 13, bottom: 13 });
+  assert.deepEqual(Array.from(r.pixels.data), [255, 255, 0, 255, 255, 100, 0, 100, 100]);
+  assert.equal(mergeMasks([]), null);
 });

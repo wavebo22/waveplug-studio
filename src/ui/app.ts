@@ -24,7 +24,7 @@ import { crumb, diagnosticReport, log, withTimeout } from "../app/log.ts";
 import { openCalibration } from "./calibrate.ts";
 import { every, h, icon, listen, replace } from "./dom.ts";
 import { encodePng } from "../core/image/png.ts";
-import { downscale, onWhite } from "../core/image/compose.ts";
+import { downscale, mergeMasks, onWhite } from "../core/image/compose.ts";
 import { BLEND_PREFIX, EXPAND_PREFIX, EXTRACT_PREFIX, FILL_PREFIX, GENERATE_PREFIX, UPSCALE_PREFIX } from "../ps/host.ts";
 import { RATIOS, createExpandEditor } from "./expandEditor.ts";
 import { createToolsView } from "./tools.ts";
@@ -267,7 +267,7 @@ export function mountApp(root: HTMLElement, svc: Services) {
   // AI 拆层（试验）: first card of the 工具 page, when DeepSeek can be reached (aiDecompose.ts)
   if (svc.aiFetch) {
     const decompose = createAiDecompose({ host: svc.host, fetch: svc.aiFetch, key: () => settings.deepseekKey ?? "", status: (text, kind) => setStatus(text, kind),
-      cut: (docId, parts, report) => decomposeCut(docId, parts, report), cancelCut: () => void cancel() });
+      cut: (docId, parts, report, clean) => decomposeCut(docId, parts, report, clean), cancelCut: () => void cancel() });
     toolsView.el.insertBefore(decompose.el, toolsView.el.children[1] ?? null);
   }
   const viewBtns = ([["generate", "生成"], ["tools", "工具"]] as const).map(([v, label]) =>
@@ -2028,7 +2028,7 @@ export function mountApp(root: HTMLElement, svc: Services) {
    *  selection and its name for the 物件名; the back parts first, so the front ones end up on top.
    *  Each part becomes its own 「AI抠图 · 名字」 group; a part that fails is reported and the rest go on.
    *  Uses `run`, so the generate page can't start meanwhile, and 取消 (cancel) stops it. */
-  async function decomposeCut(docId: number, parts: readonly { name: string; box: Rect }[], report: (done: number, total: number, text: string) => void): Promise<{ done: number; failed: string[]; stopped: boolean }> {
+  async function decomposeCut(docId: number, parts: readonly { name: string; box: Rect }[], report: (done: number, total: number, text: string) => void, clean: boolean): Promise<{ done: number; failed: string[]; stopped: boolean; background: string | null }> {
     if (run) throw new Error("正在生成，等它结束再拆层");
     const rp = pickFor("extract");
     if (!rp) throw new Error("先在「抠图」模式导入抠图工作流（如心宝强化抠图）");
@@ -2039,11 +2039,17 @@ export function mountApp(root: HTMLElement, svc: Services) {
     if (svc.host.activeDoc()?.id !== docId) throw new Error("拆层的文档不是当前文档：先切回那个文档");
     const err = await syncProfile(rp);
     if (err) throw new Error(err);
+    // the last step's workflow is checked first: finding out after ten cut-outs is too late
+    const bp = clean ? pickFor("inpaint") : null;
+    if (clean && !bp) throw new Error("要去除背景，先在「局部重绘」模式导入移除工作流（留空提示词 = 移除）；或者取消勾选「最后去除背景」");
+    if (bp && !bp.options.allowEmptyPrompt) throw new Error(`「局部重绘」当前的工作流「${bp.name}」不支持留空移除，换成移除工作流，或者取消勾选「最后去除背景」`);
     const rps = store.state(rp.id);
     const current = { stage: "AI 拆层准备中…", progress: null as number | null, detail: "", promptId: undefined as string | undefined, signal: { aborted: false } };
     run = current; stash = null; renderAll();
     const failed: string[] = [];
-    let done = 0;
+    let done = 0, background: string | null = null;
+    /** what was cut out, in the order made (back to front): the background goes below the first */
+    const cuts: { group: FillGroup; cutout: NonNullable<RunResult["cutout"]> }[] = [];
     crumb(`AI 拆层：抠图 ${parts.length} 个`);
     try {
       for (let k = parts.length - 1; k >= 0; k--) {
@@ -2054,7 +2060,7 @@ export function mountApp(root: HTMLElement, svc: Services) {
         try {
           if (svc.host.activeDoc()?.id !== docId) throw new Error("拆层的文档不再是当前文档，已停止");
           const w = part.box.right - part.box.left, h = part.box.bottom - part.box.top;
-          await runInpaint(svc.host, comfy, {
+          const res = await runInpaint(svc.host, comfy, {
             profile: rp, prompt: part.name, seed: null, params: effectiveParams(rp, rps), loras: rps.loras, references: {}, count: 1,
             keepDetail: rps.keepDetail !== false,
             selectionMask: { pixels: { width: w, height: h, channels: 1, data: new Uint8Array(w * h).fill(255) }, rect: part.box },
@@ -2066,6 +2072,7 @@ export function mountApp(root: HTMLElement, svc: Services) {
             debug: settings.debugFiles ? svc.debugSave : undefined,
           });
           done++;
+          if (res.group && res.cutout) cuts.push({ group: res.group, cutout: res.cutout });
           log("info", "decompose cut", JSON.stringify({ part: part.name, box: part.box }));
         } catch (e) {
           if (current.signal.aborted) break;
@@ -2074,7 +2081,37 @@ export function mountApp(root: HTMLElement, svc: Services) {
           if (svc.host.activeDoc()?.id !== docId) break;
         }
       }
-      return { done, failed, stopped: current.signal.aborted };
+      // last: everything cut out is removed from the original in one 局部重绘 run (empty prompt), the
+      // cut-outs hidden while it reads; the clean background goes below all of them
+      if (bp && cuts.length && !current.signal.aborted && svc.host.activeDoc()?.id === docId) {
+        const mask = mergeMasks(cuts.map(c => c.cutout))!;
+        const tag = "去除背景";
+        report(done, parts.length, tag);
+        try {
+          const bps = store.state(bp.id);
+          const berr = await syncProfile(bp);
+          if (berr) throw new Error(berr);
+          const res = await runInpaint(svc.host, comfy, {
+            profile: bp, prompt: "", seed: null, params: effectiveParams(bp, bps), loras: bps.loras, references: {}, count: 1,
+            selectionMask: mask, hide: cuts.map(c => c.group),
+          }, {
+            signal: current.signal,
+            stage: t => { current.stage = tag + " · " + t; current.detail = ""; report(done, parts.length, current.stage); renderAction(); },
+            progress: (f, t) => { current.progress = f; current.detail = t ?? ""; renderAction(); },
+            promptQueued: id => { current.promptId = id; },
+            debug: settings.debugFiles ? svc.debugSave : undefined,
+          });
+          if (!res.group) throw new Error("局部重绘没有返回结果图层");
+          await svc.host.placeBelow(docId, res.group.layerId, cuts[0].group.layerId);
+          log("info", "decompose background", JSON.stringify({ group: res.group.layerId, rect: mask.rect, parts: cuts.length }));
+          background = "ok";
+        } catch (e) {
+          log("error", "decompose background failed", e);
+          if (e instanceof StashedResult) stash = e.png;
+          background = current.signal.aborted ? "已停止" : (e as Error).message ?? String(e);
+        }
+      }
+      return { done, failed, stopped: current.signal.aborted, background };
     } finally {
       if (run === current) run = null;
       renderAll();

@@ -484,13 +484,14 @@ export class UxpHost implements PsHost {
     });
   }
 
-  async capture(docId: number, rect: Rect, selection: "active" | Pixels, hide?: FillGroup): Promise<Capture> {
-    // reading happens with the fill group hidden, so variations are always made from the original
+  async capture(docId: number, rect: Rect, selection: "active" | Pixels, hide?: FillGroup | readonly FillGroup[]): Promise<Capture> {
+    // reading happens with the fill group(s) hidden, so variations are always made from the original
     return step("WavePlug 读取画面", docId, async () => {
       const doc = docById(docId);
-      const group = hide ? findLayer(doc.layers, hide.layerId) : null;
-      const wasVisible = group?.visible;
-      if (group) group.visible = false;
+      const groups = (hide ? (Array.isArray(hide) ? hide : [hide]) as readonly FillGroup[] : [])
+        .map(g => findLayer(doc.layers, g.layerId)).filter(Boolean);
+      const was = groups.map(g => g.visible);
+      for (const g of groups) g.visible = false;
       try {
         const image = await readPixels({ documentID: docId, sourceBounds: rect });
         if (image.width !== rectW(rect) || image.height !== rectH(rect)) throw new Error(`读取到的画面 ${image.width}×${image.height} 与范围不一致`);
@@ -499,7 +500,7 @@ export class UxpHost implements PsHost {
         else sel = selection;
         return { doc: info(doc), rect, image, selection: sel };
       } finally {
-        if (group) group.visible = wasVisible;
+        groups.forEach((g, i) => { g.visible = was[i]; });
       }
     });
   }

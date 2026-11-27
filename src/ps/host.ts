@@ -104,8 +104,8 @@ export interface PsHost {
   refreshFillGroup(g: FillGroup): Promise<FillGroup>;
   /** The group's own mask over its rect (used when adding variations without a new selection). */
   groupMask(g: FillGroup): Promise<Pixels>;
-  /** Reads composite pixels of `rect`; `hide` (a fill group) is hidden while reading. */
-  capture(docId: number, rect: Rect, selection: "active" | Pixels, hide?: FillGroup): Promise<Capture>;
+  /** Reads composite pixels of `rect`; `hide` (fill groups) is hidden while reading. */
+  capture(docId: number, rect: Rect, selection: "active" | Pixels, hide?: FillGroup | readonly FillGroup[]): Promise<Capture>;
   listLayers(docId: number): LayerInfo[];
   /** Pixels of a layer (RGBA when it has transparency), long edge capped at `maxEdge`. */
   layerPixels(docId: number, layerId: number, maxEdge?: number): Promise<Pixels>;

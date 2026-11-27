@@ -325,3 +325,19 @@ export function transferDetailWhereSame(result: Pixels, original: Pixels, sigma:
   }
   return { width: w, height: h, channels: 3, data: out };
 }
+
+/** One gray mask covering several (each over its own rect, in document pixels): the union, over the
+ *  rect bounding them all (AI 拆层 removes every cut-out from the original in one run). */
+export function mergeMasks(masks: readonly { pixels: Pixels; rect: Rect }[]): { pixels: Pixels; rect: Rect } | null {
+  if (!masks.length) return null;
+  const rect = masks.reduce<Rect>((a, m) => ({ left: Math.min(a.left, m.rect.left), top: Math.min(a.top, m.rect.top), right: Math.max(a.right, m.rect.right), bottom: Math.max(a.bottom, m.rect.bottom) }), masks[0].rect);
+  const w = rect.right - rect.left, h = rect.bottom - rect.top, out = new Uint8Array(w * h);
+  for (const m of masks) {
+    const mw = m.pixels.width, ox = m.rect.left - rect.left, oy = m.rect.top - rect.top;
+    for (let y = 0; y < m.pixels.height; y++) {
+      const row = (y + oy) * w + ox;
+      for (let x = 0; x < mw; x++) { const v = m.pixels.data[y * mw + x]; if (v > out[row + x]) out[row + x] = v; }
+    }
+  }
+  return { pixels: { width: w, height: h, channels: 1, data: out }, rect };
+}

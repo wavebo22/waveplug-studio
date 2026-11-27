@@ -52,7 +52,7 @@ export interface RunInput {
   /** use this mask (255 = repaint, covering `rect`) instead of Photoshop's selection */
   selectionMask?: { pixels: Pixels; rect: Rect };
   /** hide this fill while reading the canvas (e.g. a cut-out lying over what is being removed) */
-  hide?: FillGroup;
+  hide?: FillGroup | readonly FillGroup[];
 }
 
 /**
