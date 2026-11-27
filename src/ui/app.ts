@@ -266,7 +266,8 @@ export function mountApp(root: HTMLElement, svc: Services) {
   const toolsView = createToolsView(svc.tools, (text, kind) => setStatus(text, kind));
   // AI 拆层（试验）: first card of the 工具 page, when DeepSeek can be reached (aiDecompose.ts)
   if (svc.aiFetch) {
-    const decompose = createAiDecompose({ host: svc.host, fetch: svc.aiFetch, key: () => settings.deepseekKey ?? "", status: (text, kind) => setStatus(text, kind) });
+    const decompose = createAiDecompose({ host: svc.host, fetch: svc.aiFetch, key: () => settings.deepseekKey ?? "", status: (text, kind) => setStatus(text, kind),
+      cut: (docId, parts, report) => decomposeCut(docId, parts, report), cancelCut: () => void cancel() });
     toolsView.el.insertBefore(decompose.el, toolsView.el.children[1] ?? null);
   }
   const viewBtns = ([["generate", "生成"], ["tools", "工具"]] as const).map(([v, label]) =>
@@ -2023,6 +2024,63 @@ export function mountApp(root: HTMLElement, svc: Services) {
     }
   }
 
+  /** AI 拆层: each part cut out by the 抠图 mode's workflow (心宝抠图), its box standing in for the
+   *  selection and its name for the 物件名; the back parts first, so the front ones end up on top.
+   *  Each part becomes its own 「AI抠图 · 名字」 group; a part that fails is reported and the rest go on.
+   *  Uses `run`, so the generate page can't start meanwhile, and 取消 (cancel) stops it. */
+  async function decomposeCut(docId: number, parts: readonly { name: string; box: Rect }[], report: (done: number, total: number, text: string) => void): Promise<{ done: number; failed: string[]; stopped: boolean }> {
+    if (run) throw new Error("正在生成，等它结束再拆层");
+    const rp = pickFor("extract");
+    if (!rp) throw new Error("先在「抠图」模式导入抠图工作流（如心宝强化抠图）");
+    const problems = validateProfile(rp);
+    if (problems.length) throw new Error("抠图工作流需要校准：" + problems[0]);
+    await checkConn();
+    if (conn.state !== "ok") throw new Error("未连接 ComfyUI");
+    if (svc.host.activeDoc()?.id !== docId) throw new Error("拆层的文档不是当前文档：先切回那个文档");
+    const err = await syncProfile(rp);
+    if (err) throw new Error(err);
+    const rps = store.state(rp.id);
+    const current = { stage: "AI 拆层准备中…", progress: null as number | null, detail: "", promptId: undefined as string | undefined, signal: { aborted: false } };
+    run = current; stash = null; renderAll();
+    const failed: string[] = [];
+    let done = 0;
+    crumb(`AI 拆层：抠图 ${parts.length} 个`);
+    try {
+      for (let k = parts.length - 1; k >= 0; k--) {
+        if (current.signal.aborted) break;
+        const part = parts[k], n = parts.length - k;
+        const tag = `抠图 ${n}/${parts.length}「${part.name}」`;
+        report(done, parts.length, tag);
+        try {
+          if (svc.host.activeDoc()?.id !== docId) throw new Error("拆层的文档不再是当前文档，已停止");
+          const w = part.box.right - part.box.left, h = part.box.bottom - part.box.top;
+          await runInpaint(svc.host, comfy, {
+            profile: rp, prompt: part.name, seed: null, params: effectiveParams(rp, rps), loras: rps.loras, references: {}, count: 1,
+            keepDetail: rps.keepDetail !== false,
+            selectionMask: { pixels: { width: w, height: h, channels: 1, data: new Uint8Array(w * h).fill(255) }, rect: part.box },
+          }, {
+            signal: current.signal,
+            stage: t => { current.stage = tag + " · " + t; current.detail = ""; report(done, parts.length, current.stage); renderAction(); },
+            progress: (f, t) => { current.progress = f; current.detail = t ?? ""; renderAction(); },
+            promptQueued: id => { current.promptId = id; },
+            debug: settings.debugFiles ? svc.debugSave : undefined,
+          });
+          done++;
+          log("info", "decompose cut", JSON.stringify({ part: part.name, box: part.box }));
+        } catch (e) {
+          if (current.signal.aborted) break;
+          log("error", "decompose cut failed", part.name, e);
+          failed.push(`「${part.name}」：${(e as Error).message ?? e}`);
+          if (svc.host.activeDoc()?.id !== docId) break;
+        }
+      }
+      return { done, failed, stopped: current.signal.aborted };
+    } finally {
+      if (run === current) run = null;
+      renderAll();
+      await refresh();
+    }
+  }
   async function cancel() {
     if (!run) return;
     run.signal.aborted = true;

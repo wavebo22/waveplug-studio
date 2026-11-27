@@ -486,6 +486,8 @@ button, .ub { font: inherit; color: inherit; background: none; border: 0; paddin
 .dc-dropped { line-height: 1.5; white-space: pre-line; }
 .tool-info.err { color: var(--c-err); }
 .dc-refine { min-height: var(--h-m); margin: 0 0 var(--sp-4); }
+.dc-row input { flex: none; margin: 0 var(--sp-3) 0 0; }
+.dc-cut-info { white-space: pre-line; }
 .slim-item { padding: var(--sp-3) 0; border-bottom: 1px solid var(--c-line-soft); }
 .slim-item:last-child { border-bottom: none; }
 .slim-head { display: flex; align-items: center; }
