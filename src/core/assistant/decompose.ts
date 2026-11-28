@@ -378,10 +378,13 @@ export const ALIGNED_PAD = 0.02;
 export const ALIGNED_OBJECT_PAD = 0.04;
 
 /** The plan with its parts aligned against `m`, an ink map of `area` of the document scaled by
- *  `scale` (ink-map pixels per document pixel): the text first, then the graphics with the placed
+ *  `scale` (ink-map pixels per document pixel), the graphics against `objects` when given (the
+ *  分区图's, core/image/qwenMaps.ts): the text first, then the graphics with the placed
  *  text's ink taken away (so the illustration's box doesn't take in the title). An aligned graphic
  *  keeps a margin (ALIGNED_OBJECT_PAD): faint parts of it (steam, a soft shadow) aren't ink. */
-export function alignTextParts(plan: DecomposePlan, m: InkMap, area: Rect, scale: number, size: Size, crop: CropOptions = {}): DecomposePlan {
+export function alignTextParts(plan: DecomposePlan, m: InkMap, area: Rect, scale: number, size: Size, crop: CropOptions = {}, objects?: InkMap): DecomposePlan {
+  // with the 分区图 the text map is clean: its lines are the candidates
+  const units = !!objects;
   const toImg = (r: Rect): Rect => ({ left: (r.left - area.left) * scale, top: (r.top - area.top) * scale, right: (r.right - area.left) * scale, bottom: (r.bottom - area.top) * scale });
   const toDoc = (r: Rect): Rect => ({
     left: Math.max(0, Math.floor(r.left / scale + area.left)), top: Math.max(0, Math.floor(r.top / scale + area.top)),
@@ -391,7 +394,7 @@ export function alignTextParts(plan: DecomposePlan, m: InkMap, area: Rect, scale
   const run = (kind: PartKind, map: InkMap, pad: number | undefined) => {
     const list = parts.map((p, i) => ({ p, i })).filter(x => x.p.kind === kind);
     if (!list.length) return [];
-    const got = alignTextBoxes(map, list.map(x => toImg(x.p.raw)));
+    const got = alignTextBoxes(map, list.map(x => toImg(x.p.raw)), { units: units && kind === "text", chars: list.map(x => expectedChars(x.p.name)) });
     const placed: Rect[] = [];
     list.forEach(({ p, i }, k) => {
       const a = got[k];
@@ -404,8 +407,24 @@ export function alignTextParts(plan: DecomposePlan, m: InkMap, area: Rect, scale
     return placed;
   };
   const texts = run("text", m, ALIGNED_PAD);
-  run("object", texts.length ? withoutInk(m, texts) : m, ALIGNED_OBJECT_PAD);
+  const om = objects ?? m;
+  run("object", texts.length ? withoutInk(om, texts) : om, ALIGNED_OBJECT_PAD);
   return { ...plan, parts };
+}
+
+/** How many characters a text part's name says it has (CJK 1, digits / Latin / ¥ about half, the
+ *  punctuation a little); null when unknown (no quoted text, or cut short with 「……」). */
+export function expectedChars(name: string): number | null {
+  const m = /^文字[“"「](.*)[”"」]$/.exec(name.trim());
+  if (!m || /…|\.\.\./.test(m[1])) return null;
+  let n = 0;
+  for (const ch of m[1]) {
+    if (/\s/.test(ch)) continue;
+    if (/[\u3400-\u9fff\uf900-\ufaff]/.test(ch)) n += 1;
+    else if (/[0-9A-Za-z¥$€£%]/.test(ch)) n += 0.55;
+    else n += 0.4;
+  }
+  return n >= 1 ? n : null;
 }
 
 /** The part with its box set by hand (a selection in Photoshop): taken as it is, a small margin. */

@@ -53,6 +53,8 @@ export interface RunInput {
   selectionMask?: { pixels: Pixels; rect: Rect };
   /** hide this fill while reading the canvas (e.g. a cut-out lying over what is being removed) */
   hide?: FillGroup | readonly FillGroup[];
+  /** AI 拆层 · 分区图: return the first result (`output`) instead of writing it into Photoshop */
+  resultOnly?: boolean;
 }
 
 /**
@@ -95,6 +97,8 @@ export interface RunResult {
   upscaled?: number; failed?: string[];
   /** 抠图: the cut-out's shape (255 = object, grown a little) over `rect`, for removing it from the original */
   cutout?: { pixels: Pixels; rect: Rect };
+  /** RunInput.resultOnly: the workflow's picture (PNG), which covers `rect` of the document */
+  output?: { png: Uint8Array; rect: Rect };
 }
 
 /** A finished result that could not be written back (document closed, group deleted …). */
@@ -311,6 +315,7 @@ export async function runInpaint(host: PsHost, comfy: Comfy, input: RunInput, ho
       log("info", "blend keep detail", `sigma ${sigma.toFixed(1)}`);
     }
     check();
+    if (input.resultOnly) return { variations: [], seeds: [run.seed], continued: false, output: { png, rect: sendRect } };
 
     // ── 4. write back to the snapshot's document ──
     hooks.stage("写入 Photoshop" + tag);

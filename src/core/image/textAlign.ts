@@ -99,18 +99,34 @@ export function inkMap(p: Pixels): InkMap {
     for (let yy = Math.max(0, y - 1); yy <= Math.min(h - 1, y + 1); yy++) for (let xx = Math.max(0, x - 1); xx <= Math.min(w - 1, x + 1); xx++) n += raw[yy * w + xx];
     if (n >= 3) ink[y * w + x] = 1;
   }
+  return finishInk(w, h, ink);
+}
+
+/** An ink map from a ready mask (1: ink): long straight thin lines taken out, summed. */
+export function finishInk(w: number, h: number, ink: Uint8Array): InkMap {
+  const W1 = w + 1;
   // long straight thin lines (a rule beside vertical text, a frame) are not text: a box that fits
   // the text has them right on its edge
   const L = Math.max(40, Math.round(0.15 * Math.max(w, h)));
   const drop: number[] = [];
+  // thin: a few pixels to either side, mostly no ink along it (not the inside of a filled shape)
+  const at = (x: number, y: number) => x >= 0 && y >= 0 && x < w && y < h ? ink[y * w + x] : 0;
   for (let x = 0; x < w; x++) for (let y = 0, run = 0; y <= h; y++) {
     if (y < h && ink[y * w + x]) { run++; continue; }
-    if (run >= L) for (let k = y - run; k < y; k++) drop.push(k * w + x);
+    if (run >= L) {
+      let side = 0;
+      for (let k = y - run; k < y; k++) side += at(x - 4, k) + at(x + 4, k);
+      if (side < 0.6 * run) for (let k = y - run; k < y; k++) drop.push(k * w + x);
+    }
     run = 0;
   }
   for (let y = 0; y < h; y++) for (let x = 0, run = 0; x <= w; x++) {
     if (x < w && ink[y * w + x]) { run++; continue; }
-    if (run >= L) for (let k = x - run; k < x; k++) drop.push(y * w + k);
+    if (run >= L) {
+      let side = 0;
+      for (let k = x - run; k < x; k++) side += at(k, y - 4) + at(k, y + 4);
+      if (side < 0.6 * run) for (let k = x - run; k < x; k++) drop.push(y * w + k);
+    }
     run = 0;
   }
   for (const i of drop) ink[i] = 0;
@@ -384,22 +400,183 @@ export function withoutInk(m: InkMap, rects: readonly Rect[]): InkMap {
 /** DeepSeek's text boxes (in the ink map's pixels) moved onto the text they name: once, then the
  *  unsure ones again with the ink of the placed ones taken away (「3-4人套餐」 touches 「¥138」: with
  *  the price there, no box around the words has a clean edge). */
-export function alignTextBoxes(m: InkMap, boxes: readonly Rect[]): AlignedBox[] {
-  const first = alignOnce(m, boxes, []);
+export function alignTextBoxes(m: InkMap, boxes: readonly Rect[], opts: { units?: boolean; chars?: readonly (number | null)[] } = {}): AlignedBox[] {
+  const gen = (map: InkMap) => {
+    if (!opts.units) return (b: Rect) => candidates(map, b).map((c, k) => k === 0 && c.score >= KEEP ? { ...c, fit: c.fit + KEEP_BONUS } : c);
+    const units = textUnits(map);
+    return (b: Rect, i: number) => unitCandidates(map, units, b, opts.chars?.[i] ?? null);
+  };
+  const first = alignOnce(m, boxes, [], gen(m));
   const placed = first.filter(a => a.ok).map(a => a.box);
-  if (placed.length === boxes.length || !placed.length) return first;
-  const again = alignOnce(withoutInk(m, placed), boxes, first.map(a => a.ok ? a.box : null));
-  return first.map((a, i) => a.ok ? a : again[i]);
+  let out = first;
+  if (placed.length && placed.length < boxes.length) {
+    const rest = withoutInk(m, placed);
+    const again = alignOnce(rest, boxes, first.map(a => a.ok ? a.box : null), gen(rest));
+    out = first.map((a, i) => a.ok ? a : again[i]);
+  }
+  if (opts.units) out = absorb(m, out);
+  return out;
+}
+
+/** Text lines nobody took that lie mostly inside a placed box join it (the bottom 「茶」 of a title
+ *  whose box DeepSeek drew a little short), and so do those just past its end along its line (the
+ *  thin 「一」 on top of 「一炉烟火」, a list's bullet). */
+function absorb(m: InkMap, got: AlignedBox[]): AlignedBox[] {
+  const out = got.map(a => ({ ...a }));
+  const along = (u: Rect, b: Rect) => {
+    const bw = b.right - b.left, bh = b.bottom - b.top;
+    if (bh > bw) { // a column: just above or below, mostly within its width
+      const ov = Math.min(u.right, b.right) - Math.max(u.left, b.left), gap = Math.max(u.top - b.bottom, b.top - u.bottom);
+      return ov >= 0.5 * (u.right - u.left) && gap <= 1.2 * bw && u.right - u.left <= 1.3 * bw ? 1 : 0;
+    }
+    // sideways: the box may be several lines, so the gap is measured against the piece's own size
+    const ov = Math.min(u.bottom, b.bottom) - Math.max(u.top, b.top), gap = Math.max(u.left - b.right, b.left - u.right);
+    const cs = Math.min(u.right - u.left, u.bottom - u.top);
+    return ov >= 0.5 * (u.bottom - u.top) && gap <= 1.5 * cs + 2 && u.bottom - u.top <= 1.3 * bh ? 1 : 0;
+  };
+  for (const u of textUnits(m)) {
+    if (out.some(a => a.ok && coverOf(u, a.box) >= 0.9)) continue;
+    let best = -1, bestCover = 0.3;
+    out.forEach((a, k) => { if (!a.ok) return; const c = Math.max(coverOf(u, a.box), along(u, a.box) * 0.31); if (c > bestCover) { bestCover = c; best = k; } });
+    if (best < 0) continue;
+    const b = out[best].box;
+    out[best].box = { left: Math.min(b.left, u.left), top: Math.min(b.top, u.top), right: Math.max(b.right, u.right), bottom: Math.max(b.bottom, u.bottom) };
+  }
+  return out;
+}
+/** the share of `u` that `b` covers */
+const coverOf = (u: Rect, b: Rect) => {
+  const iw = Math.min(u.right, b.right) - Math.max(u.left, b.left), ih = Math.min(u.bottom, b.bottom) - Math.max(u.top, b.top);
+  return iw <= 0 || ih <= 0 ? 0 : iw * ih / Math.max(1, (u.right - u.left) * (u.bottom - u.top));
+};
+
+/** what a block's character count differing from the one its name implies costs, per e-fold */
+const CHARS = 0.15;
+
+// ── 文字块: on a clean text mask (the 分区图's magenta), the text cut into lines and blocks ──
+
+/** The text lines in a clean mask: glyph pieces joined into glyphs, glyphs into lines — sideways
+ *  when a glyph has a neighbour of about its size on the same line, else down (a vertical column). */
+export function textUnits(m: InkMap): Rect[] {
+  const { width: w, height: h, ink } = m;
+  const label = new Int32Array(w * h).fill(-1), parent: number[] = [];
+  const find = (a: number): number => { while (parent[a] !== a) { parent[a] = parent[parent[a]]; a = parent[a]; } return a; };
+  for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) {
+    const i = y * w + x;
+    if (!ink[i]) continue;
+    const ns = [x > 0 ? label[i - 1] : -1, y > 0 ? label[i - w] : -1, y > 0 && x > 0 ? label[i - w - 1] : -1, y > 0 && x < w - 1 ? label[i - w + 1] : -1].filter(v => v >= 0);
+    if (!ns.length) { label[i] = parent.length; parent.push(parent.length); continue; }
+    const r = find(ns[0]); label[i] = r;
+    for (const v of ns) { const q = find(v); if (q !== r) parent[q] = r; }
+  }
+  const boxes = new Map<number, Rect & { n: number }>();
+  for (let i = 0; i < w * h; i++) {
+    if (label[i] < 0) continue;
+    const r = find(label[i]), x = i % w, y = (i / w) | 0;
+    const b = boxes.get(r);
+    if (!b) boxes.set(r, { left: x, top: y, right: x + 1, bottom: y + 1, n: 1 });
+    else { b.left = Math.min(b.left, x); b.top = Math.min(b.top, y); b.right = Math.max(b.right, x + 1); b.bottom = Math.max(b.bottom, y + 1); b.n++; }
+  }
+  // pieces of one glyph (a radical, a dot): boxes overlapping (characters 1–2 px apart stay apart)
+  let glyphs: Rect[] = [...boxes.values()].filter(b => b.n >= 6 && (b.right - b.left >= 2 || b.bottom - b.top >= 2)).map(({ n, ...r }) => r);
+  const near = (a: Rect, b: Rect, g: number) => a.left - g < b.right && b.left - g < a.right && a.top - g < b.bottom && b.top - g < a.bottom;
+  for (let again = true; again;) {
+    again = false;
+    for (let i = 0; i < glyphs.length && !again; i++) for (let j = i + 1; j < glyphs.length; j++) {
+      if (!near(glyphs[i], glyphs[j], 0)) continue;
+      const a = glyphs[i], b = glyphs[j];
+      glyphs[i] = { left: Math.min(a.left, b.left), top: Math.min(a.top, b.top), right: Math.max(a.right, b.right), bottom: Math.max(a.bottom, b.bottom) };
+      glyphs.splice(j, 1); again = true; break;
+    }
+  }
+  const gw = (r: Rect) => r.right - r.left, gh = (r: Rect) => r.bottom - r.top;
+  const ov = (a0: number, a1: number, b0: number, b1: number) => Math.min(a1, b1) - Math.max(a0, b0);
+  // a "glyph" may be a few characters run together (2 px apart): its character size is its shorter side
+  const cs = (r: Rect) => Math.min(gw(r), gh(r));
+  const sideways = (a: Rect, b: Rect) => ov(a.top, a.bottom, b.top, b.bottom) >= 0.5 * Math.min(gh(a), gh(b))
+    && Math.max(a.left, b.left) - Math.min(a.right, b.right) <= 0.8 * Math.max(cs(a), cs(b))
+    && Math.max(gh(a), gh(b)) <= 1.6 * Math.min(gh(a), gh(b));
+  const down = (a: Rect, b: Rect) => ov(a.left, a.right, b.left, b.right) >= 0.5 * Math.min(gw(a), gw(b))
+    && Math.max(a.top, b.top) - Math.min(a.bottom, b.bottom) <= 0.6 * Math.max(cs(a), cs(b))
+    && Math.max(gw(a), gw(b)) <= 1.6 * Math.min(gw(a), gw(b));
+  const n = glyphs.length, up = Array.from({ length: n }, (_, i) => i);
+  const root = (a: number): number => { while (up[a] !== a) { up[a] = up[up[a]]; a = up[a]; } return a; };
+  const join = (a: number, b: number) => { const x = root(a), y = root(b); if (x !== y) up[y] = x; };
+  // each glyph reads the way its nearest neighbour lies (relative to its size): sideways in a line
+  // of text, down in a column — two columns side by side are not rows, a list's lines not a column
+  const hGap = new Array(n).fill(Infinity), vGap = new Array(n).fill(Infinity);
+  for (let i = 0; i < n; i++) for (let j = 0; j < n; j++) {
+    if (i === j) continue;
+    const a = glyphs[i], b = glyphs[j];
+    if (sideways(a, b)) hGap[i] = Math.min(hGap[i], Math.max(0, Math.max(a.left, b.left) - Math.min(a.right, b.right)) / Math.max(cs(a), cs(b)));
+    if (down(a, b)) vGap[i] = Math.min(vGap[i], Math.max(0, Math.max(a.top, b.top) - Math.min(a.bottom, b.bottom)) / Math.max(cs(a), cs(b)));
+  }
+  const dir = glyphs.map((_, i) => hGap[i] === Infinity && vGap[i] === Infinity ? "" : hGap[i] <= vGap[i] ? "h" : "v");
+  for (let i = 0; i < n; i++) for (let j = i + 1; j < n; j++) {
+    if (dir[i] === "h" && dir[j] === "h" && sideways(glyphs[i], glyphs[j])) join(i, j);
+    else if (dir[i] === "v" && dir[j] === "v" && down(glyphs[i], glyphs[j])) join(i, j);
+  }
+  const lines = new Map<number, Rect>();
+  glyphs.forEach((g, i) => {
+    const r = root(i), b = lines.get(r);
+    lines.set(r, b ? { left: Math.min(b.left, g.left), top: Math.min(b.top, g.top), right: Math.max(b.right, g.right), bottom: Math.max(b.bottom, g.bottom) } : { ...g });
+  });
+  return [...lines.values()];
+}
+
+/** Places for `box` made of whole text lines near it: a line, a line with its neighbours on the
+ *  same row, lines stacked below one another (a list, a two-line title); sized about like `box`. */
+function unitCandidates(m: InkMap, units: readonly Rect[], box: Rect, chars: number | null): Candidate[] {
+  const H = m.height, W = m.width;
+  const cx = (box.left + box.right) / 2, cy = (box.top + box.bottom) / 2, bw = box.right - box.left, bh = box.bottom - box.top;
+  const win = units.filter(u => Math.abs((u.top + u.bottom) / 2 - cy) <= 0.12 * H + bh / 2 && Math.abs((u.left + u.right) / 2 - cx) <= 0.08 * W + bw / 2);
+  const union = (a: Rect, b: Rect): Rect => ({ left: Math.min(a.left, b.left), top: Math.min(a.top, b.top), right: Math.max(a.right, b.right), bottom: Math.max(a.bottom, b.bottom) });
+  const hgt = (r: Rect) => r.bottom - r.top, wid = (r: Rect) => r.right - r.left;
+  // about how many characters a line holds: its long side over its short side
+  const est = (u: Rect) => Math.max(wid(u), hgt(u)) / Math.max(1, Math.min(wid(u), hgt(u)));
+  const out: { r: Rect; n: number }[] = [];
+  for (const u of win) {
+    out.push({ r: u, n: est(u) });
+    // on along the row
+    let row = u, n = est(u);
+    for (let k = 0; k < 4; k++) {
+      const next = win.filter(v => v.left >= row.right && v.left - row.right <= 1.2 * Math.max(hgt(row), hgt(v)) && Math.min(v.bottom, row.bottom) - Math.max(v.top, row.top) >= 0.4 * Math.min(hgt(v), hgt(row)))
+        .sort((a, b) => a.left - b.left)[0];
+      if (!next) break;
+      row = union(row, next); n += est(next); out.push({ r: row, n });
+    }
+    // on down the stack (and across, for vertical columns side by side)
+    let col = u; n = est(u);
+    for (let k = 0; k < 5; k++) {
+      const next = win.filter(v => v.top >= col.bottom - 1 && v.top - col.bottom <= 1.5 * hgt(u) && Math.min(v.right, col.right) - Math.max(v.left, col.left) >= 0.3 * Math.min(wid(v), wid(col)))
+        .sort((a, b) => a.top - b.top)[0];
+      if (!next) break;
+      col = union(col, next); n += est(next); out.push({ r: col, n });
+    }
+  }
+  const seen = new Set<string>();
+  const res: Candidate[] = [];
+  for (const { r, n } of out) {
+    const key = `${r.left},${r.top},${r.right},${r.bottom}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    const fw = wid(r) / Math.max(1, bw), fh = hgt(r) / Math.max(1, bh);
+    if (fw < 0.35 || fw > 3 || fh < 0.35 || fh > 3) continue;
+    const score = blockScore(m, r).score;
+    const charCost = chars ? CHARS * Math.abs(Math.log(Math.max(0.5, n) / chars)) : 0;
+    res.push({ box: r, dx: (r.left + r.right) / 2 - cx, dy: (r.top + r.bottom) / 2 - cy, score, fit: fitOf(r, box, Math.max(score, 0.3)) - charCost });
+  }
+  return res.sort((a, b) => b.fit - a.fit).slice(0, 16);
 }
 
 /** One pass; `fixed[i]`: box i is already placed there. */
-function alignOnce(m: InkMap, boxes: readonly Rect[], fixed: readonly (Rect | null)[]): AlignedBox[] {
+function alignOnce(m: InkMap, boxes: readonly Rect[], fixed: readonly (Rect | null)[], gen: (b: Rect, i: number) => Candidate[]): AlignedBox[] {
   const cands = boxes.map((b, i) => {
     const f = fixed[i];
     if (f) { const c = { left: (b.left + b.right) / 2, top: (b.top + b.bottom) / 2 }; return [{ box: f, dx: (f.left + f.right) / 2 - c.left, dy: (f.top + f.bottom) / 2 - c.top, score: 0.3, fit: 0.3 }]; }
-    // where DeepSeek put it, snapped, fitting well: a little extra (not a lock — a drifted box may
-    // hold the line next to its own, 「水果拼盘」's box the line 「精选茶饮」)
-    return candidates(m, b).map((c, k) => k === 0 && c.score >= KEEP ? { ...c, fit: c.fit + KEEP_BONUS } : c);
+    // (sliding mode) where DeepSeek put it, snapped, fitting well, gets a little extra: not a lock —
+    // a drifted box may hold the line next to its own, 「水果拼盘」's box the line 「精选茶饮」
+    return gen(b, i);
   });
   const n = boxes.length, H = m.height, W = m.width;
   const centre = boxes.map(b => ({ x: (b.left + b.right) / 2, y: (b.top + b.bottom) / 2 }));

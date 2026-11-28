@@ -29,6 +29,9 @@ import { BLEND_PREFIX, EXPAND_PREFIX, EXTRACT_PREFIX, FILL_PREFIX, GENERATE_PREF
 import { RATIOS, createExpandEditor } from "./expandEditor.ts";
 import { createToolsView } from "./tools.ts";
 import { createAiDecompose } from "./aiDecompose.ts";
+import { QWEN_BLACK_PROMPT, QWEN_TEXT_PROMPT, fitToArea } from "../core/image/qwenMaps.ts";
+import { decodePng } from "../core/image/decode.ts";
+import type { Pixels } from "../core/image/png.ts";
 import { type Overlay, connectOverlay } from "../app/overlay.ts";
 import { type GenerateSections, type PanelMode, type PanelParam, isPanelMode, shownPanelMode } from "../core/overlay/generatePanel.ts";
 import { OPEN_APP_HELPER_VERSION, appSettingsOf, hangDocs, redactSettings } from "../core/overlay/protocol.ts";
@@ -267,7 +270,8 @@ export function mountApp(root: HTMLElement, svc: Services) {
   // AI 拆层（试验）: first card of the 工具 page, when DeepSeek can be reached (aiDecompose.ts)
   if (svc.aiFetch) {
     const decompose = createAiDecompose({ host: svc.host, fetch: svc.aiFetch, key: () => settings.deepseekKey ?? "", status: (text, kind) => setStatus(text, kind),
-      cut: (docId, parts, report, clean) => decomposeCut(docId, parts, report, clean), cancelCut: () => void cancel() });
+      cut: (docId, parts, report, clean) => decomposeCut(docId, parts, report, clean), cancelCut: () => void cancel(),
+      maps: (docId, area, size, report) => decomposeMaps(docId, area, size, report) });
     toolsView.el.insertBefore(decompose.el, toolsView.el.children[1] ?? null);
   }
   const viewBtns = ([["generate", "生成"], ["tools", "工具"]] as const).map(([v, label]) =>
@@ -2158,6 +2162,49 @@ export function mountApp(root: HTMLElement, svc: Services) {
       if (run === current) run = null;
       renderAll();
       await refresh();
+    }
+  }
+
+  /** AI 拆层 · 分区图: the 局部重绘 workflow over `area`, once with each prompt (core/image/qwenMaps.ts),
+   *  nothing written into Photoshop; the two pictures as `area` at `size`. Uses `run` (the generate
+   *  page can't start meanwhile, 取消 stops it). */
+  async function decomposeMaps(docId: number, area: Rect, size: { width: number; height: number }, report: (text: string) => void): Promise<{ magenta: Pixels; black: Pixels | null }> {
+    if (run) throw new Error("正在生成，等它结束再分析");
+    const bp = pickFor("inpaint");
+    if (!bp) throw new Error("分区图要用「局部重绘」模式的工作流：先导入一个");
+    const problems = validateProfile(bp);
+    if (problems.length) throw new Error("局部重绘工作流需要校准：" + problems[0]);
+    await checkConn();
+    if (conn.state !== "ok") throw new Error("未连接 ComfyUI");
+    if (svc.host.activeDoc()?.id !== docId) throw new Error("分析的文档不是当前文档");
+    const err = await syncProfile(bp);
+    if (err) throw new Error(err);
+    const bps = store.state(bp.id);
+    const current = { stage: "AI 拆层 · 分区图…", progress: null as number | null, detail: "", promptId: undefined as string | undefined, signal: { aborted: false } };
+    run = current; stash = null; renderAll();
+    const w = area.right - area.left, h = area.bottom - area.top;
+    const one = async (prompt: string, tag: string): Promise<Pixels> => {
+      const res = await runInpaint(svc.host, comfy, {
+        profile: bp, prompt, seed: null, params: effectiveParams(bp, bps), loras: bps.loras, references: {}, count: 1, resultOnly: true,
+        selectionMask: { pixels: { width: w, height: h, channels: 1, data: new Uint8Array(w * h).fill(255) }, rect: area },
+      }, {
+        signal: current.signal,
+        stage: (t: string) => { current.stage = tag + " · " + t; current.detail = ""; report(current.stage); renderAction(); },
+        progress: (f: number | null, t?: string) => { current.progress = f; current.detail = t ?? ""; renderAction(); },
+        promptQueued: (id: string) => { current.promptId = id; },
+        debug: settings.debugFiles ? svc.debugSave : undefined,
+      });
+      if (!res.output) throw new Error("局部重绘没有返回结果");
+      return fitToArea(decodePng(res.output.png), res.output.rect, area, size);
+    };
+    try {
+      const magenta = await one(QWEN_TEXT_PROMPT, "分区图 1/2");
+      // the second one only adds what the first dropped (a dashed line, 11-28): not needed to go on
+      const black = current.signal.aborted ? null : await one(QWEN_BLACK_PROMPT, "分区图 2/2").catch(e => { if (current.signal.aborted) throw e; log("warn", "decompose map 2", e); return null; });
+      return { magenta, black };
+    } finally {
+      if (run === current) run = null;
+      renderAll();
     }
   }
 

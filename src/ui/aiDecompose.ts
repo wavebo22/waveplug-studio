@@ -9,6 +9,7 @@ import {
   alignTextParts, decomposeRequest, isDecomposeDetail, parseDecomposeAnswer, refineRegion, refineRequest, visionSize, withManualBox,
 } from "../core/assistant/decompose.ts";
 import { inkMap } from "../core/image/textAlign.ts";
+import { qwenInk } from "../core/image/qwenMaps.ts";
 import { withGrid } from "../core/image/grid.ts";
 import { type Pixels, encodePng } from "../core/image/png.ts";
 import type { Rect } from "../core/image/region.ts";
@@ -28,9 +29,11 @@ export interface AiDecomposeDeps {
    *  layer per part, the removals as two smart objects; `report` follows its progress. Missing: no 抠图 button. */
   cut?(docId: number, parts: readonly { name: string; box: Rect; kind: "object" | "text"; remove: number }[], report: (done: number, total: number, text: string) => void, clean: CleanMode): Promise<{ done: number; failed: string[]; stopped: boolean; background: { done: number; total: number; failed: string[] } | null }>;
   cancelCut?(): void;
+  /** 分区图: the 局部重绘 workflow's two pictures of `area` at `size` (app.ts). Missing: not offered. */
+  maps?(docId: number, area: Rect, size: { width: number; height: number }, report: (text: string) => void): Promise<{ magenta: Pixels; black: Pixels | null }>;
 }
 
-const DETAIL_KEY = "wp.decompose.detail", REFINE_KEY = "wp.decompose.refine", CLEAN_KEY = "wp.decompose.clean", SCOPE_KEY = "wp.decompose.scope";
+const DETAIL_KEY = "wp.decompose.detail", REFINE_KEY = "wp.decompose.refine", CLEAN_KEY = "wp.decompose.clean", SCOPE_KEY = "wp.decompose.scope", MAPS_KEY = "wp.decompose.maps";
 /** 去除背景: not at all, or each cut-out part's box removed from the original, one after another */
 export type CleanMode = "off" | "box";
 const CLEANS: [CleanMode, string, string][] = [
@@ -97,6 +100,10 @@ export function createAiDecompose(d: AiDecomposeDeps) {
 
   const detailBtns = DETAILS.map(([k, label, tip]) => h("button", { class: "seg-btn", title: tip, onClick: () => { detail = k; try { localStorage.setItem(DETAIL_KEY, k); } catch { /* not kept */ } render(); } }, label));
   const hint = h("input", { class: "field", type: "text", placeholder: "补充要求（可选），例如：文字不用拆" }) as HTMLInputElement;
+  let useMaps = true;
+  try { useMaps = localStorage.getItem(MAPS_KEY) !== "off"; } catch { /* default */ }
+  const mapsBox = h("input", { type: "checkbox", checked: useMaps }) as HTMLInputElement;
+  mapsBox.addEventListener("change", () => { useMaps = mapsBox.checked; try { localStorage.setItem(MAPS_KEY, useMaps ? "on" : "off"); } catch { /* not kept */ } });
   const refineBox = h("input", { type: "checkbox", checked: refine }) as HTMLInputElement;
   refineBox.addEventListener("change", () => { refine = refineBox.checked; try { localStorage.setItem(REFINE_KEY, refine ? "on" : "off"); } catch { /* not kept */ } });
   const runBtn = h("button", { class: "btn tool-btn wide primary", title: "把画面发给 DeepSeek（deepseek-flash），同时问两次：一次找图像、物件和装饰图形，一次找文字，合起来列出可以拆成独立图层的部分（文字在上）。只分析，不改动文档", onClick: () => void run() }, "分析画面");
@@ -187,10 +194,18 @@ export function createAiDecompose(d: AiDecomposeDeps) {
         px = await d.host.docPixels(doc.id, whole ? null : area, t.width * t.height);
         thumb = dataUrl(px); sent = dataUrl(withGrid(px));
       } else thumb = sent = await d.host.docThumbnail(doc.id, Math.max(t.width, t.height));
+      // 分区图 (Qwen, in ComfyUI) while DeepSeek looks: where things are, to the pixel
+      const notes: string[] = [];
+      const mapsP = useMaps && d.maps && px
+        ? d.maps(doc.id, area, { width: px.width, height: px.height }, text => d.status(`AI 拆层：DeepSeek 在看画面，同时生成分区图 · ${text}`)).catch(e => {
+          log("warn", "decompose maps", e);
+          notes.push(`分区图没有生成（${(e as Error)?.message ?? e}），这次用原图定位`);
+          return null;
+        })
+        : Promise.resolve(null);
       // two looks at the same time, one for the objects and graphics, one for the text
       const look = (pass: DecomposePass) => ask(DECOMPOSE_SYSTEM[pass], decomposeRequest(pass, detail, t, hint.value), [sent]);
       const [objects, text] = await Promise.allSettled([look("objects"), look("text")]);
-      const notes: string[] = [];
       for (const [r, what] of [[objects, "图像和物件"], [text, "文字"]] as const)
         if (r.status === "rejected") { log("warn", "decompose " + what, r.reason); notes.push(`找${what}的那次请求失败（${(r.reason as Error)?.message ?? r.reason}），这次只有另一类`); }
       if (objects.status === "rejected" && text.status === "rejected") throw objects.reason;
@@ -217,9 +232,18 @@ export function createAiDecompose(d: AiDecomposeDeps) {
       }
       // 3. the text boxes moved onto the text in the picture: DeepSeek's places drift by up to ~7%
       // of the picture (11-28), its reading of what and in which order doesn't
+      const maps = await mapsP;
       if (px && plan.parts.length) {
         const a0 = Date.now();
-        plan = alignTextParts(plan, inkMap(px), area, px.width / (area.right - area.left), size);
+        const m0 = inkMap(px);
+        let q: ReturnType<typeof qwenInk> | null = null;
+        if (maps) {
+          q = qwenInk(maps.magenta, maps.black, m0);
+          log("info", "decompose maps", JSON.stringify({ agree: +q.agree.toFixed(3), black: !!maps.black }));
+          if (!q.ok) { notes.push(`分区图和原图对不上（只有 ${Math.round(q.agree * 100)}% 重合），这次用原图定位`); q = null; }
+        }
+        plan = q ? alignTextParts(plan, q.text, area, px.width / (area.right - area.left), size, {}, q.objects)
+          : alignTextParts(plan, m0, area, px.width / (area.right - area.left), size);
         const unsure = plan.parts.filter(p => p.aligned === false);
         log("info", "decompose align", JSON.stringify({ ms: Date.now() - a0, parts: plan.parts.length, unsure: unsure.map(p => p.name), boxes: plan.parts.map(p => [p.name, p.raw]) }));
         if (unsure.length) notes.push(`${unsure.length} 个部分在画面上没找到对得上的位置（标「未校准」，没有勾选），用的是 DeepSeek 的框：点一下它，在 PS 里把范围框好，再点「用选区作为范围」`);
@@ -327,6 +351,7 @@ export function createAiDecompose(d: AiDecomposeDeps) {
       h("div", { class: "param-top" }, h("span", { class: "param-label" }, "拆分粒度")),
       h("div", { class: "seg dc-seg" }, ...detailBtns)),
     h("div", { class: "param", title: "告诉 DeepSeek 哪些要拆、哪些不要，例如「人物和衣服算一个」「文字不用拆」" }, hint),
+    d.maps ? h("label", { class: "check-row dc-refine", title: "分析时用「局部重绘」的工作流把画面画成两张分区图（白底、文字品红 / 黑色），按颜色找出每块文字和图形的准确位置。要多跑两次 ComfyUI（和 DeepSeek 同时进行）" }, mapsBox, h("span", null, "用分区图精确定位（Qwen）")) : null,
     h("label", { class: "check-row dc-refine", title: "看完整个画面后，再把每个部分周围放大看一次，框取两次的合并范围（更不容易漏掉边缘）。要多花一两分钟；大图上更有用" }, refineBox, h("span", null, "放大细化每个部分的范围")),
     runBtn, view, list, manualBtn, allBtn, cleanRow, cutBtn, stopBtn, cutInfo, dropped);
   render();
