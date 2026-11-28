@@ -26,6 +26,8 @@ export interface DecomposePart {
   kind: PartKind;
   /** where the model says the part is, in document pixels */
   box: Rect;
+  /** 去除顺序 within its kind (DeepSeek's `remove`, 1 first; parts it gave none follow in list order) */
+  remove: number;
   /** the box came from the second, zoomed-in look (applyRefine) */
   refined?: boolean;
   /** what is sent to 心宝抠图: the box grown by a margin, in document pixels */
@@ -57,38 +59,41 @@ export type DecomposePass = "objects" | "text";
 
 const DETAIL_GUIDE: Record<DecomposePass, Record<DecomposeDetail, string>> = {
   objects: {
-    coarse: "拆分粒度：粗。只列 1～3 个最主要的东西（主体、大的前景物件），小东西归到它挨着的大东西里，不单独列出。",
-    medium: "拆分粒度：中。列 3～8 个：每个独立的物件、每个明显的装饰图形各算一个；紧贴在一起、明显属于同一个东西的（例如瓶子和瓶盖）算一个。",
-    fine: "拆分粒度：细。尽量拆细，一般 5～12 个：能单独移动的东西都单独列出，包括小装饰、小图标、logo 的图形部分、线框、对话气泡、箭头。画面里确实没那么多东西时才可以少列。",
+    coarse: "拆分粒度：粗。只列 1～3 个最主要的部分（主插画、大的前景物件），小东西归到它挨着的部分里，不单独列出。",
+    medium: "拆分粒度：中。一般 2～6 个：每一组连在一起的插画算一个，每个单独摆放、和别的东西分开的物件或明显的装饰图形各算一个。",
+    fine: "拆分粒度：细。一般 4～10 个：单独摆放的小装饰、小图标、logo 的图形部分、线框、分隔线、箭头也单独列出。连在一起的一组插画仍然算一个，不要拆开。",
   },
   text: {
-    coarse: "拆分粒度：粗。只列 1～3 块最主要的文字（大标题、整片主要文案），挨在一起的文字合成一块。",
-    medium: "拆分粒度：中。列 3～8 块：标题、副标题、每段文案、价格、标签各算一块；同一句话换行的几行算一块。",
-    fine: "拆分粒度：细。每一块排版上独立的文字都单独列出，一般 5～15 块：颜色、字号、方向（横排 / 竖排）不同，或者中间有明显空白的文字分开列；很小的说明文字、角标也要列。",
+    coarse: "拆分粒度：粗。挨在一起的文字合成一块（如标题和副标题、一整段价格说明），但画面里每一处文字都要被某一块包含，不要漏。",
+    medium: "拆分粒度：中。画面里所有文字都要列：标题、副标题、每段文案、每个价格、每个列表、标签、地址各算一块；同一句话或同一个列表换行的几行算一块。文字多就多列，不要因为数量多而漏掉。",
+    fine: "拆分粒度：细。每一块排版上独立的文字都单独列出：颜色、字号、方向（横排 / 竖排）不同，或者中间有明显空白的文字分开列；很小的说明文字、角标、地址也要列，不要漏。",
   },
 };
 
 const GRID_NOTE = "附图上叠了一层品红色的细网格线，把宽和高各分成 10 格；上边和左边的数字 1～9 是网格线的位置，表示 100～900。网格线不是画面内容，只是帮你读坐标。";
+const ORDER_NOTE = "每一项还要给出 remove：去除顺序（从 1 开始的整数，不重复）。这些部分抠出来以后，会按这个顺序一个一个从原图上抹掉、补出后面的背景，每次都在上一次的结果上继续。";
 const BOX_RULE = "box 是范围 [左, 上, 右, 下]，按附图的宽和高换算成 0～1000 的整数（0 是左边或上边，1000 是右边或下边），对照网格线读数。框要贴着边缘：左边对齐最左的一点，右边对齐最右的一点，上下也一样。";
 
 export const DECOMPOSE_SYSTEM: Record<DecomposePass, string> = {
-  objects: `你是图像拆层助手。用户要把一张平面图拆成 Photoshop 里的独立图层：每个部分会被单独抠出来、补全被挡住的部分，放到自己的图层上。这一次你只负责文字以外的东西（文字由另一位助手负责，背景另外处理）。只输出 JSON。
+  objects: `你是图像拆层助手。用户要把一张平面图拆成 Photoshop 里的独立图层：每个部分会被单独抠出来、放到自己的图层上，再从原图上抹掉。这一次你只负责文字以外的东西（文字由另一位助手负责，而且会先被去掉；背景留在原图上）。只输出 JSON。
 
 ${GRID_NOTE}
 
-按下面两类逐一清点，不要漏：
-- 主体和物件：人物、动物、产品、家具、器物、植物……
+要列的东西：
+- 插画、主体和物件：人物、动物、产品、器物、食物、植物……
 - 装饰图形：对话气泡、线框、色块、贴纸、图标、logo 的图形部分、印章、箭头、分隔线……
 
 规则：
-1. 不要列任何文字（标题、文案、价格、logo 里的字都不要列）。
-2. 不要列背景（天空、墙面、地面、桌面、纯色或渐变底、铺满画面的纹理等）。
-3. 名字用中文，是一个简短的名词短语（不超过 12 个字），说清它是什么，例如「奶牛头」「绿色办公椅」「白色键盘」「橙色对话气泡框」。只有画面里有相似的东西时，才加位置或颜色区分。不要写动作和描述句。
-4. 按从前到后的顺序排列：挡住别人的写在前面，被挡住的写在后面。
-5. ${BOX_RULE}框住它的完整外形，被别的东西（包括文字）挡住的部分也估算进去。
-6. 看不清、太小（不到画面的百分之一）的东西不要列。
+1. 整体优先：互相接触、重叠、摆在一起组成一个画面的一组东西，算一个部分，整体框住，不要拆成多个。例如一桌静物插画（茶炉、茶壶、果盘、花瓶、茶杯和撒在旁边的核桃）连同飘在上面的烟雾、热气和投影，就是一个「茶炉静物插画」。只有和别的东西明显分开、单独摆放的才单独列。宁可框大一点，也不要漏掉其中一部分。
+2. 不要列任何文字（标题、文案、价格、logo 里的字都不要列）。
+3. 不要列背景（天空、墙面、地面、桌面、纸张纹理、纯色或渐变底、铺满画面的纹理等）。
+4. 名字用中文，是一个简短的名词短语（不超过 12 个字），说清它是什么，例如「茶炉静物插画」「绿色办公椅」「橙色对话气泡框」。只有画面里有相似的东西时，才加位置或颜色区分。不要写动作和描述句。
+5. 按从前到后的顺序排列：挡住别人的写在前面，被挡住的写在后面。
+6. ${BOX_RULE}框住它的完整外形，包括烟雾、投影、细小的枝叶；被别的东西（包括文字）挡住的部分也估算进去。
+7. 看不清、太小（不到画面的百分之一）的东西不要列。
+8. ${ORDER_NOTE}挡住别人的先去除；互不遮挡时，小的、周围背景简单的先去除，大的、压在复杂背景上的后去除。
 
-输出格式：{"parts":[{"name":"名字","box":[左,上,右,下]}]}`,
+输出格式：{"parts":[{"name":"名字","box":[左,上,右,下],"remove":1}]}`,
   text: `你是图像拆层助手。用户要把一张平面图拆成 Photoshop 里的独立图层。这一次你只负责画面里的文字（图像和装饰由另一位助手负责）。请找出每一块文字和它的位置。只输出 JSON。
 
 ${GRID_NOTE}
@@ -100,8 +105,9 @@ ${GRID_NOTE}
 4. ${BOX_RULE}框住这块文字所有笔画的外缘，包括描边、阴影、和文字连在一起的下划线或装饰符号。
 5. 按从上到下、从左到右的顺序排列。
 6. 看不清的小字不要列。
+7. ${ORDER_NOTE}文字会在抠图形之前先全部去掉：压在图形、插画或别的文字上面的先去除；互不相干时，小的先去除，大的后去除。
 
-输出格式：{"parts":[{"name":"文字“……”","box":[左,上,右,下]}]}`,
+输出格式：{"parts":[{"name":"文字“……”","box":[左,上,右,下],"remove":1}]}`,
 };
 
 export const REFINE_SYSTEM = `你是图像定位助手。用户会给你几张从同一张大图里裁出来的局部图，每张图说明要找的是哪个东西。请在每张局部图里找到它，给出贴边的范围。只输出 JSON。
@@ -209,9 +215,9 @@ export function parseDecomposeAnswer(value: unknown, size: Size, crop: CropOptio
   if (!Array.isArray(list)) return { parts: [], dropped: ["DeepSeek 没有列出任何部分"] };
   const dropped: string[] = [];
   const area = seen.width * seen.height;
-  const raw: { name: string; kind: PartKind; box: Rect }[] = [];
+  const raw: { name: string; kind: PartKind; box: Rect; remove: number }[] = [];
   for (const item of list) {
-    const o = item && typeof item === "object" ? item as { name?: unknown; kind?: unknown; box?: unknown } : {};
+    const o = item && typeof item === "object" ? item as { name?: unknown; kind?: unknown; box?: unknown; remove?: unknown } : {};
     const name = typeof o.name === "string" ? o.name.replace(/\s+/g, " ").trim() : "";
     if (!name) { dropped.push("有一项没有名字"); continue; }
     const got = boxOf(o.box, seen);
@@ -219,10 +225,12 @@ export function parseDecomposeAnswer(value: unknown, size: Size, crop: CropOptio
     const box = { left: got.left + ox, top: got.top + oy, right: got.right + ox, bottom: got.bottom + oy };
     if (rectW(box) * rectH(box) < area * 0.001) { dropped.push(`「${name}」太小`); continue; }
     if (rectW(box) >= seen.width * 0.95 && rectH(box) >= seen.height * 0.95) { dropped.push(`「${name}」铺满了整个${region ? "选区" : "画面"}，像是背景`); continue; }
-    raw.push({ name, kind: o.kind === "text" ? "text" : "object", box });
+    const r = typeof o.remove === "string" && /^\d+$/.test(o.remove.trim()) ? Number(o.remove) : o.remove;
+    raw.push({ name, kind: o.kind === "text" ? "text" : "object", box, remove: typeof r === "number" && Number.isFinite(r) && r > 0 ? r : Infinity });
   }
   const { items, merged } = mergeClose(raw, Math.max(seen.width, seen.height) * MERGE_GAP);
-  const parts: DecomposePart[] = [];
+  const parts: Omit<DecomposePart, "remove">[] = [];
+  const rank: number[] = [];
   const used = new Map<string, number>();
   for (const it of items) {
     let name = it.name.length > MAX_NAME ? it.name.slice(0, MAX_NAME) : it.name;
@@ -232,8 +240,24 @@ export function parseDecomposeAnswer(value: unknown, size: Size, crop: CropOptio
     if (n > 1) name = `${name}（${n}）`;
     const padded = padBox(it.box, size, crop.pad);
     parts.push({ name, kind: it.kind, box: padded, crop: cropFor(padded, size, crop) });
+    rank.push(it.remove);
   }
-  return { parts, dropped, merged };
+  return { parts: rankRemoval(parts, rank), dropped, merged };
+}
+
+/** `remove` as 1, 2, 3… within each kind: DeepSeek's order (ties and parts without one in list order). */
+function rankRemoval(parts: Omit<DecomposePart, "remove">[], rank: readonly number[]): DecomposePart[] {
+  const out = parts.map(p => ({ ...p, remove: 0 }));
+  for (const kind of ["text", "object"] as const) {
+    const idx = out.map((p, i) => i).filter(i => out[i].kind === kind).sort((a, b) => (rank[a] - rank[b]) || (a - b));
+    idx.forEach((i, n) => { out[i].remove = n + 1; });
+  }
+  return out;
+}
+
+/** The parts of `kind` in their removal order. */
+export function removalOrder<T extends { kind: PartKind; remove: number }>(parts: readonly T[], kind: PartKind): T[] {
+  return parts.filter(p => p.kind === kind).sort((a, b) => a.remove - b.remove);
 }
 
 /** Two parts of the same kind closer than this share of the picture's longer side are one part. */
@@ -260,6 +284,7 @@ export function mergeClose<T extends { name: string; kind: PartKind; box: Rect }
       if (a.kind !== b.kind || !close(a.box, b.box)) continue;
       a.box = { left: Math.min(a.box.left, b.box.left), top: Math.min(a.box.top, b.box.top), right: Math.max(a.box.right, b.box.right), bottom: Math.max(a.box.bottom, b.box.bottom) };
       a.names.push(...b.names);
+      if ("remove" in a && "remove" in b) (a as { remove: number }).remove = Math.min((a as { remove: number }).remove, (b as { remove: number }).remove);
       items.splice(j, 1);
       again = true;
       break;

@@ -921,6 +921,40 @@ export class UxpHost implements PsHost {
     });
   }
 
+  async flattenGroup(docId: number, layerId: number, name: string): Promise<number> {
+    return step("WavePlug 合并抠图图层", docId, async () => {
+      const doc = docById(docId);
+      if (!findLayer(doc.layers, layerId)) throw new Error("抠图图层组已不存在");
+      await selectLayer(layerId);
+      // 合并组 (Ctrl+E on a group): one raster layer, the variation's mask applied
+      const [r] = await play([{ _obj: "mergeLayersNew", _options: DONT }]);
+      if (r?._obj === "error") throw new Error(r.message || "Photoshop 无法合并图层组");
+      const layer = doc.activeLayers[0];
+      if (!layer || layer.id === layerId && findLayer(doc.layers, layerId)?.layers) throw new Error("合并图层组后没有得到图层");
+      layer.name = name.slice(0, 200);
+      return layer.id;
+    });
+  }
+
+  async toSmartObject(docId: number, layerIds: readonly number[], name: string): Promise<number> {
+    return step("WavePlug 转换为智能对象", docId, async () => {
+      const doc = docById(docId);
+      const ids = layerIds.filter(id => findLayer(doc.layers, id));
+      if (!ids.length) throw new Error("要转换的图层已不存在");
+      for (const [i, id] of ids.entries()) {
+        const [r] = await play([{ _obj: "select", _target: [{ _ref: "layer", _id: id }], makeVisible: false, layerID: [id],
+          ...(i ? { selectionModifier: { _enum: "selectionModifierType", _value: "addToSelection" } } : {}), _options: DONT }]);
+        if (r?._obj === "error") throw new Error(r.message || "无法选中图层");
+      }
+      const [r] = await play([{ _obj: "newPlacedLayer", _options: DONT }]);
+      if (r?._obj === "error") throw new Error(r.message || "Photoshop 无法转换为智能对象");
+      const layer = doc.activeLayers[0];
+      if (!layer) throw new Error("转换为智能对象后没有得到图层");
+      layer.name = name.slice(0, 200);
+      return layer.id;
+    });
+  }
+
   async expandCanvas(docId: number, pads: Pads): Promise<DocInfo> {
     return step("WavePlug 扩展画布", docId, async () => {
       const { app, constants } = ps();

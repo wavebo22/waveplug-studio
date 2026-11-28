@@ -163,6 +163,11 @@ export interface PsHost {
   addVariation(g: FillGroup, png: Uint8Array, placement: Rect, prompt: string, mask: VariationMask): Promise<Variation>;
   /** Moves layer `layerId` (e.g. a fill group) directly below layer `belowId`. */
   placeBelow(docId: number, layerId: number, belowId: number): Promise<void>;
+  /** AI 拆层: the layer group (an AI result with its one variation) merged into one plain pixel
+   *  layer named `name`, at the group's place, no variations left; its new id. */
+  flattenGroup?(docId: number, layerId: number, name: string): Promise<number>;
+  /** AI 拆层: the layers (next to each other) as one smart object named `name`; its id. */
+  toSmartObject?(docId: number, layerIds: readonly number[], name: string): Promise<number>;
   /** Grows the canvas by `pads` (part of the document's history). */
   expandCanvas(docId: number, pads: Pads): Promise<DocInfo>;
   /** Small composite image of the whole document, for the expand editor. */

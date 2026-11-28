@@ -1,7 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import {
-  DECOMPOSE_MAX_PARTS, DECOMPOSE_MAX_PIXELS, DECOMPOSE_SYSTEM, combineAnswers, REFINE_BATCH, applyRefine, cropFor, decomposeRequest, parseDecomposeAnswer, refineRegion, refineRequest, visionSize,
+  DECOMPOSE_MAX_PARTS, DECOMPOSE_MAX_PIXELS, DECOMPOSE_SYSTEM, combineAnswers, REFINE_BATCH, applyRefine, cropFor, decomposeRequest, parseDecomposeAnswer, refineRegion, refineRequest, removalOrder, visionSize,
 } from "../src/core/assistant/decompose.ts";
 import { withGrid } from "../src/core/image/grid.ts";
 import { mergeMasks } from "../src/core/image/compose.ts";
@@ -52,11 +52,27 @@ test("拆层缩略图：不超过 1300×1300 像素数，保持比例，小图�
 test("拆层请求：两次各写明缩略图尺寸、自己那一类的粒度和用户补充", () => {
   const s = decomposeRequest("objects", "coarse", { width: 1300, height: 1000 }, "  文字不用拆  ");
   assert.match(s, /1300×1000/);
-  assert.match(s, /1～3 个最主要的东西/);
+  assert.match(s, /1～3 个最主要的部分/);
   assert.match(s, /补充要求（只看和图像、物件有关的部分）：文字不用拆/);
-  assert.match(decomposeRequest("text", "fine", { width: 10, height: 10 }), /5～15 块/);
+  assert.match(decomposeRequest("text", "fine", { width: 10, height: 10 }), /不要漏/);
   assert.doesNotMatch(decomposeRequest("text", "fine", { width: 10, height: 10 }), /补充要求/);
   assert.doesNotMatch(DECOMPOSE_SYSTEM.objects, /kind/);
+});
+
+test("拆层提示词：连在一起的插画算一个，两次都要给去除顺序", () => {
+  assert.match(DECOMPOSE_SYSTEM.objects, /整体优先/);
+  assert.match(decomposeRequest("objects", "fine", { width: 10, height: 10 }), /连在一起的一组插画仍然算一个/);
+  for (const pass of ["objects", "text"] as const) assert.match(DECOMPOSE_SYSTEM[pass], /"remove":1/);
+});
+
+test("去除顺序：按 DeepSeek 的 remove 排，每类各自从 1 编号；没给的排在后面，按列表顺序", () => {
+  const plan = parseDecomposeAnswer(combineAnswers(
+    { parts: [{ name: "文字“标题”", box: [0, 0, 300, 100], remove: 2 }, { name: "文字“地址”", box: [0, 900, 300, 990], remove: "1" }] },
+    { parts: [{ name: "茶炉静物插画", box: [100, 300, 700, 800], remove: 3 }, { name: "橘子", box: [750, 700, 950, 850] }, { name: "印章", box: [800, 100, 900, 200], remove: 1 }] },
+  ), { width: 1000, height: 1000 });
+  assert.deepEqual(plan.parts.map(p => [p.name, p.remove]), [["文字“标题”", 2], ["文字“地址”", 1], ["茶炉静物插画", 2], ["橘子", 3], ["印章", 1]]);
+  assert.deepEqual(removalOrder(plan.parts, "object").map(p => p.name), ["印章", "茶炉静物插画", "橘子"]);
+  assert.deepEqual(removalOrder(plan.parts, "text").map(p => p.name), ["文字“地址”", "文字“标题”"]);
 });
 
 test("两次的回答合起来：文字在上，物件按前后顺序在下，类型由哪一次找到决定；失败的一次跳过", () => {

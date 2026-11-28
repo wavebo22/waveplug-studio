@@ -2024,15 +2024,17 @@ export function mountApp(root: HTMLElement, svc: Services) {
     }
   }
 
-  /** AI 拆层: 1. cut out the text, 2. cut out the graphics, both from the original (the 抠图 mode's
-   *  workflow, 心宝抠图, with the part's box as the selection and its name as the 物件名; each its own
-   *  「AI抠图 · 名字」 group), 3. remove each part from the original, its box as the selection (局部重绘
-   *  removal workflow, empty prompt), the text first, with every cut-out hidden while it reads. One run
-   *  per part: that workflow crops around its mask, and one mask for many came back as smears; each run
-   *  reads what the earlier ones left. A whole new background (11-27 test) lost too much of it. Layers
-   *  end up text on top, then the graphics (front ones higher), then the removed background.
-   *  `clean` "off": no step 3. Uses `run`, so the generate page can't start meanwhile, and 取消 stops it. */
-  async function decomposeCut(docId: number, parts: readonly { name: string; box: Rect; kind: "object" | "text" }[], report: (done: number, total: number, text: string) => void, clean: "off" | "box"): Promise<{ done: number; failed: string[]; stopped: boolean; background: { done: number; total: number; failed: string[] } | null }> {
+  /** AI 拆层, in four steps: 1. cut out the text (the 抠图 mode's workflow, 心宝抠图, with the part's
+   *  box as the selection and its name as the 物件名), 2. remove the text from the original, one box
+   *  after another in DeepSeek's 去除顺序 (局部重绘 removal workflow, empty prompt; every cut-out hidden
+   *  while it reads), 3. cut out the graphics from that text-free picture, 4. remove them the same way.
+   *  Each cut-out becomes one plain layer named after the part (no 变体 group); the removals of step 2
+   *  become one 「去除文字」 smart object, those of step 4 one 「去除图形」 smart object. One run per
+   *  part: that workflow crops around its mask, and one mask for many came back as smears; each run
+   *  reads what the earlier ones left. Layers end up the text on top, then the graphics (front ones
+   *  higher), 去除图形, 去除文字, the original. `clean` "off": no steps 2 and 4. Uses `run`, so the
+   *  generate page can't start meanwhile, and 取消 stops it. */
+  async function decomposeCut(docId: number, parts: readonly { name: string; box: Rect; kind: "object" | "text"; remove: number }[], report: (done: number, total: number, text: string) => void, clean: "off" | "box"): Promise<{ done: number; failed: string[]; stopped: boolean; background: { done: number; total: number; failed: string[] } | null }> {
     if (run) throw new Error("正在生成，等它结束再拆层");
     const rp = pickFor("extract");
     if (!rp) throw new Error("先在「抠图」模式导入抠图工作流（如心宝强化抠图）");
@@ -2054,7 +2056,8 @@ export function mountApp(root: HTMLElement, svc: Services) {
     const failed: string[] = [];
     let done = 0;
     const background = bp ? { done: 0, total: 0, failed: [] as string[] } : null;
-    type Cut = { group: FillGroup; cutout: NonNullable<RunResult["cutout"]>; box: Rect };
+    /** a cut-out: its plain layer (`layer`, as a stand-in FillGroup so it can be hidden while reading) */
+    type Cut = { layer: FillGroup; cutout: NonNullable<RunResult["cutout"]>; name: string; remove: number };
     const texts = parts.filter(p => p.kind === "text"), graphics = parts.filter(p => p.kind !== "text");
     crumb(`AI 拆层：文字 ${texts.length} 个，图形 ${graphics.length} 个，去除背景 ${clean}`);
     const hooks = (tag: string) => ({
@@ -2065,9 +2068,15 @@ export function mountApp(root: HTMLElement, svc: Services) {
       debug: settings.debugFiles ? svc.debugSave : undefined,
     });
     const here = () => svc.host.activeDoc()?.id === docId;
+    /** the AI group as one plain layer (no variations); the group itself when that fails */
+    const flatten = async (g: FillGroup, name: string): Promise<FillGroup> => {
+      if (!svc.host.flattenGroup) return g;
+      try { return { ...g, layerId: await svc.host.flattenGroup(docId, g.layerId, name), name }; }
+      catch (e) { log("warn", "decompose flatten", name, e); return g; }
+    };
 
-    /** cuts `list` out back to front; each new group goes right below `under` when given */
-    const cutAll = async (list: typeof parts, label: string, hide: FillGroup[], under: FillGroup | null): Promise<Cut[]> => {
+    /** cuts `list` out back to front, reading with `hide` hidden; each new layer goes right below `under` when given */
+    const cutAll = async (list: typeof parts, label: string, hide: readonly FillGroup[], under: FillGroup | null): Promise<Cut[]> => {
       const out: Cut[] = [];
       for (let k = list.length - 1; k >= 0; k--) {
         if (current.signal.aborted || !here()) break;
@@ -2077,15 +2086,16 @@ export function mountApp(root: HTMLElement, svc: Services) {
           const w = part.box.right - part.box.left, h = part.box.bottom - part.box.top;
           const res = await runInpaint(svc.host, comfy, {
             profile: rp, prompt: part.name, seed: null, params: effectiveParams(rp, rps), loras: rps.loras, references: {}, count: 1,
-            keepDetail: rps.keepDetail !== false, hide,
+            keepDetail: rps.keepDetail !== false, hide: [...hide, ...out.map(c => c.layer)],
             selectionMask: { pixels: { width: w, height: h, channels: 1, data: new Uint8Array(w * h).fill(255) }, rect: part.box },
           }, hooks(tag));
           done++;
           if (res.group && res.cutout) {
             if (under) await svc.host.placeBelow(docId, res.group.layerId, under.layerId);
-            out.push({ group: res.group, cutout: res.cutout, box: part.box });
+            const layer = await flatten(res.group, part.name);
+            out.push({ layer, cutout: res.cutout, name: part.name, remove: part.remove });
           }
-          log("info", "decompose cut", JSON.stringify({ part: part.name, kind: part.kind, box: part.box }));
+          log("info", "decompose cut", JSON.stringify({ part: part.name, kind: part.kind, box: part.box, remove: part.remove }));
         } catch (e) {
           if (current.signal.aborted) break;
           log("error", "decompose cut failed", part.name, e);
@@ -2094,13 +2104,16 @@ export function mountApp(root: HTMLElement, svc: Services) {
       }
       return out;
     };
-    /** removes each cut-out from what is showing (all the cut-outs hidden); the results go right below `under` */
-    const removeAll = async (cuts: Cut[], label: string, hide: FillGroup[], under: FillGroup) => {
-      if (!bp || !bps || !background) return;
+    /** removes each cut-out from what is showing (all the cut-outs hidden), in DeepSeek's 去除顺序;
+     *  the results go right below `under`, then become one smart object named `name` */
+    const removeAll = async (cuts: Cut[], label: string, hide: readonly FillGroup[], under: FillGroup, name: string) => {
+      if (!bp || !bps || !background || !cuts.length) return;
       background.total += cuts.length;
-      for (const [i, c] of cuts.entries()) {
+      const made: FillGroup[] = [];
+      const order = [...cuts].sort((a, b) => a.remove - b.remove);
+      for (const [i, c] of order.entries()) {
         if (current.signal.aborted || !here()) break;
-        const tag = `${label} ${i + 1}/${cuts.length}`;
+        const tag = `${label} ${i + 1}/${order.length}「${c.name}」`;
         report(done, parts.length, tag);
         // the part's box: what 抠图 used as the selection (RunResult.cutout)
         const mask = c.cutout;
@@ -2111,8 +2124,9 @@ export function mountApp(root: HTMLElement, svc: Services) {
           }, hooks(tag));
           if (!res.group) throw new Error("局部重绘没有返回结果图层");
           await svc.host.placeBelow(docId, res.group.layerId, under.layerId);
+          made.push(await flatten(res.group, `去除 · ${c.name}`));
           background.done++;
-          log("info", "decompose background", JSON.stringify({ group: res.group.layerId, rect: mask.rect, label, mode: clean }));
+          log("info", "decompose background", JSON.stringify({ group: res.group.layerId, rect: mask.rect, label, remove: c.remove }));
         } catch (e) {
           if (current.signal.aborted) break;
           log("error", "decompose background failed", e);
@@ -2120,17 +2134,25 @@ export function mountApp(root: HTMLElement, svc: Services) {
           background.failed.push(`${tag}：${(e as Error).message ?? e}`);
         }
       }
+      if (made.length && svc.host.toSmartObject && here()) {
+        try { await svc.host.toSmartObject(docId, made.map(g => g.layerId), name); }
+        catch (e) { log("warn", "decompose smart object", name, e); background.failed.push(`「${name}」没能合成智能对象：${(e as Error).message ?? e}`); }
+      }
     };
 
     try {
+      // 1. the text
       const textCuts = texts.length ? await cutAll(texts, "抠文字", [], null) : [];
-      // the lowest text cut-out (made first): the graphics go right below it, so the text stays on top
-      const textBottom = textCuts[0]?.group ?? null;
-      const graphicCuts = graphics.length && !current.signal.aborted ? await cutAll(graphics, "抠图形", [], textBottom) : [];
+      // the lowest text cut-out (made first): everything else goes below it, so the text stays on top
+      const textBottom = textCuts[0]?.layer ?? null;
+      // 2. the text taken off the original
+      if (bp && textCuts.length && textBottom && !current.signal.aborted) await removeAll(textCuts, "去除文字", textCuts.map(c => c.layer), textBottom, "去除文字");
+      // 3. the graphics, read from the text-free picture (the text cut-outs hidden)
+      const graphicCuts = graphics.length && !current.signal.aborted ? await cutAll(graphics, "抠图形", textCuts.map(c => c.layer), textBottom) : [];
+      // 4. the graphics taken off, below the lowest graphic cut-out (above 去除文字)
       const all = [...textCuts, ...graphicCuts];
-      // the lowest cut-out of all: the background goes below it
-      const bottom = graphicCuts[0]?.group ?? textBottom;
-      if (bp && all.length && bottom) await removeAll(all, "去除背景", all.map(c => c.group), bottom);
+      const bottom = graphicCuts[0]?.layer ?? null;
+      if (bp && graphicCuts.length && bottom && !current.signal.aborted) await removeAll(graphicCuts, "去除图形", all.map(c => c.layer), bottom, "去除图形");
       return { done, failed, stopped: current.signal.aborted, background };
     } finally {
       if (run === current) run = null;
