@@ -217,12 +217,12 @@ export function createAiDecompose(d: AiDecomposeDeps) {
       }
       // 3. the text boxes moved onto the text in the picture: DeepSeek's places drift by up to ~7%
       // of the picture (11-28), its reading of what and in which order doesn't
-      if (px && plan.parts.some(p => p.kind === "text")) {
+      if (px && plan.parts.length) {
         const a0 = Date.now();
         plan = alignTextParts(plan, inkMap(px), area, px.width / (area.right - area.left), size);
-        const texts = plan.parts.filter(p => p.kind === "text"), unsure = texts.filter(p => p.aligned === false);
-        log("info", "decompose align", JSON.stringify({ ms: Date.now() - a0, texts: texts.length, unsure: unsure.map(p => p.name), boxes: texts.map(p => [p.name, p.raw]) }));
-        if (unsure.length) notes.push(`${unsure.length} 块文字在画面上没找到对得上的位置（标「未校准」，没有勾选），用的是 DeepSeek 的框：点一下它，在 PS 里把范围框好，再点「用选区作为范围」`);
+        const unsure = plan.parts.filter(p => p.aligned === false);
+        log("info", "decompose align", JSON.stringify({ ms: Date.now() - a0, parts: plan.parts.length, unsure: unsure.map(p => p.name), boxes: plan.parts.map(p => [p.name, p.raw]) }));
+        if (unsure.length) notes.push(`${unsure.length} 个部分在画面上没找到对得上的位置（标「未校准」，没有勾选），用的是 DeepSeek 的框：点一下它，在 PS 里把范围框好，再点「用选区作为范围」`);
       }
       const secs = ((Date.now() - started) / 1000).toFixed(0);
       result = { docId: doc.id, docName: doc.name, size, thumb, area, plan, notes, note: `${secs} 秒` + (tokens ? ` · ${tokens} tokens` : "") };
@@ -283,7 +283,8 @@ export function createAiDecompose(d: AiDecomposeDeps) {
     cutInfo.hidden = !cutting && !cutResult;
     replace(cutInfo, cutting ?? cutResult);
     view.hidden = false;
-    const boxes = r.plan.parts.map((p, i) => h("div", { class: "dc-box" + (shown?.i === i ? " on" : ""), style: boxStyle(p.box, r.area, i % COLORS) }, h("span", { class: "dc-num" }, String(i + 1))));
+    // the range itself (`raw`); the margin added for cutting and removing isn't shown
+    const boxes = r.plan.parts.map((p, i) => h("div", { class: "dc-box" + (shown?.i === i ? " on" : ""), style: boxStyle(p.raw, r.area, i % COLORS) }, h("span", { class: "dc-num" }, String(i + 1))));
     const s = shown && r.plan.parts[shown.i];
     replace(view, h("img", { class: "dc-thumb", src: r.thumb }), ...boxes,
       s ? h("div", { class: "dc-box crop", style: boxStyle(s.crop, r.area, shown!.i % COLORS) }) : null);

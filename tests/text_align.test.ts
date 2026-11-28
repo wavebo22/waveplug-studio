@@ -28,7 +28,7 @@ const shift = (r: Rect, dx: number, dy: number): Rect => ({ left: r.left + dx, t
 
 // the layout: a title, a heading touching its price, a list of three lines, an address
 const title = { left: 60, top: 60, right: 300, bottom: 160 };
-const heading = { left: 40, top: 600, right: 160, bottom: 630 }, price = { left: 175, top: 585, right: 290, bottom: 640 };
+const heading = { left: 40, top: 600, right: 160, bottom: 630 }, price = { left: 182, top: 585, right: 290, bottom: 640 };
 const list = [0, 1, 2].map(k => ({ left: 40, top: 680 + k * 40, right: 280, bottom: 700 + k * 40 }));
 const address = { left: 150, top: 940, right: 450, bottom: 955 };
 const truth = [title, heading, price, ...list, address];
@@ -81,7 +81,7 @@ test("拆层计划：文字按分析区域和缩放换算后校准，边距变�
   assert.equal(t.aligned, true);
   assert.ok(near(t.raw, toDoc(list[1]), 10), JSON.stringify(t.raw));
   assert.ok(t.box.left >= t.raw.left - 20 && t.box.right <= t.raw.right + 20, "校准后的边距应该很小");
-  assert.equal(o.aligned, undefined);
+  assert.equal(o.aligned, false); // nothing in the picture there: the model's box stays
   assert.deepEqual(o.box, plan.parts[1].box);
   const man = withManualBox(o, { left: 10, top: 20, right: 300, bottom: 400 }, size);
   assert.deepEqual(man.raw, { left: 10, top: 20, right: 300, bottom: 400 });

@@ -5,7 +5,7 @@
 // the thumbnail size, what the model is told, checking its answer, and the crops.
 
 import { type Rect, rectH, rectW } from "../image/region.ts";
-import { type InkMap, alignTextBoxes } from "../image/textAlign.ts";
+import { type InkMap, alignTextBoxes, withoutInk } from "../image/textAlign.ts";
 
 export type DecomposeDetail = "coarse" | "medium" | "fine";
 export const isDecomposeDetail = (v: string): v is DecomposeDetail => v === "coarse" || v === "medium" || v === "fine";
@@ -29,8 +29,8 @@ export interface DecomposePart {
   box: Rect;
   /** where the model says the part is (or, aligned, where the text really is), no margin */
   raw: Rect;
-  /** text only, after alignTextParts: true — moved onto the text in the picture; false — no text
-   *  block found near it, the model's box kept (未校准: check it, or set it from a selection) */
+  /** after alignTextParts: true — moved onto what is in the picture; false — nothing found near it
+   *  that fits, the model's box kept (未校准: check it, or set it from a selection) */
   aligned?: boolean;
   /** 去除顺序 within its kind (DeepSeek's `remove`, 1 first; parts it gave none follow in list order) */
   remove: number;
@@ -236,7 +236,11 @@ export function parseDecomposeAnswer(value: unknown, size: Size, crop: CropOptio
     const r = typeof o.remove === "string" && /^\d+$/.test(o.remove.trim()) ? Number(o.remove) : o.remove;
     raw.push({ name, kind: o.kind === "text" ? "text" : "object", box, remove: typeof r === "number" && Number.isFinite(r) && r > 0 ? r : Infinity });
   }
-  const { items, merged } = mergeClose(raw, Math.max(seen.width, seen.height) * MERGE_GAP);
+  // text is never merged here: its boxes are about to be aligned against the picture, and merged on
+  // DeepSeek's drifted places a list's lines came out as one wrong block (11-28: 15 texts → 6).
+  // Graphics only when one mostly covers the other — not for being near (a seal 10 px from the
+  // illustration was swallowed by it).
+  const { items, merged } = mergeClose(raw, -1, { text: false });
   const parts: Omit<DecomposePart, "remove">[] = [];
   const rank: number[] = [];
   const used = new Map<string, number>();
@@ -276,7 +280,7 @@ export const MERGE_OVERLAP = 0.6;
 /** Parts of the same kind that plainly belong together — one mostly over the other (a cow's head and
  *  its outline), or nearly touching — merged into one (the box around both, the names joined),
  *  repeatedly until nothing more merges. Kept at the place of the first. `merged`: what was joined. */
-export function mergeClose<T extends { name: string; kind: PartKind; box: Rect }>(parts: readonly T[], gap: number): { items: T[]; merged: string[] } {
+export function mergeClose<T extends { name: string; kind: PartKind; box: Rect }>(parts: readonly T[], gap: number, opts: { text?: boolean } = {}): { items: T[]; merged: string[] } {
   const items = parts.map(p => ({ ...p, names: [p.name] }));
   const close = (a: Rect, b: Rect) => {
     const iw = Math.min(a.right, b.right) - Math.max(a.left, b.left), ih = Math.min(a.bottom, b.bottom) - Math.max(a.top, b.top);
@@ -289,7 +293,7 @@ export function mergeClose<T extends { name: string; kind: PartKind; box: Rect }
     again = false;
     for (let i = 0; i < items.length && !again; i++) for (let j = i + 1; j < items.length; j++) {
       const a = items[i], b = items[j];
-      if (a.kind !== b.kind || !close(a.box, b.box)) continue;
+      if (a.kind !== b.kind || a.kind === "text" && opts.text === false || !close(a.box, b.box)) continue;
       a.box = { left: Math.min(a.box.left, b.box.left), top: Math.min(a.box.top, b.box.top), right: Math.max(a.box.right, b.box.right), bottom: Math.max(a.box.bottom, b.box.bottom) };
       a.names.push(...b.names);
       if ("remove" in a && "remove" in b) (a as { remove: number }).remove = Math.min((a as { remove: number }).remove, (b as { remove: number }).remove);
@@ -370,27 +374,37 @@ export function applyRefine(parts: readonly DecomposePart[], regions: readonly R
 /** an aligned box's margin: about 0.8% of the picture's longer side (anti-aliasing, a shadow) —
  *  the 15% is for DeepSeek's errors, which the alignment took out */
 export const ALIGNED_PAD = 0.02;
+/** an aligned graphic's margin, of its longer side: faint parts (steam, a soft shadow) are no ink */
+export const ALIGNED_OBJECT_PAD = 0.04;
 
-/** The plan with its text parts aligned against `m`, an ink map of `area` of the document scaled
- *  by `scale` (ink-map pixels per document pixel). */
+/** The plan with its parts aligned against `m`, an ink map of `area` of the document scaled by
+ *  `scale` (ink-map pixels per document pixel): the text first, then the graphics with the placed
+ *  text's ink taken away (so the illustration's box doesn't take in the title). An aligned graphic
+ *  keeps a margin (ALIGNED_OBJECT_PAD): faint parts of it (steam, a soft shadow) aren't ink. */
 export function alignTextParts(plan: DecomposePlan, m: InkMap, area: Rect, scale: number, size: Size, crop: CropOptions = {}): DecomposePlan {
-  const texts = plan.parts.map((p, i) => ({ p, i })).filter(x => x.p.kind === "text");
-  if (!texts.length) return plan;
   const toImg = (r: Rect): Rect => ({ left: (r.left - area.left) * scale, top: (r.top - area.top) * scale, right: (r.right - area.left) * scale, bottom: (r.bottom - area.top) * scale });
   const toDoc = (r: Rect): Rect => ({
     left: Math.max(0, Math.floor(r.left / scale + area.left)), top: Math.max(0, Math.floor(r.top / scale + area.top)),
     right: Math.min(size.width, Math.ceil(r.right / scale + area.left)), bottom: Math.min(size.height, Math.ceil(r.bottom / scale + area.top)),
   });
-  const got = alignTextBoxes(m, texts.map(x => toImg(x.p.raw)));
   const parts = plan.parts.slice();
-  texts.forEach(({ p, i }, k) => {
-    const a = got[k];
-    if (!a.ok) { parts[i] = { ...p, aligned: false }; return; }
-    const raw = toDoc(a.box);
-    if (rectW(raw) < 2 || rectH(raw) < 2) { parts[i] = { ...p, aligned: false }; return; }
-    const box = padBox(raw, size, ALIGNED_PAD);
-    parts[i] = { ...p, raw, box, crop: cropFor(box, size, crop), aligned: true };
-  });
+  const run = (kind: PartKind, map: InkMap, pad: number | undefined) => {
+    const list = parts.map((p, i) => ({ p, i })).filter(x => x.p.kind === kind);
+    if (!list.length) return [];
+    const got = alignTextBoxes(map, list.map(x => toImg(x.p.raw)));
+    const placed: Rect[] = [];
+    list.forEach(({ p, i }, k) => {
+      const a = got[k];
+      const raw = a.ok ? toDoc(a.box) : null;
+      if (!raw || rectW(raw) < 2 || rectH(raw) < 2) { parts[i] = { ...p, aligned: false }; return; }
+      placed.push(a.box);
+      const box = padBox(raw, size, pad);
+      parts[i] = { ...p, raw, box, crop: cropFor(box, size, crop), aligned: true };
+    });
+    return placed;
+  };
+  const texts = run("text", m, ALIGNED_PAD);
+  run("object", texts.length ? withoutInk(m, texts) : m, ALIGNED_OBJECT_PAD);
   return { ...plan, parts };
 }
 

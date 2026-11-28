@@ -168,18 +168,18 @@ test("只分析选区：框按选区换算，再挪回文档坐标；铺满选�
   assert.match(plan.dropped[0], /铺满了整个选区/);
 });
 
-test("自动合并：同一类里大部分重叠或几乎挨着的合成一个；不同类、离得远的不合并", () => {
+test("自动合并：只合并大部分重叠的图形；文字（等着校准）和只是挨得近的不合并", () => {
   const size = { width: 1000, height: 1000 };
   const plan = parseDecomposeAnswer({ parts: [
     { name: "文字“上班哪有”", kind: "text", box: [100, 50, 900, 150] },
     { name: "文字“不疯的！”", kind: "text", box: [300, 155, 900, 300] },
     { name: "奶牛头", box: [575, 315, 1000, 690] },
     { name: "红色奶牛轮廓线", box: [565, 305, 1000, 690] },
+    { name: "印章", box: [530, 320, 562, 370] },
     { name: "键盘", box: [315, 568, 540, 665] },
     { name: "文字“KPI”", kind: "text", box: [300, 600, 500, 640] },
   ] }, size, { pad: 0 });
-  assert.deepEqual(plan.parts.map(p => p.name), ["文字“上班哪有 不疯的！”", "奶牛头和红色奶牛轮廓线", "键盘", "文字“KPI”"]);
-  assert.deepEqual(plan.parts[0].box, { left: 100, top: 50, right: 900, bottom: 300 });
-  assert.deepEqual(plan.parts[1].box, { left: 565, top: 305, right: 1000, bottom: 690 });
-  assert.equal(plan.merged?.length, 2);
+  assert.deepEqual(plan.parts.map(p => p.name), ["文字“上班哪有”", "文字“不疯的！”", "奶牛头和红色奶牛轮廓线", "印章", "键盘", "文字“KPI”"]);
+  assert.deepEqual(plan.parts[2].box, { left: 565, top: 305, right: 1000, bottom: 690 });
+  assert.equal(plan.merged?.length, 1);
 });

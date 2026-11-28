@@ -99,6 +99,21 @@ export function inkMap(p: Pixels): InkMap {
     for (let yy = Math.max(0, y - 1); yy <= Math.min(h - 1, y + 1); yy++) for (let xx = Math.max(0, x - 1); xx <= Math.min(w - 1, x + 1); xx++) n += raw[yy * w + xx];
     if (n >= 3) ink[y * w + x] = 1;
   }
+  // long straight thin lines (a rule beside vertical text, a frame) are not text: a box that fits
+  // the text has them right on its edge
+  const L = Math.max(40, Math.round(0.15 * Math.max(w, h)));
+  const drop: number[] = [];
+  for (let x = 0; x < w; x++) for (let y = 0, run = 0; y <= h; y++) {
+    if (y < h && ink[y * w + x]) { run++; continue; }
+    if (run >= L) for (let k = y - run; k < y; k++) drop.push(k * w + x);
+    run = 0;
+  }
+  for (let y = 0; y < h; y++) for (let x = 0, run = 0; x <= w; x++) {
+    if (x < w && ink[y * w + x]) { run++; continue; }
+    if (run >= L) for (let k = x - run; k < x; k++) drop.push(y * w + k);
+    run = 0;
+  }
+  for (const i of drop) ink[i] = 0;
   const sum = new Uint32Array(W1 * (h + 1));
   for (let y = 0; y < h; y++) {
     let row = 0;
@@ -151,7 +166,7 @@ export function snap(m: InkMap, box: Rect): Rect {
   // along the line (sideways for a wide box, down for a tall one), on over small gaps to more glyphs
   // of the same height (width): a box that stops at a gap between characters, one character short.
   // A neighbour of another size (「¥88」 beside 「双人套餐」) doesn't continue the line.
-  const bridge = Math.max(3, Math.round(0.012 * Math.max(m.width, m.height)));
+  const bridge = Math.max(3, Math.round(0.016 * Math.max(m.width, m.height)));
   const extend = (pos: number, dir: 1 | -1, max: number, limit: number, fits: (i: number) => boolean) => {
     let last = pos, gap = 0;
     for (let p = pos, n = 0; n < limit; p += dir, n++) {
@@ -162,20 +177,24 @@ export function snap(m: InkMap, box: Rect): Rect {
     return last;
   };
   // a glyph of the same line: its ink spans at least half the line's height, inside the line, and
-  // the glyphs nearby (a few pixels either way) do too
-  const spanCol = (x: number) => { let a = -1, z = -1; for (let y = t; y < b; y++) if (m.ink[y * m.width + x]) { if (a < 0) a = y; z = y; } return a < 0 ? 0 : z - a + 1; };
-  const spanRow = (y: number) => { let a = -1, z = -1; for (let x = l; x < r; x++) if (m.ink[y * m.width + x]) { if (a < 0) a = x; z = x; } return a < 0 ? 0 : z - a + 1; };
-  if (r - l >= b - t) {
-    const half = (b - t) / 2;
-    const fitsCol = (x: number) => { const inside = colInk(m, x, t, b); return busy(inside, b - t) && colInk(m, x, t - half, t) + colInk(m, x, b, b + half) <= 0.2 * inside && spanCol(x) >= 0.5 * (b - t); };
-    const lim = Math.round(0.5 * (r - l));
-    r = extend(r, 1, m.width, lim, fitsCol); l = extend(l, -1, m.width, lim, fitsCol);
-  } else {
-    const half = (r - l) / 2;
-    const fitsRow = (y: number) => { const inside = rowInk(m, y, l, r); return busy(inside, r - l) && rowInk(m, y, l - half, l) + rowInk(m, y, r, r + half) <= 0.2 * inside && spanRow(y) >= 0.5 * (r - l); };
-    const lim = Math.round(0.5 * (b - t));
-    b = extend(b, 1, m.height, lim, fitsRow); t = extend(t, -1, m.height, lim, fitsRow);
-  }
+  // the glyphs nearby (a few pixels either way) do too. Done again once the box is tight: the
+  // line's height is only right then (「¥138」's 「1」 left out).
+  const along = () => {
+    const spanCol = (x: number) => { let a = -1, z = -1; for (let y = t; y < b; y++) if (m.ink[y * m.width + x]) { if (a < 0) a = y; z = y; } return a < 0 ? 0 : z - a + 1; };
+    const spanRow = (y: number) => { let a = -1, z = -1; for (let x = l; x < r; x++) if (m.ink[y * m.width + x]) { if (a < 0) a = x; z = x; } return a < 0 ? 0 : z - a + 1; };
+    if (r - l >= b - t) {
+      const half = (b - t) / 2;
+      const fitsCol = (x: number) => { const inside = colInk(m, x, t, b); return busy(inside, b - t) && colInk(m, x, t - half, t) + colInk(m, x, b, b + half) <= 0.35 * inside && spanCol(x) >= 0.5 * (b - t); };
+      const lim = Math.round(0.5 * (r - l));
+      r = extend(r, 1, m.width, lim, fitsCol); l = extend(l, -1, m.width, lim, fitsCol);
+    } else {
+      const half = (r - l) / 2;
+      const fitsRow = (y: number) => { const inside = rowInk(m, y, l, r); return busy(inside, r - l) && rowInk(m, y, l - half, l) + rowInk(m, y, r, r + half) <= 0.35 * inside && spanRow(y) >= 0.5 * (r - l); };
+      const lim = Math.round(0.5 * (b - t));
+      b = extend(b, 1, m.height, lim, fitsRow); t = extend(t, -1, m.height, lim, fitsRow);
+    }
+  };
+  along();
   // bands of rows (then columns) with ink, wide gaps between them: keep the best one
   const gapY = Math.max(4, Math.round(0.03 * m.height)), gapX = Math.max(4, Math.round(0.03 * m.width));
   const bands = (lo: number, hi: number, has: (i: number) => boolean, gap: number): [number, number][] => {
@@ -206,6 +225,9 @@ export function snap(m: InkMap, box: Rect): Rect {
   const minW = 0.35 * (box.right - box.left), minH = 0.35 * (box.bottom - box.top);
   let cur = tight({ left: l, top: t, right: r, bottom: b });
   if (cur.right - cur.left < minW || cur.bottom - cur.top < minH) return box;
+  ({ left: l, top: t, right: r, bottom: b } = cur);
+  along();
+  cur = tight({ left: l, top: t, right: r, bottom: b });
   const pick = (cands: Rect[]) => {
     if (cands.length < 2) return;
     let best = cur, bestScore = blockScore(m, cur).score;
