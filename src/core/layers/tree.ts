@@ -481,6 +481,25 @@ function baseRows(layers: TreeLayer[], collapsed: ReadonlySet<number>, f: Filter
 }
 
 /** Ids of the groups that contain `id`, innermost first. */
+/**
+ * Photoshop's selection as the list shows it: a layer inside an AI result (one of its variations, or
+ * anything deeper — what Ctrl+click on the canvas with the move tool picks) is the AI layer's row,
+ * the outermost one when they nest. Order kept, no repeats.
+ */
+export function listedSelection(layers: TreeLayer[], ids: readonly number[]): number[] {
+  const byId = new Map(layers.map(l => [l.id, l]));
+  const out: number[] = [];
+  for (const id of ids) {
+    let row = id;
+    for (let p = byId.get(id)?.parentId ?? null; p !== null; p = byId.get(p)?.parentId ?? null) {
+      const g = byId.get(p);
+      if (g && isVariantLayer(g)) row = g.id;
+    }
+    if (!out.includes(row)) out.push(row);
+  }
+  return out;
+}
+
 export function ancestors(layers: TreeLayer[], id: number): number[] {
   const byId = new Map(layers.map(l => [l.id, l])), out: number[] = [];
   for (let p = byId.get(id)?.parentId ?? null; p !== null; p = byId.get(p)?.parentId ?? null) out.push(p);

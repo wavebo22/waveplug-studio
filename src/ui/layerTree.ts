@@ -22,7 +22,7 @@ import { trashAction, trashDropTarget } from "../core/layers/dragTrash.ts";
 import { explainWorkbenchError } from "../core/layers/workbenchCompatibility.ts";
 import { clampThumbPercent, legacyThumbPercent, thumbnailMetrics, THUMB_PERCENT_KEY } from "../core/layers/topControls.ts";
 import { MULTI_EFFECTS } from "../core/layers/effects.ts";
-import { type AdvancedFilter, type Filter, type LayerAction, aiStrayMoves, isAiStray, type StrayMemo, type LayerKind, type LockKey, type MoveStep, type Row, type SmartAction, type TreeLayer, type Where, BLEND_MODES, ancestors, isCompactRow, queryActive, clickSelect, contentUsers, canDropToDelete, type DeleteDragPart, canDropMaskOnto, copyPlan, dropPlan, previewMoveTree, dropZone, filterCounts, isVariantLayer, layerMenu, nextLayerAfterDelete, layerTags, linkPeers, lockPlan, packChips, lockedByGroup, sharedColors, selectionAfterLocalClear, visibleRows } from "../core/layers/tree.ts";
+import { type AdvancedFilter, type Filter, type LayerAction, aiStrayMoves, isAiStray, type StrayMemo, type LayerKind, type LockKey, type MoveStep, type Row, type SmartAction, type TreeLayer, type Where, BLEND_MODES, ancestors, isCompactRow, queryActive, clickSelect, contentUsers, canDropToDelete, type DeleteDragPart, canDropMaskOnto, copyPlan, dropPlan, previewMoveTree, dropZone, filterCounts, isVariantLayer, layerMenu, listedSelection, nextLayerAfterDelete, layerTags, linkPeers, lockPlan, packChips, lockedByGroup, sharedColors, selectionAfterLocalClear, visibleRows } from "../core/layers/tree.ts";
 import { isDuplicateLayerDoubleAction, isLayerDoubleClick, type LayerClickPoint, type LayerDoubleAction } from "../core/layers/clicks.ts";
 import { matchesInlineRenameRow } from "../core/layers/rename.ts";
 import { type DocChecker, type LayerTools, type LayerTree, type PsHost, type RunOptions, type TargetPart, ADJUSTMENTS } from "../ps/host.ts";
@@ -2040,7 +2040,7 @@ export function createLayerTreeView(tree: LayerTree, status: Status, tools?: Lay
           }
           if (!stale && focus && !r.selected.includes(focus.id)) focus = null;
           if (!stale && maskView && !r.selected.includes(maskView.id)) maskView = null;
-          if (!stale || r.docId !== docId) selected = localClear ? new Set() : new Set(r.selected);
+          if (!stale || r.docId !== docId) selected = localClear ? new Set() : new Set(listedSelection(r.layers, r.selected));
           else if (stale) again = selecting === 0;
           const strays = aiStrayMoves(strayMemos.get(r.docId), r.layers);
           strayMemos.set(r.docId, strays.memo);

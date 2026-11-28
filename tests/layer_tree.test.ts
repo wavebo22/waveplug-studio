@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { type MenuItem, type RawLayer, ancestors, effectsOf, isVariantLayer, isCompactRow, packChips, rawProblem, buildTree, clickSelect, contentUsers, deleteTargets, nextLayerAfterDelete, planLayerDeletion, canDropToDelete, canDropMaskOnto, copyPlan, dropPlan, previewMoveTree, dropZone, filterCounts, layerMenu, layerTags, linkPeers, lockPlan, lockedByGroup, rowLockIcons, sharedColors, selectionAfterLocalClear, visibleRows } from "../src/core/layers/tree.ts";
+import { type MenuItem, type RawLayer, ancestors, effectsOf, isVariantLayer, isCompactRow, packChips, rawProblem, buildTree, clickSelect, contentUsers, deleteTargets, nextLayerAfterDelete, planLayerDeletion, canDropToDelete, canDropMaskOnto, copyPlan, dropPlan, previewMoveTree, dropZone, filterCounts, layerMenu, layerTags, linkPeers, listedSelection, lockPlan, lockedByGroup, rowLockIcons, sharedColors, selectionAfterLocalClear, visibleRows } from "../src/core/layers/tree.ts";
 import { ThumbCache, frameThumb, pictureArea, thumbArea } from "../src/core/layers/thumbs.ts";
 
 const raw = (id: number, name: string, kind: number, extra: Partial<RawLayer> = {}): RawLayer =>
@@ -636,4 +636,14 @@ test("pictureArea: a picture frames the layer's own content, clipped to its artb
   assert.deepEqual(pictureArea(null, canvas), canvas);
   assert.deepEqual(pictureArea({ left: 1200, top: 0, right: 1400, bottom: 100 }, canvas), canvas);
   assert.deepEqual(pictureArea({ left: NaN, top: 0, right: 1, bottom: 1 }, canvas), canvas);
+});
+
+test("listedSelection: a variation picked on the canvas (Ctrl+click) selects its AI layer's row", () => {
+  const t = buildTree(doc()), g = t.find(l => l.id === 10)!;
+  const inner = g.ai!.ids[0];
+  assert.deepEqual(listedSelection(t, [inner]), [10]);
+  // with the AI layer itself, or two of its variations: one row, order kept
+  assert.deepEqual(listedSelection(t, [20, inner, 10, ...g.ai!.ids]), [20, 10]);
+  // ordinary layers and unknown ids stay as they are
+  assert.deepEqual(listedSelection(t, [1, 30, 999]), [1, 30, 999]);
 });
