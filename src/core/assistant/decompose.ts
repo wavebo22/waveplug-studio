@@ -5,6 +5,7 @@
 // the thumbnail size, what the model is told, checking its answer, and the crops.
 
 import { type Rect, rectH, rectW } from "../image/region.ts";
+import { type InkMap, alignTextBoxes } from "../image/textAlign.ts";
 
 export type DecomposeDetail = "coarse" | "medium" | "fine";
 export const isDecomposeDetail = (v: string): v is DecomposeDetail => v === "coarse" || v === "medium" || v === "fine";
@@ -24,10 +25,17 @@ export type PartKind = "object" | "text";
 export interface DecomposePart {
   name: string;
   kind: PartKind;
-  /** where the model says the part is, in document pixels */
+  /** what is cut out and removed: `raw` grown by a margin (less once aligned), in document pixels */
   box: Rect;
+  /** where the model says the part is (or, aligned, where the text really is), no margin */
+  raw: Rect;
+  /** text only, after alignTextParts: true — moved onto the text in the picture; false — no text
+   *  block found near it, the model's box kept (未校准: check it, or set it from a selection) */
+  aligned?: boolean;
   /** 去除顺序 within its kind (DeepSeek's `remove`, 1 first; parts it gave none follow in list order) */
   remove: number;
+  /** the box was set from a selection by the user */
+  manual?: boolean;
   /** the box came from the second, zoomed-in look (applyRefine) */
   refined?: boolean;
   /** what is sent to 心宝抠图: the box grown by a margin, in document pixels */
@@ -239,7 +247,7 @@ export function parseDecomposeAnswer(value: unknown, size: Size, crop: CropOptio
     used.set(name, n);
     if (n > 1) name = `${name}（${n}）`;
     const padded = padBox(it.box, size, crop.pad);
-    parts.push({ name, kind: it.kind, box: padded, crop: cropFor(padded, size, crop) });
+    parts.push({ name, kind: it.kind, box: padded, raw: it.box, crop: cropFor(padded, size, crop) });
     rank.push(it.remove);
   }
   return { parts: rankRemoval(parts, rank), dropped, merged };
@@ -351,7 +359,44 @@ export function applyRefine(parts: readonly DecomposePart[], regions: readonly R
     // either box, so the union goes to 心宝抠图
     const q = padBox(raw, size, crop.pad);
     const box = { left: Math.min(q.left, p.box.left), top: Math.min(q.top, p.box.top), right: Math.max(q.right, p.box.right), bottom: Math.max(q.bottom, p.box.bottom) };
-    return { ...p, box, crop: cropFor(box, size, crop), refined: true };
+    const both = { left: Math.min(raw.left, p.raw.left), top: Math.min(raw.top, p.raw.top), right: Math.max(raw.right, p.raw.right), bottom: Math.max(raw.bottom, p.raw.bottom) };
+    return { ...p, box, raw: both, crop: cropFor(box, size, crop), refined: true };
   });
   return { parts: out, notes };
+}
+
+// ── 校准: the text boxes moved onto the text in the picture (core/image/textAlign.ts) ──
+
+/** an aligned box's margin: about 0.8% of the picture's longer side (anti-aliasing, a shadow) —
+ *  the 15% is for DeepSeek's errors, which the alignment took out */
+export const ALIGNED_PAD = 0.02;
+
+/** The plan with its text parts aligned against `m`, an ink map of `area` of the document scaled
+ *  by `scale` (ink-map pixels per document pixel). */
+export function alignTextParts(plan: DecomposePlan, m: InkMap, area: Rect, scale: number, size: Size, crop: CropOptions = {}): DecomposePlan {
+  const texts = plan.parts.map((p, i) => ({ p, i })).filter(x => x.p.kind === "text");
+  if (!texts.length) return plan;
+  const toImg = (r: Rect): Rect => ({ left: (r.left - area.left) * scale, top: (r.top - area.top) * scale, right: (r.right - area.left) * scale, bottom: (r.bottom - area.top) * scale });
+  const toDoc = (r: Rect): Rect => ({
+    left: Math.max(0, Math.floor(r.left / scale + area.left)), top: Math.max(0, Math.floor(r.top / scale + area.top)),
+    right: Math.min(size.width, Math.ceil(r.right / scale + area.left)), bottom: Math.min(size.height, Math.ceil(r.bottom / scale + area.top)),
+  });
+  const got = alignTextBoxes(m, texts.map(x => toImg(x.p.raw)));
+  const parts = plan.parts.slice();
+  texts.forEach(({ p, i }, k) => {
+    const a = got[k];
+    if (!a.ok) { parts[i] = { ...p, aligned: false }; return; }
+    const raw = toDoc(a.box);
+    if (rectW(raw) < 2 || rectH(raw) < 2) { parts[i] = { ...p, aligned: false }; return; }
+    const box = padBox(raw, size, ALIGNED_PAD);
+    parts[i] = { ...p, raw, box, crop: cropFor(box, size, crop), aligned: true };
+  });
+  return { ...plan, parts };
+}
+
+/** The part with its box set by hand (a selection in Photoshop): taken as it is, a small margin. */
+export function withManualBox(p: DecomposePart, sel: Rect, size: Size, crop: CropOptions = {}): DecomposePart {
+  const raw = { left: Math.max(0, Math.round(sel.left)), top: Math.max(0, Math.round(sel.top)), right: Math.min(size.width, Math.round(sel.right)), bottom: Math.min(size.height, Math.round(sel.bottom)) };
+  const box = padBox(raw, size, ALIGNED_PAD);
+  return { ...p, raw, box, crop: cropFor(box, size, crop), aligned: true, manual: true };
 }

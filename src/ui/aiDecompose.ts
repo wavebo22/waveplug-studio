@@ -6,8 +6,9 @@
 import { DEEPSEEK_VISION_MODEL, deepseekJson } from "../core/assistant/deepseek.ts";
 import {
   DECOMPOSE_SYSTEM, type DecomposeDetail, type DecomposePass, type DecomposePlan, combineAnswers, REFINE_BATCH, REFINE_MAX_PIXELS, REFINE_SYSTEM, applyRefine,
-  decomposeRequest, isDecomposeDetail, parseDecomposeAnswer, refineRegion, refineRequest, visionSize,
+  alignTextParts, decomposeRequest, isDecomposeDetail, parseDecomposeAnswer, refineRegion, refineRequest, visionSize, withManualBox,
 } from "../core/assistant/decompose.ts";
+import { inkMap } from "../core/image/textAlign.ts";
 import { withGrid } from "../core/image/grid.ts";
 import { type Pixels, encodePng } from "../core/image/png.ts";
 import type { Rect } from "../core/image/region.ts";
@@ -107,6 +108,21 @@ export function createAiDecompose(d: AiDecomposeDeps) {
   const cutBtn = h("button", { class: "btn tool-btn wide primary", title: "用「抠图」模式当前的工作流（如心宝强化抠图），按上面勾选的部分逐个抠图：每个部分的范围当作选区，名字当作物件名。从后往前做，前面的部分最后在最上面；每个部分一个普通图层（不再是变体组）；顺序是 抠文字 → 去除文字 → 抠图形（从去掉文字的画面上抠）→ 去除图形，去除按 DeepSeek 给的顺序，结果分别合成「去除文字」「去除图形」两个智能对象", onClick: () => void cut() }, "按范围抠图");
   const stopBtn = h("button", { class: "btn tool-btn wide", title: "做完当前这一个就停下，已经抠好的保留", onClick: () => { d.cancelCut?.(); cutting = "正在停止…"; render(); } }, "停止");
   const cutInfo = h("div", { class: "tool-info dc-cut-info" });
+  const manualBtn = h("button", { class: "btn tool-btn wide", title: "点列表里的一项后，在 PS 里用选框工具把它的范围框好，再点这里：PS 当前选区的外框就是这一项的范围（不再用 DeepSeek 的框）", onClick: () => void useSelection() }, "用选区作为范围");
+
+  async function useSelection() {
+    const r = result;
+    if (!r || !shown || busy || cutting) return;
+    if (!d.host.docExists(r.docId)) { d.status(`「${r.docName}」已关闭`, "error"); return; }
+    const b = await d.host.selectionBounds(r.docId).catch(() => null);
+    if (!b) { d.status("PS 里没有选区：先用选框工具框好范围", "error"); return; }
+    const i = shown.i, p = r.plan.parts[i];
+    r.plan.parts[i] = withManualBox(p, b, r.size);
+    skip.delete(i);
+    shown = { i, crop: false };
+    d.status(`「${p.name}」的范围改成了当前选区`, "ok");
+    render();
+  }
 
   async function cut() {
     if (!result || !d.cut || cutting || busy) return;
@@ -166,9 +182,9 @@ export function createAiDecompose(d: AiDecomposeDeps) {
     try {
       // 1. the whole picture (with a grid to read positions against): what the parts are, roughly where
       const t = visionSize(area.right - area.left, area.bottom - area.top);
-      let thumb: string, sent: string;
+      let thumb: string, sent: string, px: Pixels | null = null;
       if (d.host.docPixels) {
-        const px = await d.host.docPixels(doc.id, whole ? null : area, t.width * t.height);
+        px = await d.host.docPixels(doc.id, whole ? null : area, t.width * t.height);
         thumb = dataUrl(px); sent = dataUrl(withGrid(px));
       } else thumb = sent = await d.host.docThumbnail(doc.id, Math.max(t.width, t.height));
       // two looks at the same time, one for the objects and graphics, one for the text
@@ -199,9 +215,20 @@ export function createAiDecompose(d: AiDecomposeDeps) {
         plan = { ...plan, parts: refined.parts };
         notes.push(...refined.notes);
       }
+      // 3. the text boxes moved onto the text in the picture: DeepSeek's places drift by up to ~7%
+      // of the picture (11-28), its reading of what and in which order doesn't
+      if (px && plan.parts.some(p => p.kind === "text")) {
+        const a0 = Date.now();
+        plan = alignTextParts(plan, inkMap(px), area, px.width / (area.right - area.left), size);
+        const texts = plan.parts.filter(p => p.kind === "text"), unsure = texts.filter(p => p.aligned === false);
+        log("info", "decompose align", JSON.stringify({ ms: Date.now() - a0, texts: texts.length, unsure: unsure.map(p => p.name), boxes: texts.map(p => [p.name, p.raw]) }));
+        if (unsure.length) notes.push(`${unsure.length} 块文字在画面上没找到对得上的位置（标「未校准」，没有勾选），用的是 DeepSeek 的框：点一下它，在 PS 里把范围框好，再点「用选区作为范围」`);
+      }
       const secs = ((Date.now() - started) / 1000).toFixed(0);
       result = { docId: doc.id, docName: doc.name, size, thumb, area, plan, notes, note: `${secs} 秒` + (tokens ? ` · ${tokens} tokens` : "") };
       shown = null;
+      // a text box that couldn't be aligned may be anywhere: not cut or removed unless the user says so
+      plan.parts.forEach((p, i) => { if (p.aligned === false) skip.add(i); });
       d.status(plan.parts.length ? `AI 拆层：找到 ${plan.parts.length} 个部分，点一项在画面上选中它` : "AI 拆层：DeepSeek 没有找到可以拆的部分", plan.parts.length ? "ok" : "error");
     } catch (e) {
       log("error", "decompose", e);
@@ -244,13 +271,15 @@ export function createAiDecompose(d: AiDecomposeDeps) {
     replace(info, !r && failed ? failed : !r ? "DeepSeek 看画面，列出文字和图形的大致范围和去除顺序（连在一起的插画算一个）。点一项在画面上选中它的范围；不要的取消勾选。按 抠文字 → 去除文字 → 抠图形 → 去除图形 的顺序做。"
       : `「${r.docName}」${r.area.left || r.area.top || r.area.right !== r.size.width || r.area.bottom !== r.size.height ? "选区内" : ""}：${r.plan.parts.length} 个部分（从前到后）· ${r.note}`);
     (cutBtn as any).disabled = busy || !!cutting;
-    if (!r) { replace(view); replace(list); replace(dropped); view.hidden = list.hidden = dropped.hidden = allBtn.hidden = cutBtn.hidden = stopBtn.hidden = cutInfo.hidden = cleanRow.hidden = true; return; }
+    if (!r) { replace(view); replace(list); replace(dropped); view.hidden = list.hidden = dropped.hidden = allBtn.hidden = cutBtn.hidden = stopBtn.hidden = cutInfo.hidden = cleanRow.hidden = manualBtn.hidden = true; return; }
     const picked = r.plan.parts.length - [...skip].filter(i => i < r.plan.parts.length).length;
     cutBtn.hidden = !d.cut || !r.plan.parts.length || !!cutting;
     cleanRow.hidden = cutBtn.hidden;
     cleanBtns.forEach((b, i) => b.classList.toggle("on", CLEANS[i][0] === clean));
     replace(cutBtn, `按范围抠图（${picked} 个）`);
     stopBtn.hidden = !cutting;
+    manualBtn.hidden = !shown || !!cutting || !r.plan.parts.length;
+    if (shown) replace(manualBtn, `用选区作为「${r.plan.parts[shown.i]?.name ?? ""}」的范围`);
     cutInfo.hidden = !cutting && !cutResult;
     replace(cutInfo, cutting ?? cutResult);
     view.hidden = false;
@@ -267,6 +296,8 @@ export function createAiDecompose(d: AiDecomposeDeps) {
         h("span", { class: "dc-name" }, p.name),
         p.kind === "text" ? h("span", { class: "dc-tag" }, "文字") : null,
         h("span", { class: "dc-tag", title: "去除顺序：同一类里按这个顺序一个一个从原图上去掉" }, `去除 ${p.remove}`),
+        p.manual ? h("span", { class: "dc-tag", title: "范围是你用 PS 选区设定的" }, "手动")
+          : p.aligned === false ? h("span", { class: "dc-tag warn", title: "画面上没找到和它对得上的文字位置，框是 DeepSeek 估的，可能不准：点一下它，在 PS 里框好范围，再点「用选区作为范围」" }, "未校准") : null,
         p.refined === false ? h("span", { class: "dc-tag", title: "放大细化时没找到它，框是第一次看整个画面时估的，可能不准" }, "未细化") : null);
       row.addEventListener("mouseenter", () => boxes[i].classList.add("on"));
       row.addEventListener("mouseleave", () => { if (shown?.i !== i) boxes[i].classList.remove("on"); });
@@ -296,7 +327,7 @@ export function createAiDecompose(d: AiDecomposeDeps) {
       h("div", { class: "seg dc-seg" }, ...detailBtns)),
     h("div", { class: "param", title: "告诉 DeepSeek 哪些要拆、哪些不要，例如「人物和衣服算一个」「文字不用拆」" }, hint),
     h("label", { class: "check-row dc-refine", title: "看完整个画面后，再把每个部分周围放大看一次，框取两次的合并范围（更不容易漏掉边缘）。要多花一两分钟；大图上更有用" }, refineBox, h("span", null, "放大细化每个部分的范围")),
-    runBtn, view, list, allBtn, cleanRow, cutBtn, stopBtn, cutInfo, dropped);
+    runBtn, view, list, manualBtn, allBtn, cleanRow, cutBtn, stopBtn, cutInfo, dropped);
   render();
   return { el };
 }
